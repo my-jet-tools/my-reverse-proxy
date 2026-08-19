@@ -1,0 +1,99 @@
+[package]
+name = "my-reverse-proxy"
+version = "0.1.0"
+edition = "2021"
+default-run = "my-reverse-proxy"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+my-http-server = { tag = "0.9.0", git = "https://github.com/MyJetTools/my-http-server.git", features = [
+    "static-files",
+    "macros",
+] }
+
+# Since my-http-server 0.9.0 the input/object derives live in my-http-utils and the generated
+# code refers to `my_http_utils::...` by path, so every crate using the derives must depend on
+# it directly.
+my-http-utils = { tag = "0.1.0", git = "https://github.com/MyJetTools/my-http-utils.git", features = [
+    "server",
+] }
+
+rust-extensions = { tag = "0.1.5", git = "https://github.com/MyJetTools/rust-extensions.git", features = [
+    "base64",
+    "with-tokio",
+] }
+
+
+rust-common = { tag = "0.1.1", git = "https://github.com/MyJetTools/rust-common.git", features = [
+    "placeholders",
+    "country-code",
+] }
+
+my-settings-reader = { tag = "0.5.0", git = "https://github.com/MyJetTools/my-settings-reader.git" }
+
+my-logger = { tag = "1.3.0", git = "https://github.com/MyJetTools/my-logger.git" }
+
+my-ssh = { git = "https://github.com/MyJetTools/my-ssh.git", tag = "0.1.2" }
+
+encryption = { git = "https://github.com/MyJetTools/encryption.git", tag = "0.1.1" }
+
+
+hyper = { version = "*", features = ["full"] }
+
+tokio = { version = "*", features = ["full"] }
+
+# Pinned by rev, not tag: streaming request bodies (h2 `do_streamed_request`) landed after
+# tag 0.1.2 was cut and the tag has not been moved to it.
+my-http-client = { rev = "ad9855ccaf1a28a25c4ea88e34aa2b0a5d9310a0", git = "https://github.com/MyJetTools/my-http-client.git" }
+
+hyper-util = { version = "*", features = ["tokio", "server", "http1", "http2"] }
+http-body-util = "*"
+bytes = "*"
+pem = "*"
+base64 = "0.22"
+serde = { version = "*", features = ["derive"] }
+futures = "*"
+tokio-util = { version = "*", features = ["compat"] }
+futures-util = { version = "*", features = ["compat"] }
+serde_yaml = "*"
+http2parse = "*"
+rustls-pki-types = "*"
+rustls-pemfile = "*"
+x509-parser = { version = "*", features = ["verify"] }
+my-tls = { tag = "0.1.5", git = "https://github.com/MyJetTools/my-tls.git" }
+async-trait = "*"
+hyper-tungstenite = "*"
+uuid = { version = "*", features = ["v4"] }
+prost = "*"
+prost-types = "*"
+serde_json = "*"
+rcgen = "*"
+time = "*"
+flate2 = "*"
+http = "*"
+prometheus = "*"
+url-utils = { tag = "0.2.0", git = "https://github.com/MyJetTools/url-utils.git" }
+ip2location = "0.6"
+arc-swap = "1"
+parking_lot = "0.12"
+ahash = "0.8"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = "*"
+ssh-key = { version = "0.6", features = ["ed25519", "encryption"] }
+hkdf = "*"
+sha2 = "*"
+zeroize = "1"
+# Pinned to 0.6: ssh-key 0.6 and x25519-dalek 2 use rand_core 0.6.4, and the
+# OsRng we pass into them must be that version's. "*" resolves to 0.9 and the
+# trait bounds stop matching.
+rand_core = { version = "0.6", features = ["std"] }
+zstd = "*"
+
+mcp-server-middleware = { tag = "0.9.0", git = "https://github.com/my-ai-utils/mcp-server-middleware.git" }
+my-ai-agent = { tag = "0.1.0", git = "https://github.com/my-ai-utils/my-ai-agent.git", features = [
+    "agent",
+] }
+
+[build-dependencies]
+ci-utils = { git = "https://github.com/MyJetTools/ci-utils.git", tag = "0.1.3" }

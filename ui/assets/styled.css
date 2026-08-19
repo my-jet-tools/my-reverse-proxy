@@ -1,0 +1,954 @@
+:root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #e1e4e8;
+    --header-bg: #f0f3f6;
+    --row-alt: #fafbfc;
+    --row-hover: #eef4fb;
+    --text: #24292e;
+    --text-dim: #6a737d;
+    --accent: #0366d6;
+    --tree-line: #c8d1da;
+    --badge-bg: #e1ecf4;
+    --badge-text: #0366d6;
+    --debug-bg: #fff5b1;
+    --debug-text: #735c0f;
+    --error-bg: #ffeef0;
+    --error-text: #b31d28;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+        sans-serif;
+    font-size: 14px;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.dashboard {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 24px;
+}
+
+.dashboard > h2 {
+    margin: 0 0 24px 0;
+    font-size: 22px;
+    font-weight: 600;
+}
+
+.loading,
+.error {
+    padding: 32px;
+    text-align: center;
+    color: var(--text-dim);
+}
+
+.error {
+    background: var(--error-bg);
+    color: var(--error-text);
+    border-radius: 6px;
+    text-align: left;
+}
+
+.error pre {
+    font-family: SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+    overflow-x: auto;
+}
+
+/* ---------- Port (level 1) ---------- */
+.port {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 16px;
+    overflow: hidden;
+}
+
+.port-header {
+    padding: 12px 16px;
+    background: linear-gradient(180deg, #f6f8fa 0%, #eef1f5 100%);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.port-header .label {
+    font-size: 12px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}
+
+.port-header .number {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.port-header .conn-count {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: stretch;
+    border-radius: 4px;
+    overflow: hidden;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+}
+
+.port-header .conn-count .label {
+    padding: 4px 8px;
+    background: #4a5568;
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+}
+
+.port-header .conn-count .value {
+    padding: 4px 10px;
+    background: #2d3748;
+    color: #fff;
+    font-variant-numeric: tabular-nums;
+}
+
+.endpoint-header .endpoint-conn {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: stretch;
+    border-radius: 4px;
+    overflow: hidden;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+}
+
+.endpoint-header .endpoint-conn .label {
+    padding: 3px 7px;
+    background: #4a5568;
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+}
+
+.endpoint-header .endpoint-conn .value {
+    padding: 3px 8px;
+    background: #2d3748;
+    color: #fff;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Highlight conn-count chips when count > 0 — green for both port and
+   endpoint variants. */
+.conn-count.active .label {
+    background: #276749;
+}
+
+.conn-count.active .value {
+    background: #38a169;
+    color: #fff;
+}
+
+/* ---------- SSL cert expiration table ---------- */
+.ssl-table-wrap {
+    margin-left: 0;
+    border-left: none;
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-top: 12px;
+    padding-bottom: 16px;
+}
+
+.ssl-table-wrap::before {
+    content: none;
+}
+
+.days-left {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: #fff;
+}
+
+.days-left.ok {
+    background: #38a169;
+}
+
+.days-left.warn {
+    background: #d69e2e;
+}
+
+.days-left.critical {
+    background: #c53030;
+}
+
+/* ---------- Endpoint (level 2, nested under port) ---------- */
+.endpoints {
+    padding: 8px 0 12px 0;
+}
+
+.endpoint {
+    /* tree spine drawn on the left */
+    margin-left: 20px;
+    padding-left: 16px;
+    border-left: 2px solid var(--tree-line);
+    margin-top: 12px;
+    position: relative;
+}
+
+.endpoint::before {
+    /* horizontal connector to host title */
+    content: "";
+    position: absolute;
+    top: 14px;
+    left: -2px;
+    width: 12px;
+    height: 0;
+    border-top: 2px solid var(--tree-line);
+}
+
+.endpoint:first-child {
+    margin-top: 4px;
+}
+
+.endpoint-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0 8px 0;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.type-badge,
+.debug-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: lowercase;
+}
+
+.type-badge {
+    background: var(--badge-bg);
+    color: var(--badge-text);
+}
+
+.debug-badge {
+    background: var(--debug-bg);
+    color: var(--debug-text);
+}
+
+/* ---------- Locations table (level 3) ---------- */
+.locations-wrap {
+    margin-left: 14px;
+    border-left: 2px solid var(--tree-line);
+    padding-left: 16px;
+    position: relative;
+}
+
+.locations-wrap::before {
+    content: "";
+    position: absolute;
+    top: 18px;
+    left: -2px;
+    width: 12px;
+    height: 0;
+    border-top: 2px solid var(--tree-line);
+}
+
+table.locations {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+table.locations thead th {
+    text-align: left;
+    padding: 8px 12px;
+    background: var(--header-bg);
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    border-bottom: 1px solid var(--border);
+}
+
+table.locations tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+
+table.locations tbody tr:last-child td {
+    border-bottom: none;
+}
+
+table.locations tbody tr:nth-child(even) {
+    background: var(--row-alt);
+}
+
+table.locations tbody tr:hover {
+    background: var(--row-hover);
+}
+
+table.locations td.id-string {
+    font-family: SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+    color: var(--text-dim);
+    word-break: break-all;
+}
+
+table.locations td.upstream {
+    font-family: SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+}
+
+/* ---------- Upstream last-attempt status colors ----------
+ * Tints the upstream cell text by the last connect/revive/health-ping
+ * outcome surfaced by the pool. */
+table.locations tbody tr.upstream-ok td.upstream {
+    color: #38a169;
+}
+
+table.locations tbody tr.upstream-error td.upstream {
+    color: #c53030;
+    font-weight: 600;
+}
+
+table.locations tbody tr.upstream-unknown td.upstream {
+    color: #1a202c;
+}
+
+/* ---------- Type pills (location type) ---------- */
+.type-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    text-transform: lowercase;
+    background: #6c757d;
+}
+
+.type-pill.type-http1 {
+    background: #f0ad4e;
+    color: #4a2d00;
+}
+
+.type-pill.type-http2 {
+    background: #5bc0de;
+    color: #003d52;
+}
+
+.type-pill.type-unix-http1 {
+    background: #d9534f;
+}
+
+.type-pill.type-unix-http2 {
+    background: #b94842;
+}
+
+.type-pill.type-static {
+    background: #d9534f;
+}
+
+.type-pill.type-files-path,
+.type-pill.type-files_path {
+    background: #5bc0de;
+    color: #003d52;
+}
+
+.type-pill.type-mcp {
+    background: #8e54e9;
+}
+
+.type-pill.type-drop {
+    background: #6c757d;
+}
+
+.type-pill.type-tcp {
+    background: #6c5ce7;
+}
+
+/* ---------- Listener-type pills (port + endpoint level) ---------- */
+.type-pill.listen-http,
+.type-pill.listen-http1 {
+    background: #f0ad4e;
+    color: #4a2d00;
+}
+
+.type-pill.listen-http2 {
+    background: #428bca;
+    color: #fff;
+}
+
+.type-pill.listen-https,
+.type-pill.listen-https1 {
+    background: #428bca;
+    color: #fff;
+}
+
+.type-pill.listen-https2 {
+    background: #5cb85c;
+    color: #fff;
+}
+
+.type-pill.listen-mcp,
+.type-pill.listen-mcps {
+    background: #8e54e9;
+    color: #fff;
+}
+
+.type-pill.listen-tcp {
+    background: #d9534f;
+    color: #fff;
+}
+
+/* ---------- Endpoint metadata badges (ssl, auth, ip-list) ---------- */
+.endpoint-header .host {
+    font-weight: 600;
+}
+
+.endpoint-header .resolved-ip {
+    font-size: 12px;
+    font-weight: 500;
+    color: #6b7280;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---------- Endpoint metadata row (ssl/auth/ip-list chips) ---------- */
+.endpoint-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 0 8px 0;
+    margin-bottom: 8px;
+}
+
+.meta-chip {
+    display: inline-flex;
+    align-items: stretch;
+    border-radius: 4px;
+    overflow: hidden;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    border: 1px solid transparent;
+}
+
+.meta-chip .label {
+    padding: 4px 8px;
+    background: #4a5568;
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+}
+
+.meta-chip .value {
+    padding: 4px 8px;
+    background: #edf2f7;
+    color: #2d3748;
+    font-family: SFMono-Regular, Consolas, monospace;
+    font-weight: 500;
+}
+
+/* SSL — green accent */
+.meta-chip.ssl .label {
+    background: #2f855a;
+}
+.meta-chip.ssl .value {
+    background: #c6f6d5;
+    color: #1c4532;
+}
+
+/* SSL certificate referenced but not loaded — red warning */
+.meta-chip.ssl.missing .label {
+    background: #c53030;
+}
+.meta-chip.ssl.missing .value {
+    background: #fed7d7;
+    color: #742a2a;
+}
+.meta-chip.ssl.missing .value.state {
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+    font-weight: 700;
+    border-left: 1px solid #fc8181;
+}
+
+/* A button — clicking it opens the certificate upload dialog. */
+.endpoint-header .cert-missing-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    background: #fed7d7;
+    color: #c53030;
+    border: 1px solid #fc8181;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.endpoint-header .cert-missing-badge:hover {
+    background: #c53030;
+    color: #fff;
+}
+
+/* Auth (client cert / google / users) — yellow accent */
+.meta-chip.auth .label {
+    background: #b7791f;
+}
+.meta-chip.auth .value {
+    background: #fefcbf;
+    color: #5f370e;
+}
+
+/* Google-auth — blue tint */
+.meta-chip.auth.google .label {
+    background: #2b6cb0;
+}
+.meta-chip.auth.google .value {
+    background: #bee3f8;
+    color: #2a4365;
+}
+
+/* IP list — gray accent */
+.meta-chip.ip .label {
+    background: #4a5568;
+}
+.meta-chip.ip .value {
+    background: #e2e8f0;
+    color: #2d3748;
+}
+
+/* ---------- Gateway sections ---------- */
+.gateway-empty {
+    padding: 8px 16px 12px 16px;
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: 12px;
+}
+
+/* Per-route breakdown sub-row under a gateway connection */
+.gateway-routes-row > td {
+    background: var(--row-alt);
+    padding: 8px 12px 10px 28px;
+}
+
+table.locations.gateway-routes {
+    width: auto;
+    min-width: 360px;
+    font-size: 12px;
+}
+
+table.locations.gateway-routes thead th {
+    font-size: 10px;
+}
+
+/* ---------- IP whitelist section ---------- */
+.ip-lists {
+    padding: 12px 16px 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.ip-list {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--row-alt);
+    overflow: hidden;
+}
+
+.ip-list-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--header-bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.ip-list-header .id {
+    font-weight: 600;
+    font-family: SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+}
+
+.ip-list-header .count {
+    margin-left: auto;
+    background: #4a5568;
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.ip-list .empty {
+    padding: 8px 12px;
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: 12px;
+}
+
+.ip-entries {
+    padding: 8px 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.ip-entry {
+    background: #edf2f7;
+    color: #2d3748;
+    border: 1px solid #cbd5e0;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: SFMono-Regular, Consolas, monospace;
+    font-size: 11px;
+}
+
+/* ---------- Logs button + dialog ---------- */
+.logs-btn {
+    margin-left: auto;
+    background: var(--badge-bg);
+    color: var(--badge-text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 10px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.logs-btn:hover {
+    background: var(--row-hover);
+}
+
+/* Keep the location-row logs button compact. */
+.locations .logs-btn {
+    margin-left: 0;
+}
+
+.debug-toggle {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.endpoint-header .debug-toggle {
+    margin-left: 8px;
+}
+
+.debug-toggle.on {
+    background: var(--debug-bg);
+    color: var(--debug-text);
+    border-color: var(--debug-text);
+}
+
+.loc-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    white-space: nowrap;
+}
+
+/* ---------- Modal chrome, shared by every dialog ---------- */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(27, 31, 35, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 760px;
+    max-width: 94vw;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+}
+
+/* For dialogs whose content is wide (the logs table). */
+.modal-panel.wide {
+    width: 96vw;
+    max-width: 96vw;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--header-bg);
+    border-bottom: 1px solid var(--border);
+    border-radius: 8px 8px 0 0;
+}
+
+.modal-title {
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.modal-close {
+    margin-left: auto;
+    background: transparent;
+    border: none;
+    font-size: 14px;
+    cursor: pointer;
+    color: var(--text-dim);
+}
+
+.modal-body {
+    padding: 10px 14px;
+    overflow: auto;
+}
+
+.logs-lines {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-family: SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+}
+
+.logs-line {
+    display: flex;
+    gap: 10px;
+    padding: 2px 0;
+    border-bottom: 1px solid var(--row-alt);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.logs-time {
+    color: var(--text-dim);
+    flex: 0 0 auto;
+}
+
+.logs-ip {
+    color: var(--badge-text);
+    flex: 0 0 150px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.logs-flag {
+    height: 12px;
+    width: 18px;
+    object-fit: cover;
+    border: 1px solid var(--border);
+    flex: 0 0 auto;
+}
+
+.logs-msg {
+    flex: 1 1 auto;
+}
+
+.logs-empty {
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 8px 0;
+}
+
+.logs-error {
+    background: var(--error-bg);
+    color: var(--error-text);
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+/* ---------- SSL certificate upload dialog ---------- */
+.cert-form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.cert-target {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    background: var(--row-alt);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.cert-target-row {
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.cert-target-label {
+    flex: 0 0 96px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+    line-height: 18px;
+}
+
+.cert-target-value {
+    font-family: SFMono-Regular, Consolas, monospace;
+    word-break: break-all;
+}
+
+.cert-warning {
+    background: var(--debug-bg);
+    color: var(--debug-text);
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 12px;
+}
+
+.cert-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.cert-label {
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+}
+
+.cert-input {
+    width: 100%;
+    padding: 8px 10px;
+    font-family: SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    resize: vertical;
+}
+
+.cert-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(3, 102, 214, 0.15);
+}
+
+.cert-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.cert-apply-btn {
+    background: var(--accent);
+    color: #fff;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 6px 18px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.cert-apply-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.cert-cancel-btn {
+    background: transparent;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.cert-cancel-btn:hover {
+    background: var(--row-hover);
+}
+
+.cert-error {
+    background: var(--error-bg);
+    color: var(--error-text);
+    border: 1px solid #fc8181;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.cert-success {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    background: #c6f6d5;
+    color: #1c4532;
+    border: 1px solid #9ae6b4;
+    border-radius: 6px;
+    padding: 8px 10px;
+}
+
+.cert-success-title {
+    font-weight: 700;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.cert-success .cert-target-label {
+    color: #276749;
+}
+
+.cert-note {
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.4;
+}

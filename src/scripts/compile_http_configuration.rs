@@ -1,0 +1,151 @@
+use std::sync::Arc;
+
+use crate::{
+    configurations::{
+        EndpointHttpHostString, HttpEndpointInfo, HttpEndpointInfoParams, ListenHttpEndpointType,
+    },
+    settings::HostSettings,
+    settings_compiled::SettingsCompiled,
+};
+
+pub async fn compile_http_configuration(
+    settings_model: &SettingsCompiled,
+    host_endpoint: EndpointHttpHostString,
+    host_settings: &HostSettings,
+    http_type: ListenHttpEndpointType,
+) -> Result<HttpEndpointInfo, String> {
+    let mut locations = Vec::with_capacity(host_settings.locations.len());
+
+    let endpoint_whitelisted_ip =
+        super::get_endpoint_white_listed_ip(settings_model, host_settings).await?;
+
+    let allowed_user_list =
+        crate::scripts::get_endpoint_users_list(settings_model, host_settings).await?;
+
+    let modify_endpoints_headers =
+        crate::scripts::get_endpoint_modify_headers(settings_model, host_settings);
+
+    let (g_auth, ssl_cert_id, client_cert_ca) = if http_type.is_https_or_mcp() {
+        let ssl_cert_id = super::make_sure_ssl_cert_exists(settings_model, host_settings).await?;
+
+        let client_cert_ca =
+            super::make_sure_client_ca_exists(settings_model, host_settings).await?;
+
+        let g_auth = super::get_google_auth_credentials(settings_model, host_settings).await?;
+
+        (g_auth, Some(ssl_cert_id), client_cert_ca)
+    } else {
+        (None, None, None)
+    };
+
+    // Unlike google_auth this is resolved for plain-http endpoints too: an
+    // endpoint behind a TLS-terminating proxy is still reached over https by the
+    // client, and `public_url` is there to say so.
+    let oauth = super::get_oauth_credentials(settings_model, host_settings).await?;
+
+    // `type: mcp` is a raw byte bridge that never parses HTTP, so there is
+    // nothing an authorization server could hook into. Refusing the config is
+    // better than starting up and serving the MCP server unauthenticated.
+    if oauth.is_some() && matches!(http_type, ListenHttpEndpointType::Mcp) {
+        return Err(format!(
+            "Endpoint '{}' is 'type: mcp', which is a raw TCP bridge with no HTTP layer, so \
+             'oauth' can not be applied to it. Use 'type: https' on the endpoint with a location \
+             of 'type: mcp' instead",
+            host_endpoint.as_str()
+        ));
+    }
+
+    // Timeout cascade: HardCode < Global < Endpoint < Location.
+    // Build the global→endpoint layer once, then layer each location on top.
+    let global_timeouts = settings_model.get_global_timeouts();
+    let endpoint_timeouts = global_timeouts.overriden_by(&host_settings.endpoint.timeouts);
+
+    // MCP timeouts are tunnel-scoped: resolved from the endpoint layer, with the
+    // first location allowed to override (an mcp endpoint carries one location).
+    let mut mcp_resolved = endpoint_timeouts.resolve();
+
+    let listen_host = host_endpoint.as_str().to_string();
+    for (location_index, location_settings) in host_settings.locations.iter().enumerate() {
+        let resolved = endpoint_timeouts
+            .overriden_by(&location_settings.timeouts)
+            .resolve();
+
+        if location_index == 0 {
+            mcp_resolved = resolved;
+        }
+
+        let proxy_pass_to = super::compile_location_proxy_pass_to(
+            settings_model,
+            location_settings,
+            &listen_host,
+            &resolved,
+        )
+        .await?;
+
+        // `mcp-h2` talks h2 to the upstream, and the h2 upstream pools are only
+        // reachable from the hyper request path — which runs for `http2` /
+        // `https2` endpoints. Under an http/1 endpoint the request goes through
+        // the byte pipeline, which has no h2 upstream at all, so every request
+        // to this location would fail. Say it at config time.
+        if http_type.is_http1_or_mcp()
+            && matches!(
+                proxy_pass_to.proxy_pass_to,
+                crate::configurations::ProxyPassToConfig::McpHttp2(_)
+            )
+        {
+            return Err(format!(
+                "Endpoint '{}' is 'type: {}' (http/1), but its location '{}' is 'type: {}', which \
+                 requires an http/2 upstream. Use 'type: {}' here, or move the location to an \
+                 endpoint of 'type: http2' / 'type: https2'",
+                listen_host,
+                http_type.as_str(),
+                proxy_pass_to.path,
+                crate::consts::location_type::MCP_H2,
+                crate::consts::location_type::MCP,
+            ));
+        }
+
+        {
+            locations.push(Arc::new(proxy_pass_to));
+        }
+    }
+
+    let mcp_settings = crate::configurations::McpEndpointSettings::new(
+        mcp_resolved.read_timeout,
+        mcp_resolved.write_timeout,
+        host_settings.endpoint.get_mcp_buffer_size(),
+    );
+
+    // Endpoint-scoped transport read/write timeouts (global → endpoint), applied
+    // to every byte pump of this endpoint's connections.
+    let endpoint_resolved = endpoint_timeouts.resolve();
+    let http_timeouts = crate::types::HttpTimeouts {
+        read_timeout: endpoint_resolved.read_timeout,
+        write_timeout: endpoint_resolved.write_timeout,
+    };
+
+    let http_endpoint_info = HttpEndpointInfo::new(HttpEndpointInfoParams {
+        host_endpoint,
+        listen_endpoint_type: http_type,
+        debug: host_settings.endpoint.get_debug(),
+        inject_country: host_settings.endpoint.get_inject_country(),
+        g_auth,
+        oauth,
+        ssl_certificate_id: ssl_cert_id,
+        client_certificate_id: client_cert_ca,
+        whitelisted_ip_list_id: endpoint_whitelisted_ip,
+        locations,
+        allowed_user_list_id: allowed_user_list,
+        modify_headers_settings: modify_endpoints_headers,
+        keep_alive: host_settings.endpoint.keep_alive.unwrap_or(true),
+        track_metrics_by_all_domains: host_settings
+            .endpoint
+            .track_metrics_by_all_domains
+            .unwrap_or(false),
+        hsts: host_settings.endpoint.hsts.unwrap_or(false),
+        mcp_settings,
+        timeouts: http_timeouts,
+    });
+
+    Ok(http_endpoint_info)
+}

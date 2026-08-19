@@ -1,0 +1,420 @@
+use std::{collections::HashMap, sync::Arc};
+
+use my_http_server::macros::MyHttpObjectStructure;
+use serde::*;
+
+// Note for the optional fields below: `MyHttpObjectStructure` (0.9.0+) rejects
+// `#[serde(skip_serializing_if)]`, so an absent optional is now emitted as an explicit json
+// `null` instead of being left out. Consumers must read them as `Option<T>` with
+// `#[serde(default)]` - ui/src/models/configuration.rs already does.
+
+use crate::configurations::*;
+use crate::upstream_status::UpstreamStatus;
+
+use super::*;
+
+#[derive(MyHttpObjectStructure, Serialize)]
+pub struct CurrentConfigurationHttpModel {
+    pub ports: Vec<PortConfigurationHttpModel>,
+    // `HashMap`, not `BTreeMap`: since my-http-server 0.9.0 the `MyHttpObjectStructure` derive
+    // always emits a my-json `JsonValueWriter` impl (it is what serializes the model when it is
+    // used as a *request* body), and my-json implements that trait for `HashMap<String, V>` only -
+    // a `BTreeMap` field simply does not compile. The response itself is still written by
+    // serde_json; the ui restores a stable order by reading these back into a `BTreeMap`.
+    pub users: HashMap<String, Vec<String>>,
+    pub ip_lists: HashMap<String, Vec<String>>,
+    pub errors: HashMap<String, String>,
+    pub remote_connections: HashMap<String, usize>,
+    pub ssl_certs: Vec<SslCertificateInfoModel>,
+    pub gateway_server: Option<GatewayServerStatus>,
+    pub gateway_clients: Vec<GatewayClientStatus>,
+}
+
+#[derive(MyHttpObjectStructure, Serialize)]
+pub struct SslCertificateInfoModel {
+    pub id: String,
+    pub expires_at: String,
+    pub days_left: i64,
+}
+
+impl CurrentConfigurationHttpModel {
+    pub async fn new() -> Self {
+        let (mut ports, ip_lists, errors) = crate::app::APP_CTX
+            .current_configuration
+            .get(|config| {
+                let mut ports = Vec::new();
+
+                for (port, listen_port_config) in &config.listen_tcp_endpoints {
+                    let item = PortConfigurationHttpModel::new(*port, listen_port_config);
+                    ports.push(item);
+                }
+
+                for (path, listen_config) in &config.listen_unix_socket_endpoints {
+                    let item = PortConfigurationHttpModel::new_unix(path.as_str(), listen_config);
+                    ports.push(item);
+                }
+
+                let ip_list = config
+                    .white_list_ip_list
+                    .get_all(|itm| itm.to_list_of_string());
+
+                (ports, ip_list, config.error_configurations.clone())
+            })
+            .await;
+
+        let mut users = HashMap::new();
+
+        {
+            let users_access = crate::app::APP_CTX.allowed_users_list.data.read().await;
+
+            for (id, list) in users_access.iter() {
+                users.insert(id.clone(), list.iter().cloned().collect());
+            }
+        }
+
+        ports.sort_by(|a, b| a.port.cmp(&b.port));
+
+        let ssl_certs = collect_ssl_certs().await;
+
+        // Flag every endpoint that references a real (non self-signed) certificate which is not in
+        // the loaded set — these listen but cut TLS until the certificate arrives.
+        {
+            let loaded_cert_ids: std::collections::HashSet<&str> =
+                ssl_certs.iter().map(|cert| cert.id.as_str()).collect();
+
+            for port in ports.iter_mut() {
+                for endpoint in port.endpoints.iter_mut() {
+                    if let Some(cert_id) = endpoint.ssl_cert_id.as_deref() {
+                        if cert_id != crate::self_signed_cert::SELF_SIGNED_CERT_NAME
+                            && !loaded_cert_ids.contains(cert_id)
+                        {
+                            endpoint.ssl_cert_missing = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut remote_connections = HashMap::new();
+
+        crate::app::APP_CTX
+            .http_over_ssh_clients_pool
+            .fill_connections_amount(&mut remote_connections);
+
+        crate::app::APP_CTX
+            .http2_over_ssh_clients_pool
+            .fill_connections_amount(&mut remote_connections);
+
+        for (name, ready, _total) in crate::app::APP_CTX.h1_tcp_pools.snapshot() {
+            remote_connections.insert(name, ready);
+        }
+        for (name, ready, _total) in crate::app::APP_CTX.h1_tls_pools.snapshot() {
+            remote_connections.insert(name, ready);
+        }
+        for (name, ready, _total) in crate::app::APP_CTX.h1_uds_pools.snapshot() {
+            remote_connections.insert(name, ready);
+        }
+        for (name, ready, _total) in crate::app::APP_CTX.h2_tcp_pools.snapshot() {
+            remote_connections.insert(name, ready);
+        }
+        for (name, ready, _total) in crate::app::APP_CTX.h2_tls_pools.snapshot() {
+            remote_connections.insert(name, ready);
+        }
+        for (name, ready, _total) in crate::app::APP_CTX.h2_uds_pools.snapshot() {
+            remote_connections.insert(name, ready);
+        }
+
+        Self {
+            ports,
+            users,
+            ip_lists: ip_lists.into_iter().collect(),
+            errors: errors.into_iter().collect(),
+            remote_connections,
+            ssl_certs,
+            gateway_server: GatewayServerStatus::new().await,
+            gateway_clients: GatewayClientStatus::new().await,
+        }
+    }
+}
+
+async fn collect_ssl_certs() -> Vec<SslCertificateInfoModel> {
+    use rust_extensions::date_time::DateTimeAsMicroseconds;
+
+    let now = DateTimeAsMicroseconds::now();
+    crate::app::APP_CTX
+        .ssl_certificates_cache
+        .read(|cache| {
+            cache
+                .ssl_certs
+                .get_list()
+                .into_iter()
+                .map(|(id, holder)| {
+                    let expires = holder.ssl_cert.get_cert_info().expires;
+                    let days_left = expires.duration_since(now).get_full_seconds() / 86_400;
+                    SslCertificateInfoModel {
+                        id,
+                        expires_at: expires.to_rfc3339(),
+                        days_left,
+                    }
+                })
+                .collect()
+        })
+        .await
+}
+
+#[derive(MyHttpObjectStructure, Serialize)]
+pub struct PortConfigurationHttpModel {
+    pub port: u16,
+    // Set for unix-socket listeners (host key starting with `/` or `~/`);
+    // `port` is 0 in that case.
+    pub unix_socket: Option<String>,
+    pub r#type: String,
+    pub endpoints: Vec<HttpEndpointInfoModel>,
+    pub inbound_connections: i64,
+}
+
+impl PortConfigurationHttpModel {
+    pub fn new(port: u16, listen_config: &ListenConfiguration) -> Self {
+        let (r#type, endpoints) = build_type_and_endpoints(listen_config);
+
+        // Live count of inbound TCP connections currently open on this port —
+        // maintained by `connection_by_port.inc()/dec()` calls in the listener
+        // accept paths (see `tcp_listener::http`, `http2`, `https`).
+        let inbound_connections = crate::app::APP_CTX
+            .metrics
+            .get(|m| m.connection_by_port.get(&port)) as i64;
+
+        Self {
+            port,
+            unix_socket: None,
+            r#type,
+            endpoints,
+            inbound_connections,
+        }
+    }
+
+    pub fn new_unix(path: &str, listen_config: &ListenConfiguration) -> Self {
+        let (r#type, endpoints) = build_type_and_endpoints(listen_config);
+
+        Self {
+            port: 0,
+            unix_socket: Some(path.to_string()),
+            r#type,
+            endpoints,
+            // No per-port connection metric for unix sockets; per-endpoint
+            // counts are still surfaced inside `endpoints`.
+            inbound_connections: 0,
+        }
+    }
+}
+
+fn build_type_and_endpoints(
+    listen_config: &ListenConfiguration,
+) -> (String, Vec<HttpEndpointInfoModel>) {
+    let mut endpoints = Vec::new();
+
+    let r#type = match listen_config {
+        ListenConfiguration::Http(config) => {
+            for endpoint in &config.endpoints {
+                endpoints.push(HttpEndpointInfoModel::from_http_endpoint(endpoint))
+            }
+            config.listen_endpoint_type.as_str()
+        }
+        ListenConfiguration::Tcp(config) => {
+            endpoints.push(HttpEndpointInfoModel::from_tcp_config(config.as_ref()));
+            "tcp"
+        }
+        ListenConfiguration::Mcp(config) => {
+            for endpoint in &config.endpoints {
+                endpoints.push(HttpEndpointInfoModel::from_http_endpoint(endpoint))
+            }
+            config.listen_endpoint_type.as_str()
+        }
+    };
+
+    (r#type.to_string(), endpoints)
+}
+
+#[derive(MyHttpObjectStructure, Serialize)]
+pub struct HttpEndpointInfoModel {
+    pub host: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub locations: Vec<HttpProxyPassLocationModel>,
+    pub debug: bool,
+    pub inbound_connections: i64,
+    // IP(s) the endpoint domain currently resolves to (refreshed by
+    // `ResolveDomainsIpTimer`). `None` for wildcard hosts, bare IP literals and
+    // domains not yet resolved.
+    pub resolved_ip: Option<String>,
+    pub ip_list: Option<String>,
+    pub allowed_user_list_id: Option<String>,
+    pub ssl_cert_id: Option<String>,
+    // True when this endpoint references a real (non self-signed) SSL certificate that is NOT
+    // currently loaded in the cache — the endpoint listens but cuts TLS until the cert arrives.
+    pub ssl_cert_missing: bool,
+    pub client_cert_id: Option<String>,
+    pub g_auth: Option<String>,
+}
+
+impl HttpEndpointInfoModel {
+    pub fn from_http_endpoint(endpoint: &HttpEndpointInfo) -> Self {
+        let host_key = endpoint.host_endpoint.as_str().to_string();
+        let inbound_connections = crate::app::APP_CTX
+            .metrics
+            .get(|m| m.connection_by_endpoint.get(&host_key))
+            as i64;
+
+        let debug = crate::app::APP_CTX.debug_flags.is_endpoint_debug(&host_key);
+
+        let resolved_ip = endpoint
+            .host_endpoint
+            .get_server_name()
+            .and_then(|domain| crate::app::APP_CTX.resolved_domain_ips.get_display(domain));
+
+        Self {
+            host: host_key,
+            r#type: endpoint.listen_endpoint_type.as_str().to_string(),
+            debug,
+            resolved_ip,
+            allowed_user_list_id: endpoint.allowed_user_list_id.clone(),
+            ip_list: endpoint.whitelisted_ip_list_id.clone(),
+            ssl_cert_id: endpoint
+                .ssl_certificate_id
+                .as_ref()
+                .map(|itm| itm.as_str().to_string()),
+            // Filled in a second pass in `CurrentConfigurationHttpModel::new` once the loaded
+            // certificate set is known.
+            ssl_cert_missing: false,
+            client_cert_id: endpoint
+                .client_certificate_id
+                .as_ref()
+                .map(|itm| itm.as_str().to_string()),
+            g_auth: endpoint.g_auth.clone(),
+            inbound_connections,
+            locations: endpoint
+                .locations
+                .iter()
+                .map(|itm| HttpProxyPassLocationModel::new(itm))
+                .collect(),
+        }
+    }
+
+    pub fn from_tcp_config(config: &TcpEndpointHostConfig) -> Self {
+        let resolved_ip = config
+            .host_endpoint
+            .get_server_name()
+            .and_then(|domain| crate::app::APP_CTX.resolved_domain_ips.get_display(domain));
+
+        Self {
+            host: config.host_endpoint.as_str().to_string(),
+            r#type: "tcp".to_string(),
+            debug: config.debug,
+            resolved_ip,
+            ip_list: config.ip_white_list_id.clone(),
+            inbound_connections: 0,
+            locations: vec![HttpProxyPassLocationModel {
+                path: "".to_string(),
+                to: config.remote_host.to_string(),
+                r#type: "tcp".to_string(),
+                remote_kind: Some(config.remote_host.kind_as_str().to_string()),
+                location_id: 0,
+                id_string: String::new(),
+                debug: false,
+                pool_alive: None,
+                pool_total: None,
+                last_status: None,
+            }],
+            allowed_user_list_id: None,
+            ssl_cert_id: None,
+            ssl_cert_missing: false,
+            client_cert_id: None,
+            g_auth: None,
+        }
+    }
+
+    /*
+    pub fn from_mcp_endpoint(config: &McpEndpointHostConfig) -> Self {
+        Self {
+            host: config.host_endpoint.as_str().to_string(),
+            r#type: "mcp".to_string(),
+            debug: config.debug,
+            ip_list: None,
+            locations: vec![HttpProxyPassLocationModel {
+                path: "".to_string(),
+                to: config.remote_host.to_string(),
+                r#type: "mcp".to_string(),
+            }],
+            allowed_user_list_id: None,
+            ssl_cert_id: None,
+            client_cert_id: None,
+            g_auth: None,
+        }
+    }
+     */
+}
+
+#[derive(MyHttpObjectStructure, Serialize, Debug)]
+pub struct HttpProxyPassLocationModel {
+    pub path: String,
+    pub to: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub remote_kind: Option<String>,
+    pub location_id: i64,
+    pub id_string: String,
+    pub debug: bool,
+    pub pool_alive: Option<usize>,
+    pub pool_total: Option<usize>,
+    pub last_status: Option<i64>,
+}
+
+impl HttpProxyPassLocationModel {
+    pub fn new(src: &Arc<ProxyPassLocationConfig>) -> Self {
+        let (pool_alive, pool_total, last_status) = match lookup_pool_state(src.id) {
+            Some((a, t, s)) => (Some(a), Some(t), Some(s.as_u8() as i64)),
+            None => (None, None, None),
+        };
+
+        let result = Self {
+            path: src.path.to_string(),
+            to: src.get_proxy_pass_to_as_string(),
+            r#type: src.proxy_pass_to.get_type_as_str().to_string(),
+            remote_kind: src
+                .proxy_pass_to
+                .remote_endpoint_kind()
+                .map(|s| s.to_string()),
+            location_id: src.id,
+            id_string: src.id_string.clone(),
+            debug: crate::app::APP_CTX.debug_flags.is_location_debug(src.id),
+            pool_alive,
+            pool_total,
+            last_status,
+        };
+
+        result
+    }
+}
+
+fn lookup_pool_state(location_id: i64) -> Option<(usize, usize, UpstreamStatus)> {
+    let ctx = &crate::app::APP_CTX;
+    if let Some(p) = ctx.h1_tcp_pools.get(location_id) {
+        return Some((p.alive_count(), p.total_count(), p.last_status()));
+    }
+    if let Some(p) = ctx.h1_tls_pools.get(location_id) {
+        return Some((p.alive_count(), p.total_count(), p.last_status()));
+    }
+    if let Some(p) = ctx.h1_uds_pools.get(location_id) {
+        return Some((p.alive_count(), p.total_count(), p.last_status()));
+    }
+    if let Some(p) = ctx.h2_tcp_pools.get(location_id) {
+        return Some((p.alive_count(), p.total_count(), p.last_status()));
+    }
+    if let Some(p) = ctx.h2_tls_pools.get(location_id) {
+        return Some((p.alive_count(), p.total_count(), p.last_status()));
+    }
+    if let Some(p) = ctx.h2_uds_pools.get(location_id) {
+        return Some((p.alive_count(), p.total_count(), p.last_status()));
+    }
+    None
+}

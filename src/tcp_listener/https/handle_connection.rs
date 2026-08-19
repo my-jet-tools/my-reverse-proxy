@@ -1,0 +1,229 @@
+use std::{net::SocketAddr, sync::Arc};
+
+use hyper_util::rt::TokioIo;
+use tokio::io::AsyncWriteExt;
+
+use crate::configurations::*;
+use crate::tcp_listener::http_request_handler::https::HttpsRequestsHandler;
+use crate::types::ConnectionIp;
+
+use super::ClientCertificateData;
+
+pub fn handle_connection(
+    accepted_tcp_stream: tokio::net::TcpStream,
+    connection_ip: impl Into<ConnectionIp>,
+    listening_addr: SocketAddr,
+    configuration: Arc<HttpListenPortConfiguration>,
+    connection_id: u64,
+) {
+    let connection_ip = connection_ip.into();
+
+    crate::app::spawn_named("https_connection", async move {
+        let endpoint_port = listening_addr.port();
+
+        let result = super::utils::lazy_accept_tcp_stream(
+            endpoint_port,
+            accepted_tcp_stream,
+            configuration.clone(),
+        )
+        .await;
+
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                crate::app::APP_CTX.proxy_logs.write_port(
+                    endpoint_port.to_string().as_str(),
+                    connection_ip.get_ip_log(),
+                    format!("Rejected TLS connection: {}", err.message()),
+                );
+                // When the rejection is attributable to a specific endpoint and that endpoint is
+                // in debug mode, also surface it in the endpoint's debug log so every error hitting
+                // the endpoint is visible there while debugging it.
+                if let Some(endpoint_host) = err.endpoint_host() {
+                    if crate::app::APP_CTX
+                        .debug_flags
+                        .is_endpoint_debug(endpoint_host)
+                    {
+                        crate::app::APP_CTX.proxy_logs.write(
+                            endpoint_host,
+                            None,
+                            connection_ip.get_ip_log(),
+                            format!("Rejected TLS connection: {}", err.message()),
+                        );
+                    }
+                }
+                // Most rejections count toward the block-list, weighted by severity; only
+                // white-listed IPs are exempt (enforced in `register_failure`). A server-side
+                // "certificate not loaded yet" is the exception: the cert is expected to arrive
+                // in the background and the client keeps retrying, so we cut the connection
+                // without penalising it.
+                if err.should_penalise_client() {
+                    if let Some(ip) = connection_ip.get_ip_addr() {
+                        crate::app::APP_CTX
+                            .ip_blocklist
+                            .register_failure(ip, err.block_severity());
+                    }
+                }
+                return;
+            }
+        };
+
+        if let Some(ip) = connection_ip.get_ip_addr() {
+            crate::app::APP_CTX.ip_blocklist.register_success(&ip);
+        }
+
+        let (mut tls_stream, endpoint_info, cn_user_name) = result;
+
+        if let Some(ip_list_id) = endpoint_info.whitelisted_ip_list_id.as_ref() {
+            // Match against the CLIENT's IP, not the proxy's own listening
+            // address. Skip when the client IP is unknown (unix socket), matching
+            // the location-level allow-list check in HttpProxyPass::send_payload.
+            if let Some(client_ip) = connection_ip.get_ip_addr() {
+                let is_whitelisted = crate::app::APP_CTX
+                    .current_configuration
+                    .get(|config| {
+                        config
+                            .white_list_ip_list
+                            .is_white_listed(ip_list_id, &client_ip)
+                    })
+                    .await;
+
+                if !is_whitelisted {
+                    // Endpoint-level rejection (endpoint resolved, client IP not allowed) — surface
+                    // it in the endpoint's debug log when the endpoint is being debugged.
+                    if crate::app::APP_CTX
+                        .debug_flags
+                        .is_endpoint_debug(endpoint_info.as_str())
+                    {
+                        crate::app::APP_CTX.proxy_logs.write(
+                            endpoint_info.as_str(),
+                            None,
+                            connection_ip.get_ip_log(),
+                            format!(
+                                "Rejected connection: client IP not in allow-list '{}'",
+                                ip_list_id
+                            ),
+                        );
+                    }
+                    let _ = tls_stream.shutdown().await;
+                    return;
+                }
+            }
+        }
+
+        match endpoint_info.listen_endpoint_type {
+            ListenHttpEndpointType::Http1 => {
+                crate::h1_proxy_server::kick_h1_reverse_proxy_server(
+                    connection_ip,
+                    endpoint_info,
+                    tls_stream,
+                    cn_user_name,
+                    configuration,
+                )
+                .await;
+            }
+            ListenHttpEndpointType::Http2 => {
+                serve_https2(
+                    listening_addr,
+                    connection_ip,
+                    endpoint_info,
+                    tls_stream,
+                    cn_user_name,
+                    endpoint_port,
+                    configuration.clone(),
+                )
+                .await;
+            }
+            ListenHttpEndpointType::Https1 => {
+                crate::h1_proxy_server::kick_h1_reverse_proxy_server(
+                    connection_ip,
+                    endpoint_info,
+                    tls_stream,
+                    cn_user_name,
+                    configuration.clone(),
+                )
+                .await;
+            }
+            ListenHttpEndpointType::Https2 => {
+                serve_https2(
+                    listening_addr,
+                    connection_ip,
+                    endpoint_info,
+                    tls_stream,
+                    cn_user_name,
+                    endpoint_port,
+                    configuration.clone(),
+                )
+                .await;
+            }
+            ListenHttpEndpointType::Mcp => {
+                println!("New mcp connection {}", connection_id);
+                super::super::mcp::run_mcp_connection(tls_stream, &endpoint_info, connection_id)
+                    .await;
+            }
+        }
+    });
+}
+
+async fn serve_https2(
+    listening_addr: SocketAddr,
+    connection_ip: ConnectionIp,
+    endpoint_info: Arc<HttpEndpointInfo>,
+    tls_stream: my_tls::tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    client_certificate: Option<Arc<ClientCertificateData>>,
+    endpoint_port: u16,
+    configuration: Arc<HttpListenPortConfiguration>,
+) {
+    use hyper::service::service_fn;
+    use hyper_util::server::conn::auto::Builder;
+
+    use hyper_util::rt::TokioExecutor;
+
+    let endpoint_name = format!("https://{}", listening_addr);
+
+    crate::app::APP_CTX
+        .prometheus
+        .inc_http2_server_connections(endpoint_name.as_str());
+
+    let endpoint_host_key = endpoint_info.host_endpoint.as_str().to_string();
+    crate::app::APP_CTX.metrics.update(|itm| {
+        itm.connection_by_port.inc(&endpoint_port);
+        itm.connection_by_endpoint.inc(&endpoint_host_key);
+    });
+
+    let mut http_builder = Builder::new(TokioExecutor::new());
+    http_builder.http2().enable_connect_protocol();
+
+    // Per-request HttpProxyPasses are built lazily by the handler (keyed by the
+    // request's Host), so there is no pre-seeded entry to build here.
+    let https_requests_handler =
+        HttpsRequestsHandler::new(connection_ip, configuration, client_certificate);
+
+    let https_requests_handler = Arc::new(https_requests_handler);
+
+    let https_requests_handler_dispose = https_requests_handler.clone();
+
+    let _ = http_builder
+        .clone()
+        .serve_connection(
+            TokioIo::new(tls_stream),
+            service_fn(move |req| {
+                super::super::http_request_handler::https::handle_request(
+                    https_requests_handler.clone(),
+                    req,
+                )
+            }),
+        )
+        .await;
+
+    crate::app::APP_CTX
+        .prometheus
+        .dec_http2_server_connections(endpoint_name.as_str());
+
+    crate::app::APP_CTX.metrics.update(|itm| {
+        itm.connection_by_port.dec(&endpoint_port);
+        itm.connection_by_endpoint.dec(&endpoint_host_key);
+    });
+
+    https_requests_handler_dispose.dispose().await;
+}

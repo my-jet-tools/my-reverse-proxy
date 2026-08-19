@@ -1,0 +1,6 @@
+**/target
+**/Cargo.lock
+.vscode
+.claude
+**/.DS_Store
+.mcp.json

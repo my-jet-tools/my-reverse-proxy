@@ -1,0 +1,224 @@
+use std::{collections::VecDeque, sync::Arc};
+
+use ahash::AHashMap;
+use parking_lot::Mutex;
+use rust_extensions::date_time::DateTimeAsMicroseconds;
+
+/// How many messages we keep per port / endpoint / location.
+const MAX_LOG_MESSAGES: usize = 100;
+
+#[derive(Clone)]
+pub struct ProxyLogEntry {
+    pub moment: DateTimeAsMicroseconds,
+    /// Source IP that initiated the event, when it could be resolved (TCP
+    /// connections). `None` for unix sockets and for messages without a
+    /// connection context. The country is resolved from this IP at the API
+    /// layer — we do not store it here.
+    pub ip: Option<String>,
+    pub message: String,
+}
+
+impl ProxyLogEntry {
+    pub fn new(ip: Option<String>, message: String) -> Self {
+        Self {
+            moment: DateTimeAsMicroseconds::now(),
+            ip,
+            message,
+        }
+    }
+}
+
+/// A resolved (endpoint, location) pair plus the source IP, carried into
+/// spawned tasks (websocket pumps, ws loops, raw copy pumps) so their
+/// diagnostics land in the right in-memory buffers, attributed to the client.
+#[derive(Clone)]
+pub struct ProxyLogScope {
+    pub endpoint: Arc<String>,
+    pub location_id: i64,
+    pub ip: Option<String>,
+}
+
+impl ProxyLogScope {
+    pub fn new(endpoint: Arc<String>, location_id: i64, ip: Option<String>) -> Self {
+        Self {
+            endpoint,
+            location_id,
+            ip,
+        }
+    }
+
+    /// Debug-gated write — verbose request/response/pump traces, only captured
+    /// when the location is in debug mode.
+    pub fn write(&self, message: String) {
+        if !crate::app::APP_CTX
+            .debug_flags
+            .is_location_debug(self.location_id)
+        {
+            return;
+        }
+        self.write_always(message);
+    }
+
+    /// Always captured (failures / disconnects), regardless of debug mode.
+    pub fn write_always(&self, message: String) {
+        crate::app::APP_CTX.proxy_logs.write(
+            &self.endpoint,
+            Some(self.location_id),
+            self.ip.clone(),
+            message,
+        );
+    }
+}
+
+struct ProxyLogsInner {
+    /// Pre-endpoint logs: a connection hit the listener but we could not resolve
+    /// an endpoint (no config for the port, unknown SNI, Host header missing or
+    /// not matching). Key is the listen identifier — TCP port as a decimal
+    /// string, or the unix-socket path.
+    by_port: AHashMap<String, VecDeque<ProxyLogEntry>>,
+    /// Logs attributed to a resolved endpoint (`host_endpoint` string).
+    by_endpoint: AHashMap<String, VecDeque<ProxyLogEntry>>,
+    /// Logs attributed to a resolved location (`ProxyPassLocationConfig.id`).
+    by_location: AHashMap<i64, VecDeque<ProxyLogEntry>>,
+}
+
+impl ProxyLogsInner {
+    fn new() -> Self {
+        Self {
+            by_port: AHashMap::new(),
+            by_endpoint: AHashMap::new(),
+            by_location: AHashMap::new(),
+        }
+    }
+
+    fn push(buf: &mut VecDeque<ProxyLogEntry>, ip: Option<String>, message: String) {
+        if buf.len() == MAX_LOG_MESSAGES {
+            buf.pop_front();
+        }
+        buf.push_back(ProxyLogEntry::new(ip, message));
+    }
+
+    fn push_into(
+        map: &mut AHashMap<String, VecDeque<ProxyLogEntry>>,
+        key: &str,
+        ip: Option<String>,
+        message: String,
+    ) {
+        match map.get_mut(key) {
+            Some(buf) => Self::push(buf, ip, message),
+            None => {
+                let mut buf = VecDeque::new();
+                Self::push(&mut buf, ip, message);
+                map.insert(key.to_string(), buf);
+            }
+        }
+    }
+
+    fn push_into_location(&mut self, location_id: i64, ip: Option<String>, message: String) {
+        match self.by_location.get_mut(&location_id) {
+            Some(buf) => Self::push(buf, ip, message),
+            None => {
+                let mut buf = VecDeque::new();
+                Self::push(&mut buf, ip, message);
+                self.by_location.insert(location_id, buf);
+            }
+        }
+    }
+}
+
+/// In-memory ring buffers (last 100 messages) for proxy diagnostics, grouped
+/// along three axes that match the UI hierarchy: port → endpoint → location.
+/// Mirrors the `Metrics` pattern: a `parking_lot::Mutex` with synchronous
+/// methods (logging is on the hot path, nothing is awaited under the lock).
+pub struct ProxyLogs {
+    inner: Mutex<ProxyLogsInner>,
+}
+
+impl ProxyLogs {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(ProxyLogsInner::new()),
+        }
+    }
+
+    /// Pre-endpoint log: a connection hit the listener but no endpoint could be
+    /// resolved. `listen_id` is the TCP port (as a decimal string) or the unix
+    /// socket path. `ip` is the source IP when it could be resolved.
+    pub fn write_port(&self, listen_id: &str, ip: Option<String>, message: String) {
+        let mut inner = self.inner.lock();
+        ProxyLogsInner::push_into(&mut inner.by_port, listen_id, ip, message);
+    }
+
+    /// Log attributed to a resolved endpoint and, when known, the location.
+    /// `ip` identifies the client that initiated the TCP connection.
+    pub fn write(
+        &self,
+        endpoint: &str,
+        location_id: Option<i64>,
+        ip: Option<String>,
+        message: String,
+    ) {
+        let mut inner = self.inner.lock();
+        ProxyLogsInner::push_into(
+            &mut inner.by_endpoint,
+            endpoint,
+            ip.clone(),
+            message.clone(),
+        );
+        if let Some(location_id) = location_id {
+            inner.push_into_location(location_id, ip, message);
+        }
+    }
+
+    /// Root-level contract: EVERY 5xx page the proxy returns to a client goes
+    /// through here, regardless of the serving path (hyper or h1 byte-pipe) —
+    /// so "why did the client get a 5xx" is always answerable from the logs.
+    pub fn write_returned_5xx(
+        &self,
+        endpoint: &str,
+        location_id: Option<i64>,
+        ip: Option<String>,
+        status: u16,
+        failure: String,
+    ) {
+        self.write(
+            endpoint,
+            location_id,
+            ip,
+            format!(
+                "Returned {} to client: upstream failure: {}",
+                status, failure
+            ),
+        );
+    }
+
+    /// Log attributed to a resolved location only (request-building / payload
+    /// details, where the endpoint string is not in scope).
+    pub fn write_location(&self, location_id: i64, ip: Option<String>, message: String) {
+        self.inner
+            .lock()
+            .push_into_location(location_id, ip, message);
+    }
+
+    pub fn get_by_port(&self, listen_id: &str) -> Vec<ProxyLogEntry> {
+        get_snapshot(&self.inner.lock().by_port, listen_id)
+    }
+
+    pub fn get_by_endpoint(&self, endpoint: &str) -> Vec<ProxyLogEntry> {
+        get_snapshot(&self.inner.lock().by_endpoint, endpoint)
+    }
+
+    pub fn get_by_location(&self, location_id: i64) -> Vec<ProxyLogEntry> {
+        match self.inner.lock().by_location.get(&location_id) {
+            Some(buf) => buf.iter().cloned().collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+fn get_snapshot(map: &AHashMap<String, VecDeque<ProxyLogEntry>>, key: &str) -> Vec<ProxyLogEntry> {
+    match map.get(key) {
+        Some(buf) => buf.iter().cloned().collect(),
+        None => Vec::new(),
+    }
+}

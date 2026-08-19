@@ -1,0 +1,72 @@
+use std::{net::SocketAddr, sync::Arc};
+
+use mcp_server_middleware::McpMiddleware;
+use my_http_server::{
+    controllers::swagger::SwaggerMiddleware, MyHttpServer, StaticFilesMiddleware,
+};
+
+use crate::mcp::{
+    GetAppliedSettingsHandler, GetDynamicSettingsHandler, GetProxyLogsHandler,
+    GetProxyStateSnapshotHandler, GetSettingsHandler, GetSslCertificateHandler,
+    GetSslEndpointsStatusHandler, InitSslCertificateHandler, LookupPoolHandler,
+    ReloadSettingsHandler, SetDynamicSettingsHandler,
+};
+
+const DEFAULT_PORT: u16 = 8000;
+
+pub fn start() {
+    let http_port = if let Some(listen_port) = crate::app::APP_CTX.http_control_port {
+        listen_port
+    } else {
+        DEFAULT_PORT
+    };
+
+    let mut http_server = MyHttpServer::new(SocketAddr::from(([0, 0, 0, 0], http_port)));
+
+    let controllers = Arc::new(super::builder::build_controllers());
+
+    let swagger_middleware = SwaggerMiddleware::new(
+        controllers.clone(),
+        crate::app::APP_NAME,
+        crate::app::APP_VERSION,
+    );
+
+    http_server.add_middleware(Arc::new(swagger_middleware));
+
+    let mut mcp = McpMiddleware::new(
+        "/mcp",
+        crate::app::APP_NAME,
+        crate::app::APP_VERSION,
+        "my-reverse-proxy diagnostic snapshots — pools, locations, and their correlation",
+    );
+    mcp.register_tool_call(Arc::new(GetProxyStateSnapshotHandler));
+    mcp.register_tool_call(Arc::new(LookupPoolHandler));
+    mcp.register_tool_call(Arc::new(GetSettingsHandler));
+    mcp.register_tool_call(Arc::new(GetAppliedSettingsHandler));
+    mcp.register_tool_call(Arc::new(ReloadSettingsHandler));
+    mcp.register_tool_call(Arc::new(GetDynamicSettingsHandler));
+    mcp.register_tool_call(Arc::new(SetDynamicSettingsHandler));
+    mcp.register_tool_call(Arc::new(GetProxyLogsHandler));
+    mcp.register_tool_call(Arc::new(GetSslEndpointsStatusHandler));
+    mcp.register_tool_call(Arc::new(GetSslCertificateHandler));
+    mcp.register_tool_call(Arc::new(InitSslCertificateHandler));
+
+    http_server.add_middleware(Arc::new(mcp));
+
+    http_server.add_middleware(controllers);
+
+    // Serves the Dioxus SPA out of `./wwwroot`. UI is a separate crate
+    // (`ui/`); built artifacts are copied here. Falls back
+    // to `index.html` for unknown paths so client-side routing works.
+    let static_files = StaticFilesMiddleware::new()
+        .add_index_file("index.html")
+        .set_not_found_file("index.html".to_string())
+        .with_etag();
+
+    http_server.add_middleware(Arc::new(static_files));
+
+    http_server.start(
+        crate::app::APP_CTX.states.clone(),
+        my_logger::LOGGER.clone(),
+    );
+}
