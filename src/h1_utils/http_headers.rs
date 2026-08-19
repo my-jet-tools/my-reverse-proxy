@@ -255,3 +255,32 @@ mod status_code_tests {
         assert_eq!(parse(src).get_status_code(src), None);
     }
 }
+
+#[cfg(test)]
+mod optional_whitespace_tests {
+    use super::*;
+
+    /// The whitespace after a colon is optional in HTTP, so a head written without
+    /// it must parse to the same thing.
+    #[test]
+    fn a_head_without_whitespace_after_the_colons_parses() {
+        let src = b"POST /upload HTTP/1.1\r\nHost:localhost:8801\r\nContent-Length:10\r\n\r\n";
+        let headers = Http1Headers::parse(src).expect("head must parse");
+
+        assert_eq!(headers.content_length, HttpContentLength::Known(10));
+
+        let host = headers.host_value.expect("host must be found");
+        assert_eq!(&src[host.start..host.end], b"localhost:8801");
+    }
+
+    #[test]
+    fn the_same_head_with_whitespace_parses_identically() {
+        let src = b"POST /upload HTTP/1.1\r\nHost: localhost:8801\r\nContent-Length: 10\r\n\r\n";
+        let headers = Http1Headers::parse(src).expect("head must parse");
+
+        assert_eq!(headers.content_length, HttpContentLength::Known(10));
+
+        let host = headers.host_value.expect("host must be found");
+        assert_eq!(&src[host.start..host.end], b"localhost:8801");
+    }
+}

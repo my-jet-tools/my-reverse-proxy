@@ -34,8 +34,26 @@ impl<'s> HttpHeader<'s> {
         compare_case_insensitive(header_name, value)
     }
 
+    /// Where the value starts: right after the colon, past the optional whitespace.
+    /// HTTP allows none of it (`Name:value`) or several (`Name:\t  value`), so the
+    /// separator is NOT always exactly ": " — assuming it dropped the first
+    /// character of every space-less value (a `Content-Length:1024` was read as
+    /// 24, truncating the relayed body) and went out of bounds on a valueless
+    /// header (`Name:`), panicking the task that was parsing the head.
+    fn value_start(&self) -> usize {
+        let mut start = self.header_separator_index + 1;
+
+        while start < self.header_end
+            && (self.payload[start] == b' ' || self.payload[start] == b'\t')
+        {
+            start += 1;
+        }
+
+        start
+    }
+
     pub fn get_value_as_str(&self) -> Option<&str> {
-        let value = &self.payload[self.header_separator_index + 2..self.header_end];
+        let value = &self.payload[self.value_start()..self.header_end];
 
         match std::str::from_utf8(value) {
             Ok(value) => Some(value.trim()),
@@ -45,7 +63,7 @@ impl<'s> HttpHeader<'s> {
 
     pub fn get_value(&self) -> HeaderPosition {
         HeaderPosition {
-            start: self.header_separator_index + 2,
+            start: self.value_start(),
             end: self.header_end,
         }
     }
@@ -59,24 +77,21 @@ impl<'s> HttpHeader<'s> {
     }
 }
 
+/// Case-insensitive equality of two byte strings.
+///
+/// The length check is not an optimisation: iterating `right` and pulling from
+/// `left` unconditionally panicked whenever `left` was shorter (a client sending
+/// `Upgrade: h2c` — which is what curl does when it tries to upgrade a plaintext
+/// connection to h2 — killed the task comparing it against "websocket"), and
+/// returned true on a mere prefix whenever `left` was longer.
 pub fn compare_case_insensitive(left: &[u8], right: &[u8]) -> bool {
-    let mut h_iter = left.iter();
-    for v in right {
-        let p = h_iter.next().unwrap();
-
-        if v == p {
-            continue;
-        }
-
-        let v = to_lower_case(*v);
-        let p = to_lower_case(*p);
-
-        if v != p {
-            return false;
-        }
+    if left.len() != right.len() {
+        return false;
     }
 
-    true
+    left.iter()
+        .zip(right.iter())
+        .all(|(l, r)| to_lower_case(*l) == to_lower_case(*r))
 }
 
 fn to_lower_case(b: u8) -> u8 {
@@ -89,7 +104,7 @@ fn to_lower_case(b: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use crate::h1_utils::http_header::to_lower_case;
+    use super::*;
 
     #[test]
     fn tests() {
@@ -97,5 +112,68 @@ mod tests {
 
         assert_eq!(to_lower_case(b'a'), b'a');
         assert_eq!(to_lower_case(b'Z'), b'z');
+    }
+
+    /// `header_end` is the end of the header line (its value, without the CRLF).
+    fn header_of(line: &[u8]) -> HttpHeader<'_> {
+        HttpHeader::new(line, 0, line.len()).unwrap()
+    }
+
+    /// The whitespace after the colon is optional in HTTP. Assuming exactly one
+    /// dropped the first character of the value — for Content-Length that silently
+    /// truncated the relayed body and desynced the connection.
+    #[test]
+    fn a_value_is_read_whatever_the_whitespace_after_the_colon() {
+        assert_eq!(
+            header_of(b"Content-Length: 1024").get_usize_value(),
+            Some(1024)
+        );
+        assert_eq!(
+            header_of(b"Content-Length:1024").get_usize_value(),
+            Some(1024)
+        );
+        assert_eq!(
+            header_of(b"Content-Length:\t  1024  ").get_usize_value(),
+            Some(1024)
+        );
+    }
+
+    /// A valueless header is legal and used to panic here: the value slice started
+    /// one byte past its end.
+    #[test]
+    fn a_valueless_header_is_empty_rather_than_a_panic() {
+        assert_eq!(header_of(b"X-Empty:").get_value_as_str(), Some(""));
+        assert_eq!(header_of(b"X-Empty:  ").get_value_as_str(), Some(""));
+        assert_eq!(header_of(b"X-Empty:").get_usize_value(), None);
+    }
+
+    /// The value positions must line up with the same whitespace rule.
+    #[test]
+    fn the_value_position_skips_the_whitespace_too() {
+        let line = b"Host:example.com";
+        let position = header_of(line).get_value();
+        assert_eq!(&line[position.start..position.end], b"example.com");
+    }
+
+    /// The panic this comparison used to be: a client-supplied value shorter than
+    /// what it is compared against.
+    #[test]
+    fn a_shorter_value_does_not_panic() {
+        assert!(!compare_case_insensitive(b"h2c", b"websocket"));
+        assert!(!compare_case_insensitive(b"", b"websocket"));
+    }
+
+    #[test]
+    fn a_prefix_is_not_a_match() {
+        assert!(!compare_case_insensitive(
+            b"websocket-and-more",
+            b"websocket"
+        ));
+    }
+
+    #[test]
+    fn equal_values_match_regardless_of_case() {
+        assert!(compare_case_insensitive(b"WebSocket", b"websocket"));
+        assert!(compare_case_insensitive(b"websocket", b"websocket"));
     }
 }
