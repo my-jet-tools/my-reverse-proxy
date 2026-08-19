@@ -209,6 +209,10 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
     // bytes are remembered, for a possible replay.
     let mut body = RequestBodyPump::new(body_rx);
 
+    // Set once an interim 1xx has been forwarded: from then on the client has seen
+    // bytes, so nothing may be replayed or substituted for it.
+    let mut interim_forwarded = false;
+
     // Deliver the request, replaying it while the client has seen nothing yet.
     // Breaks with a connection whose response head has been read.
     let mut attempt = 0u32;
@@ -219,7 +223,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
         response_is_websocket,
         disconnect_trigger,
         ssh_handler,
-    ) = loop {
+    ) = 'attempt: loop {
         attempt += 1;
         // Whether a replay is still possible is re-checked at every failure site:
         // streaming the body can end the replay window mid-attempt.
@@ -329,28 +333,65 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
         } = owned;
         let mut resp_reader = H1Reader::new(response_read, timeouts);
 
-        let resp_headers = match resp_reader.read_headers().await {
-            Ok(h) => h,
-            Err(err) => {
-                disconnect_trigger.set_value(true);
-                if reused && retries_left && body.is_replayable() && is_stale_connection(&err) {
-                    continue;
+        // An upstream answers an interim `100 Continue` whenever the client asked
+        // for one with `Expect: 100-continue` — which curl and most HTTP libraries
+        // add by themselves to any large upload. It is NOT the response: handed to
+        // the client as one, the client reads "100 Continue" as its final answer
+        // and then waits for a body that never arrives, while the real response is
+        // dropped with the connection. Forward every interim status verbatim (a
+        // proxy must relay 1xx) and keep reading until the final one. 101 is an
+        // upgrade rather than an interim response and is handled further down.
+        let resp_headers = loop {
+            let headers = match resp_reader.read_headers().await {
+                Ok(h) => h,
+                Err(err) => {
+                    disconnect_trigger.set_value(true);
+                    if reused
+                        && retries_left
+                        && body.is_replayable()
+                        && !interim_forwarded
+                        && is_stale_connection(&err)
+                    {
+                        continue 'attempt;
+                    }
+                    let (page, label) = classify_upstream_failure(&err);
+                    crate::app::APP_CTX.proxy_logs.write_returned_5xx(
+                        endpoint,
+                        Some(location_id),
+                        ip.clone(),
+                        502,
+                        format!(
+                            "reading response head from upstream {} ({}): {:?}",
+                            proxy_pass_to.to_string(),
+                            label,
+                            err
+                        ),
+                    );
+                    if interim_forwarded {
+                        // An interim head is already on its way to the client — an
+                        // error page after it would be a second response.
+                        let _ = response_tx.send(ResponseEvent::Abort).await;
+                        return;
+                    }
+                    fail_request(&response_tx, is_mcp, page, &mut body).await;
+                    return;
                 }
-                let (page, label) = classify_upstream_failure(&err);
-                crate::app::APP_CTX.proxy_logs.write_returned_5xx(
-                    endpoint,
-                    Some(location_id),
-                    ip.clone(),
-                    502,
-                    format!(
-                        "reading response head from upstream {} ({}): {:?}",
-                        proxy_pass_to.to_string(),
-                        label,
-                        err
-                    ),
-                );
-                fail_request(&response_tx, is_mcp, page, &mut body).await;
-                return;
+            };
+
+            if !is_interim_response(&headers, resp_reader.loop_buffer.get_data()) {
+                break headers;
+            }
+
+            let interim_head = resp_reader.loop_buffer.get_data()[..headers.end].to_vec();
+            resp_reader.loop_buffer.commit_read(headers.end);
+            interim_forwarded = true;
+
+            if response_tx
+                .send(ResponseEvent::Chunk(interim_head))
+                .await
+                .is_err()
+            {
+                return; // writer/client gone
             }
         };
 
@@ -455,6 +496,16 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
             ssh_handler,
         };
         pool.release(&proxy_pass_to, owned);
+    }
+}
+
+/// Whether this response head is an interim (1xx) one that must be forwarded and
+/// followed by another read, rather than the response itself. 101 is excluded: it
+/// is a protocol upgrade, which is a final answer on this exchange.
+fn is_interim_response(headers: &crate::h1_utils::Http1Headers, data: &[u8]) -> bool {
+    match headers.get_status_code(data) {
+        Some(status) => status < 200 && status != 101,
+        None => false,
     }
 }
 
@@ -715,6 +766,39 @@ mod tests {
             crate::error_templates::UPSTREAM_IS_NOT_HTTP.as_slice()
         );
         assert_eq!(label, "non-HTTP response");
+    }
+
+    fn head_of(src: &[u8]) -> crate::h1_utils::Http1Headers {
+        crate::h1_utils::Http1Headers::parse(src).unwrap()
+    }
+
+    /// The bug this exists for: a `100 Continue` answering the client's
+    /// `Expect: 100-continue` is not the response. Relayed as one, the client reads
+    /// it as its final answer and then waits forever for a body.
+    #[test]
+    fn an_interim_status_is_not_the_response() {
+        let src = b"HTTP/1.1 100 Continue\r\n\r\n";
+        assert!(is_interim_response(&head_of(src), src));
+
+        let src = b"HTTP/1.1 103 Early-Hints\r\n\r\n";
+        assert!(is_interim_response(&head_of(src), src));
+    }
+
+    #[test]
+    fn a_final_status_is_the_response() {
+        let src = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        assert!(!is_interim_response(&head_of(src), src));
+
+        let src = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+        assert!(!is_interim_response(&head_of(src), src));
+    }
+
+    /// 101 is 1xx but it is an upgrade — a final answer on this exchange, handled
+    /// by the websocket branch rather than read past.
+    #[test]
+    fn an_upgrade_is_not_interim() {
+        let src = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+        assert!(!is_interim_response(&head_of(src), src));
     }
 
     /// mcp gets the connection closed instead of an error page — an HTML body is

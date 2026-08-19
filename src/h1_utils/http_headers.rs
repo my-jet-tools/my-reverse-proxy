@@ -18,6 +18,30 @@ pub struct Http1Headers {
 }
 
 impl Http1Headers {
+    /// Status code of a RESPONSE first line (`HTTP/1.1 200 OK`). `None` when the
+    /// first line is a request line instead of a status line.
+    ///
+    /// Needed to tell an interim 1xx response (a `100 Continue` answering the
+    /// client's `Expect: 100-continue`) from the real one: relayed to the client as
+    /// the response, an interim status leaves it waiting for a body that never
+    /// comes.
+    pub fn get_status_code(&self, src: &[u8]) -> Option<u16> {
+        let first_line = &src[..self.first_line_end];
+
+        if !first_line.starts_with(b"HTTP/") {
+            return None;
+        }
+
+        let version_end = first_line.find_byte_pos(b' ', 0)?;
+        let status = &first_line[version_end + 1..];
+        let status_end = status.find_byte_pos(b' ', 0).unwrap_or(status.len());
+
+        std::str::from_utf8(&status[..status_end])
+            .ok()?
+            .parse()
+            .ok()
+    }
+
     pub fn parse(src: &[u8]) -> Option<Self> {
         const HOST_HEADER: &[u8] = b"host";
         const COOKIE_HEADER: &[u8] = b"cookie";
@@ -198,5 +222,36 @@ mod tests {
         assert!(headers.is_some());
         let headers = headers.unwrap();
         assert_eq!(headers.content_length, HttpContentLength::Chunked);
+    }
+}
+
+#[cfg(test)]
+mod status_code_tests {
+    use super::*;
+
+    fn parse(src: &[u8]) -> Http1Headers {
+        Http1Headers::parse(src).unwrap()
+    }
+
+    #[test]
+    fn an_interim_status_is_read_as_such() {
+        let src = b"HTTP/1.1 100 Continue\r\n\r\n";
+        assert_eq!(parse(src).get_status_code(src), Some(100));
+    }
+
+    #[test]
+    fn a_final_status_is_read() {
+        let src = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(parse(src).get_status_code(src), Some(200));
+
+        let src = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(parse(src).get_status_code(src), Some(502));
+    }
+
+    /// A request has no status code — the same parser runs over request heads.
+    #[test]
+    fn a_request_line_has_no_status() {
+        let src = b"POST /upload HTTP/1.1\r\nHost: h\r\n\r\n";
+        assert_eq!(parse(src).get_status_code(src), None);
     }
 }
