@@ -153,9 +153,8 @@ pub fn calc_cert_key(
     private_key: &PrivateKeyDer<'static>,
     certificates: Vec<CertificateDer<'static>>,
 ) -> Result<tokio_rustls::rustls::sign::CertifiedKey, String> {
-    let private_key =
-        tokio_rustls::rustls::crypto::aws_lc_rs::sign::any_supported_type(private_key)
-            .map_err(|err| format!("Unsupported private key: {:?}", err))?;
+    let private_key = tokio_rustls::rustls::crypto::ring::sign::any_supported_type(private_key)
+        .map_err(|err| format!("Unsupported private key: {:?}", err))?;
     Ok(tokio_rustls::rustls::sign::CertifiedKey::new(
         certificates,
         private_key,

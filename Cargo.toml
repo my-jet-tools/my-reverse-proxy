@@ -61,7 +61,9 @@ http2parse = "*"
 rustls-pki-types = "*"
 rustls-pemfile = "*"
 x509-parser = { version = "*", features = ["verify"] }
-my-tls = { tag = "0.1.5", git = "https://github.com/MyJetTools/my-tls.git" }
+my-tls = { tag = "0.1.5", git = "https://github.com/MyJetTools/my-tls.git", features = [
+    "with-ring-crypto-providers",
+] }
 async-trait = "*"
 hyper-tungstenite = "*"
 uuid = { version = "*", features = ["v4"] }

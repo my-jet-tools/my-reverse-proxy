@@ -21,7 +21,12 @@ pub trait HttpRequestReader {
 
             if let Some(right) = parts.next() {
                 if left == param {
-                    return Some(url_utils::decode_from_url_string(right.trim()));
+                    // url-utils returns a `Cow`; keep the borrowed case borrowed
+                    // instead of collapsing both into an allocation.
+                    return Some(match url_utils::decode_from_url_string(right.trim()) {
+                        std::borrow::Cow::Borrowed(value) => StrOrString::create_as_str(value),
+                        std::borrow::Cow::Owned(value) => StrOrString::create_as_string(value),
+                    });
                 }
             }
         }
