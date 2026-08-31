@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use my_http_client::{
-    http2::MyHttp2Client, hyper::MyHttpHyperClientMetrics, MyHttpClientConnector,
-};
+use my_http_client::{hyper::MyHttpHyperClientMetrics, MyHttpClientConnector};
+
+use crate::my_http2_client::MyHttp2Client;
 use parking_lot::Mutex;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 

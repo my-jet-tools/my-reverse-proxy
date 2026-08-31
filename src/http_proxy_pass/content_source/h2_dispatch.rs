@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Full};
-use my_http_client::{http2::MyHttp2Client, MyHttpClientConnector, MyHttpClientDisconnect};
+use my_http_client::{MyHttpClientConnector, MyHttpClientDisconnect};
+
+use crate::my_http2_client::{HyperRequestBody, MyHttp2Client};
 use my_http_client::{HyperResponse, MyHttpClientError};
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
@@ -19,6 +21,17 @@ pub trait H2Sender: Send + Sync {
     async fn do_request(
         &self,
         req: &hyper::Request<Full<Bytes>>,
+        request_timeout: Duration,
+    ) -> Result<HyperResponse, MyHttpClientError>;
+
+    /// Send a request whose body is a stream of frames — the client's own body,
+    /// forwarded as it arrives instead of being buffered first. Consumes the
+    /// request: there is nothing kept to replay, so the call is single-shot by
+    /// construction.
+    async fn do_streamed_request(
+        &self,
+        req: hyper::Request<HyperRequestBody>,
+        content_size: Option<usize>,
         request_timeout: Duration,
     ) -> Result<HyperResponse, MyHttpClientError>;
 
@@ -42,6 +55,15 @@ where
         request_timeout: Duration,
     ) -> Result<HyperResponse, MyHttpClientError> {
         Http2ClientPoolItem::do_request(self, req, request_timeout).await
+    }
+
+    async fn do_streamed_request(
+        &self,
+        req: hyper::Request<HyperRequestBody>,
+        content_size: Option<usize>,
+        request_timeout: Duration,
+    ) -> Result<HyperResponse, MyHttpClientError> {
+        Http2ClientPoolItem::do_streamed_request(self, req, content_size, request_timeout).await
     }
 
     async fn do_extended_connect(
@@ -69,6 +91,15 @@ where
         MyHttp2Client::do_request(self.as_ref(), req, request_timeout).await
     }
 
+    async fn do_streamed_request(
+        &self,
+        req: hyper::Request<HyperRequestBody>,
+        content_size: Option<usize>,
+        request_timeout: Duration,
+    ) -> Result<HyperResponse, MyHttpClientError> {
+        MyHttp2Client::do_streamed_request(self.as_ref(), req, content_size, request_timeout).await
+    }
+
     async fn do_extended_connect(
         &self,
         path: &str,
@@ -90,6 +121,15 @@ where
         request_timeout: Duration,
     ) -> Result<HyperResponse, MyHttpClientError> {
         MyHttp2Client::do_request(self.as_ref(), req, request_timeout).await
+    }
+
+    async fn do_streamed_request(
+        &self,
+        req: hyper::Request<HyperRequestBody>,
+        content_size: Option<usize>,
+        request_timeout: Duration,
+    ) -> Result<HyperResponse, MyHttpClientError> {
+        MyHttp2Client::do_streamed_request(self.as_ref(), req, content_size, request_timeout).await
     }
 
     async fn do_extended_connect(
@@ -119,6 +159,15 @@ where
         request_timeout: Duration,
     ) -> Result<HyperResponse, MyHttpClientError> {
         MyHttp2Client::do_request(self.as_ref(), req, request_timeout).await
+    }
+
+    async fn do_streamed_request(
+        &self,
+        req: hyper::Request<HyperRequestBody>,
+        content_size: Option<usize>,
+        request_timeout: Duration,
+    ) -> Result<HyperResponse, MyHttpClientError> {
+        MyHttp2Client::do_streamed_request(self.as_ref(), req, content_size, request_timeout).await
     }
 
     async fn do_extended_connect(
@@ -333,6 +382,53 @@ where
     }
 
     Err(last_err.unwrap_or(ProxyPassError::UpstreamUnavailable))
+}
+
+/// The streamed twin of [`execute_pooled_h2`]: the request body is the client's
+/// own stream, so there is nothing buffered to replay and there is NO failover —
+/// one live entry, one attempt. A connection-level failure still marks that entry
+/// dead and kicks a background revive, so the NEXT request lands on a healthy
+/// connection; this one is answered with the error.
+///
+/// Extended CONNECT never comes here: a websocket handshake carries no body, so it
+/// stays on the buffered path.
+pub async fn execute_pooled_h2_streamed<TStream, TConnector>(
+    pool: &Arc<H2Pool<TStream, TConnector>>,
+    req: hyper::Request<HyperRequestBody>,
+    content_size: Option<usize>,
+    request_timeout: Duration,
+) -> Result<HttpResponse, ProxyPassError>
+where
+    TStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
+    TConnector: MyHttpClientConnector<TStream> + Send + Sync + 'static,
+    Arc<MyHttp2Client<TStream, TConnector>>: H2Sender,
+{
+    let entry = pool
+        .get_connection()
+        .await
+        .map_err(|_| ProxyPassError::UpstreamUnavailable)?;
+
+    let client = entry.client.load_full();
+
+    match client
+        .do_streamed_request(req, content_size, request_timeout)
+        .await
+    {
+        Ok(response) => {
+            entry.last_success.update(DateTimeAsMicroseconds::now());
+            Ok(HttpResponse::Response(response))
+        }
+        Err(err) => {
+            let err: ProxyPassError = err.into();
+            // A background revive may have already swapped in a fresh client; only
+            // the entry's CURRENT client may kill it.
+            if is_connection_level_error(&err) && Arc::ptr_eq(&client, &entry.client.load_full()) {
+                entry.dead.store(true, Ordering::Relaxed);
+                pool.spawn_revive(entry.clone());
+            }
+            Err(err)
+        }
+    }
 }
 
 /// True for errors that mean the upstream **connection** is unusable (dial

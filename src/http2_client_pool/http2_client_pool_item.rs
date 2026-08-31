@@ -2,7 +2,9 @@ use std::sync::{atomic::AtomicBool, Arc};
 
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, Full};
-use my_http_client::{http2::MyHttp2Client, MyHttpClientConnector, MyHttpClientError};
+use my_http_client::{MyHttpClientConnector, MyHttpClientError};
+
+use crate::my_http2_client::MyHttp2Client;
 
 use super::Http2ClientPoolInner;
 
@@ -44,6 +46,29 @@ impl<
             .as_ref()
             .unwrap()
             .do_request(req, request_timeout)
+            .await;
+
+        if result.is_err() {
+            self.disposed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        result
+    }
+
+    /// The streamed twin of [`Self::do_request`]: the body is the client's own
+    /// stream of frames, so the request is consumed and cannot be replayed.
+    pub async fn do_streamed_request(
+        &self,
+        req: hyper::Request<crate::my_http2_client::HyperRequestBody>,
+        content_size: Option<usize>,
+        request_timeout: std::time::Duration,
+    ) -> Result<hyper::Response<BoxBody<Bytes, String>>, MyHttpClientError> {
+        let result = self
+            .my_http_client
+            .as_ref()
+            .unwrap()
+            .do_streamed_request(req, content_size, request_timeout)
             .await;
 
         if result.is_err() {

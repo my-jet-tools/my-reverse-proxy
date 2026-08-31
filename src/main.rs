@@ -37,6 +37,7 @@ mod ip_db;
 mod h1_remote_connection;
 mod mcp;
 mod metrics;
+mod my_http2_client;
 mod network_stream;
 mod oauth;
 mod ssl;

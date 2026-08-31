@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::Full;
-use my_http_client::{
-    http2::MyHttp2Client, hyper::MyHttpHyperClientMetrics, MyHttpClientConnector,
-};
+use my_http_client::{hyper::MyHttpHyperClientMetrics, MyHttpClientConnector};
+
+use crate::my_http2_client::MyHttp2Client;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
 use crate::upstream_status::UpstreamStatus;

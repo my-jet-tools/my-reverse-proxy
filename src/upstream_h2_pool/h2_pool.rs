@@ -4,7 +4,9 @@ use std::sync::{
 };
 
 use arc_swap::ArcSwap;
-use my_http_client::{http2::MyHttp2Client, MyHttpClientConnector, MyHttpClientError};
+use my_http_client::{MyHttpClientConnector, MyHttpClientError};
+
+use crate::my_http2_client::MyHttp2Client;
 use parking_lot::Mutex;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 

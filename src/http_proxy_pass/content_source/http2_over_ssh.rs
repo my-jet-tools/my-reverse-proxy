@@ -38,4 +38,33 @@ impl Http2OverSshContentSource {
         let response = http_client.do_request(&req, self.request_timeout).await?;
         return Ok(HttpResponse::Response(response));
     }
+
+    /// Same upstream, with the client's request body forwarded as a stream of
+    /// frames instead of being collected first.
+    pub async fn execute_streamed(
+        &self,
+        req: hyper::Request<crate::my_http2_client::HyperRequestBody>,
+        content_size: Option<usize>,
+    ) -> Result<HttpResponse, ProxyPassError> {
+        let http_client = crate::app::APP_CTX.http2_over_ssh_clients_pool.get(
+            self.over_ssh.to_string().into(),
+            self.connect_timeout,
+            || {
+                (
+                    HttpOverSshConnector {
+                        remote_endpoint: self.over_ssh.get_remote_endpoint().to_owned(),
+                        debug: self.debug,
+                        ssh_session: self.ssh_session.clone(),
+                        connect_timeout: self.connect_timeout,
+                    },
+                    crate::app::APP_CTX.prometheus.clone(),
+                )
+            },
+        );
+
+        let response = http_client
+            .do_streamed_request(req, content_size, self.request_timeout)
+            .await?;
+        return Ok(HttpResponse::Response(response));
+    }
 }

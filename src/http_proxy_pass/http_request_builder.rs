@@ -22,9 +22,52 @@ pub enum WebSocketUpgrade {
 }
 
 pub struct TransformedRequest {
-    pub request: hyper::Request<Full<Bytes>>,
+    pub request: TransformedRequestBody,
     pub req_parts: Parts,
     pub web_socket_upgrade: Option<WebSocketUpgrade>,
+}
+
+/// The upstream request, in the only two shapes an upstream can take it.
+pub enum TransformedRequestBody {
+    /// Body buffered in memory. Required whenever the body itself is handled here
+    /// — gzip compression needs it whole, a websocket handshake is replayed from
+    /// it — or when the upstream client only takes `Full<Bytes>` (everything that
+    /// is not h2).
+    Buffered(hyper::Request<Full<Bytes>>),
+    /// Body forwarded frame by frame, exactly as it arrives from the client:
+    /// nothing is collected, whatever size it is. h2 upstreams only.
+    Streamed {
+        request: hyper::Request<crate::my_http2_client::HyperRequestBody>,
+        /// `Content-Length` as the client declared it, so the upstream request can
+        /// announce the same size. `None` leaves it unannounced — h2 has no chunked
+        /// framing, an unknown length is simply not declared.
+        content_size: Option<usize>,
+    },
+}
+
+/// What [`HttpRequestBuilder::build_request`] produced: the body only, so the
+/// callers can still assemble the request (and clone the body for a websocket
+/// handshake) themselves.
+enum BuiltBody {
+    Buffered(Full<Bytes>),
+    Streamed {
+        body: crate::my_http2_client::HyperRequestBody,
+        content_size: Option<usize>,
+    },
+}
+
+impl BuiltBody {
+    fn into_transformed(self, parts: Parts) -> TransformedRequestBody {
+        match self {
+            Self::Buffered(body) => {
+                TransformedRequestBody::Buffered(Request::from_parts(parts, body))
+            }
+            Self::Streamed { body, content_size } => TransformedRequestBody::Streamed {
+                request: Request::from_parts(parts, body),
+                content_size,
+            },
+        }
+    }
 }
 
 pub struct HttpRequestBuilder {
@@ -145,7 +188,7 @@ impl HttpRequestBuilder {
 
             return Ok(TransformedRequest {
                 req_parts: parts.clone(),
-                request: Request::from_parts(parts, body),
+                request: body.into_transformed(parts),
                 web_socket_upgrade: None,
             });
         }
@@ -159,31 +202,35 @@ impl HttpRequestBuilder {
         let (parts, body) = self.build_request(location, ip.clone()).await?;
 
         let mut web_socket_upgrade = None;
-        if parts.headers.get("sec-websocket-key").is_some() {
-            if crate::app::APP_CTX
-                .debug_flags
-                .is_location_debug(location.config.id)
-            {
-                crate::app::APP_CTX.proxy_logs.write(
-                    proxy_pass.endpoint_info.host_endpoint.as_str(),
-                    Some(location.config.id),
-                    ip.clone(),
-                    "Detected Upgrade http1->http1".to_string(),
-                );
+        // A handshake is never streamed (see build_request), so it is always the
+        // buffered body that gets replayed into the upgrade.
+        if let BuiltBody::Buffered(buffered) = &body {
+            if parts.headers.get("sec-websocket-key").is_some() {
+                if crate::app::APP_CTX
+                    .debug_flags
+                    .is_location_debug(location.config.id)
+                {
+                    crate::app::APP_CTX.proxy_logs.write(
+                        proxy_pass.endpoint_info.host_endpoint.as_str(),
+                        Some(location.config.id),
+                        ip.clone(),
+                        "Detected Upgrade http1->http1".to_string(),
+                    );
+                }
+
+                let upgrade_req = hyper::Request::from_parts(parts.clone(), buffered.clone());
+                let upgrade_response = hyper_tungstenite::upgrade(upgrade_req, None)?;
+
+                web_socket_upgrade = Some(WebSocketUpgrade::H1 {
+                    upgrade_response: upgrade_response.0,
+                    server_web_socket: upgrade_response.1,
+                });
             }
-
-            let upgrade_req = hyper::Request::from_parts(parts.clone(), body.clone());
-            let upgrade_response = hyper_tungstenite::upgrade(upgrade_req, None)?;
-
-            web_socket_upgrade = Some(WebSocketUpgrade::H1 {
-                upgrade_response: upgrade_response.0,
-                server_web_socket: upgrade_response.1,
-            });
         }
 
         return Ok(TransformedRequest {
             req_parts: parts.clone(),
-            request: Request::from_parts(parts, body),
+            request: body.into_transformed(parts),
 
             web_socket_upgrade,
         });
@@ -268,7 +315,7 @@ impl HttpRequestBuilder {
 
         Ok(TransformedRequest {
             req_parts,
-            request,
+            request: TransformedRequestBody::Buffered(request),
             web_socket_upgrade: Some(WebSocketUpgrade::H2 {
                 upgrade_response,
                 on_upgrade,
@@ -377,7 +424,7 @@ impl HttpRequestBuilder {
 
         Ok(TransformedRequest {
             req_parts,
-            request,
+            request: TransformedRequestBody::Buffered(request),
             web_socket_upgrade: Some(WebSocketUpgrade::H2 {
                 upgrade_response,
                 on_upgrade,
@@ -449,7 +496,7 @@ impl HttpRequestBuilder {
 
         return Ok(TransformedRequest {
             req_parts,
-            request,
+            request: TransformedRequestBody::Buffered(request),
             web_socket_upgrade: None,
         });
     }
@@ -496,7 +543,7 @@ impl HttpRequestBuilder {
         self,
         location: &ProxyPassLocation,
         ip: Option<String>,
-    ) -> Result<(Parts, Full<Bytes>), ProxyPassError> {
+    ) -> Result<(Parts, BuiltBody), ProxyPassError> {
         use http_body_util::BodyExt;
 
         let compress = location.compress;
@@ -509,6 +556,50 @@ impl HttpRequestBuilder {
         let mut parts = self.parts.clone();
 
         rewrite_mcp_path(&mut parts.uri, location);
+
+        let content_size = parts
+            .headers
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<usize>().ok());
+
+        // Forward the body straight through when the upstream can take it as a
+        // stream: the client's frames go out as they arrive and nothing is held in
+        // memory, whatever the size of the upload. Ruled out when the body itself
+        // has to be handled right here — gzip needs it whole, a websocket
+        // handshake is replayed from it — and when there is provably no body,
+        // which keeps a bodyless request on the buffered path that still has
+        // upstream failover.
+        let stream_the_body = location.content_source.can_stream_request_body()
+            && !compress
+            && parts.headers.get("sec-websocket-key").is_none()
+            && content_size != Some(0)
+            && !hyper::body::Body::is_end_stream(&self.body);
+
+        if stream_the_body {
+            // h2 carries no chunked framing: an unknown length is simply not
+            // announced, and the h1 header saying otherwise must not travel.
+            parts.headers.remove(TRANSFER_ENCODING);
+
+            if debug {
+                crate::app::APP_CTX.proxy_logs.write_location(
+                    location_id,
+                    ip.clone(),
+                    format!(
+                        "[{}]. Streaming request body upstream, announced size: {:?}. Headers: {:?}",
+                        parts.uri, content_size, parts.headers
+                    ),
+                );
+            }
+
+            return Ok((
+                parts,
+                BuiltBody::Streamed {
+                    body: self.body.map_err(|err| err.to_string()).boxed(),
+                    content_size,
+                },
+            ));
+        }
 
         let collected = self.body.collect().await?;
         let bytes = collected.to_bytes();
@@ -546,9 +637,9 @@ impl HttpRequestBuilder {
                 HeaderValue::from_str(compressed_data_len.to_string().as_str()).unwrap(),
             );
 
-            http_body_util::Full::new(compressed_data.into())
+            BuiltBody::Buffered(http_body_util::Full::new(compressed_data.into()))
         } else {
-            into_full_body(bytes, location_id, ip.clone())
+            BuiltBody::Buffered(into_full_body(bytes, location_id, ip.clone()))
         };
 
         if debug {

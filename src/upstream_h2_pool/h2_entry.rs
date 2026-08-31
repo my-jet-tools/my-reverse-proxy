@@ -2,7 +2,9 @@ use std::sync::{atomic::AtomicBool, Arc};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use my_http_client::{http2::MyHttp2Client, MyHttpClientConnector};
+use my_http_client::{MyHttpClientConnector};
+
+use crate::my_http2_client::MyHttp2Client;
 use rust_extensions::date_time::{
     AtomicDateTimeAsMicroseconds, DateTimeAsMicroseconds, DateTimeDuration,
 };
