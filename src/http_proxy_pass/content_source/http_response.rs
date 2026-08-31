@@ -11,6 +11,12 @@ pub enum HttpResponse {
         stream: WebSocketUpgradeStream,
         response: hyper::Response<BoxBody<Bytes, String>>,
         disconnection: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
+        /// Bytes the upstream client already pulled off the socket together with
+        /// the `101` line. In ~96% of connections the server's first frame (the
+        /// one written from its on-connected callback) lands in that same
+        /// `read()`, so it is gone from the socket and has to be handed to the
+        /// websocket decoder explicitly. Empty when there was no such tail.
+        leftover: Vec<u8>,
     },
 }
 

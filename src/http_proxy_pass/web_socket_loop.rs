@@ -28,6 +28,7 @@ pub async fn start_web_socket_loop<
 >(
     server_web_socket: HyperWebsocket,
     to_remote_stream: TStream,
+    to_remote_leftover: Vec<u8>,
     log_scope: crate::app::ProxyLogScope,
     disconnect: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
     trace_payload: bool,
@@ -39,6 +40,7 @@ pub async fn start_web_socket_loop<
         web_socket_loop(
             server_web_socket,
             to_remote_stream,
+            to_remote_leftover,
             log_scope,
             trace_payload,
             domain,
@@ -61,6 +63,7 @@ async fn web_socket_loop<
 >(
     server_web_socket: HyperWebsocket,
     to_remote_stream: TStream,
+    to_remote_leftover: Vec<u8>,
     log_scope: crate::app::ProxyLogScope,
     trace_payload: bool,
     domain: Option<String>,
@@ -68,8 +71,14 @@ async fn web_socket_loop<
 ) {
     let ws_stream = server_web_socket.await;
 
-    let to_remote = WebSocketStream::from_raw_socket(
+    // `from_raw_socket` would start the decoder on an empty buffer and silently
+    // drop whatever the upstream client had already read off the socket — for a
+    // server that writes its first frame from the on-connected callback that is
+    // usually the frame itself, glued to the `101` in one read(). Seed the
+    // decoder with it instead.
+    let to_remote = WebSocketStream::from_partially_read(
         to_remote_stream,
+        to_remote_leftover,
         hyper_tungstenite::tungstenite::protocol::Role::Client,
         None,
     )

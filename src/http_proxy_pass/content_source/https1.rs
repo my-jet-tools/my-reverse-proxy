@@ -54,10 +54,12 @@ impl Https1ContentSource {
                 stream,
                 response,
                 disconnection,
+                leftover,
             } => Ok(HttpResponse::WebSocketUpgrade {
                 stream: WebSocketUpgradeStream::TlsStream(stream),
                 response,
                 disconnection,
+                leftover,
             }),
         }
     }

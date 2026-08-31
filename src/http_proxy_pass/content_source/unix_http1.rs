@@ -54,10 +54,12 @@ impl UnixHttp1ContentSource {
                 stream,
                 response,
                 disconnection,
+                leftover,
             } => Ok(HttpResponse::WebSocketUpgrade {
                 stream: WebSocketUpgradeStream::UnixStream(stream),
                 response,
                 disconnection,
+                leftover,
             }),
         }
     }

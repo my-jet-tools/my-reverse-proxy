@@ -6,7 +6,7 @@ use http_body_util::combinators::BoxBody;
 use hyper_util::rt::TokioIo;
 use my_http_client::utils::into_full_body_response;
 use my_http_client::MyHttpClientDisconnect;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     configurations::*,
@@ -208,6 +208,7 @@ impl HttpProxyPass {
                 stream,
                 response,
                 disconnection,
+                leftover,
             } => {
                 if location_debug {
                     crate::app::APP_CTX.proxy_logs.write(
@@ -249,6 +250,7 @@ impl HttpProxyPass {
                         spawn_websocket_pump(
                             request.web_socket_upgrade,
                             tcp_stream,
+                            leftover,
                             response,
                             log_scope.clone(),
                             disconnection,
@@ -262,6 +264,7 @@ impl HttpProxyPass {
                         spawn_websocket_pump(
                             request.web_socket_upgrade,
                             unix_stream,
+                            leftover,
                             response,
                             log_scope.clone(),
                             disconnection,
@@ -275,6 +278,7 @@ impl HttpProxyPass {
                         spawn_websocket_pump(
                             request.web_socket_upgrade,
                             tls_stream,
+                            leftover,
                             response,
                             log_scope.clone(),
                             disconnection,
@@ -287,6 +291,7 @@ impl HttpProxyPass {
                         spawn_websocket_pump(
                             request.web_socket_upgrade,
                             async_channel,
+                            leftover,
                             response,
                             log_scope.clone(),
                             disconnection,
@@ -299,6 +304,7 @@ impl HttpProxyPass {
                         spawn_h2_websocket_pump(
                             request.web_socket_upgrade,
                             h2_upgraded,
+                            leftover,
                             response,
                             log_scope.clone(),
                             disconnection,
@@ -333,6 +339,7 @@ impl HttpProxyPass {
 fn spawn_websocket_pump<S>(
     web_socket_upgrade: Option<WebSocketUpgrade>,
     upstream: S,
+    upstream_leftover: Vec<u8>,
     fallback_response: hyper::Response<BoxBody<Bytes, String>>,
     log_scope: crate::app::ProxyLogScope,
     disconnection: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
@@ -357,6 +364,7 @@ where
                 super::start_web_socket_loop(
                     server_web_socket,
                     upstream,
+                    upstream_leftover,
                     log_scope,
                     disconnection,
                     trace_payload,
@@ -375,6 +383,7 @@ where
                 pump_h2_extended_connect(
                     on_upgrade,
                     upstream,
+                    upstream_leftover,
                     log_scope,
                     disconnection,
                     domain,
@@ -389,6 +398,7 @@ where
 fn spawn_h2_websocket_pump<S>(
     web_socket_upgrade: Option<WebSocketUpgrade>,
     upstream: S,
+    upstream_leftover: Vec<u8>,
     fallback_response: hyper::Response<BoxBody<Bytes, String>>,
     log_scope: crate::app::ProxyLogScope,
     disconnection: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
@@ -412,6 +422,7 @@ where
                 pump_h2_extended_connect(
                     on_upgrade,
                     upstream,
+                    upstream_leftover,
                     log_scope,
                     disconnection,
                     domain,
@@ -435,6 +446,7 @@ where
 async fn pump_h2_extended_connect<S>(
     on_upgrade: hyper::upgrade::OnUpgrade,
     upstream: S,
+    upstream_leftover: Vec<u8>,
     log_scope: crate::app::ProxyLogScope,
     disconnection: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
     domain: Option<String>,
@@ -451,7 +463,27 @@ async fn pump_h2_extended_connect<S>(
         }
     };
 
-    let upgraded = TokioIo::new(upgraded);
+    let mut upgraded = TokioIo::new(upgraded);
+
+    // This is a raw byte pump, not a websocket decoder, so the leftover is just
+    // written out ahead of the loop — same ordering guarantee `copy_streams`
+    // gives the h1 path by seeding its buffer with it.
+    if !upstream_leftover.is_empty() {
+        if let Some(domain) = domain.as_ref() {
+            crate::app::APP_CTX
+                .traffic
+                .record_ws_s2c(domain, upstream_leftover.len() as u64);
+        }
+
+        if let Err(err) = upgraded.write_all(upstream_leftover.as_slice()).await {
+            log_scope.write(format!(
+                "h2 extended-CONNECT leftover write failed: {:?}",
+                err
+            ));
+            disconnection.web_socket_disconnect();
+            return;
+        }
+    }
 
     // Reads on `client_side` are bytes coming FROM the client → upstream (c2s).
     // Reads on `upstream_side` are bytes coming FROM the upstream → client (s2c).

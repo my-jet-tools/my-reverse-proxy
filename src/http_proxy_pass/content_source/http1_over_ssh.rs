@@ -41,12 +41,14 @@ impl Http1OverSshContentSource {
                 stream,
                 response,
                 disconnection,
+                leftover,
             } => {
                 http_client.upgraded_to_websocket();
                 return Ok(HttpResponse::WebSocketUpgrade {
                     stream: WebSocketUpgradeStream::SshChannel(stream),
                     response,
                     disconnection,
+                    leftover,
                 });
             }
         }

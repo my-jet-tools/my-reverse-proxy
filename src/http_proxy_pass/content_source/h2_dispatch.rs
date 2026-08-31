@@ -286,6 +286,9 @@ pub async fn execute_h2(
             stream: WebSocketUpgradeStream::H2Upgraded(upgraded),
             response,
             disconnection,
+            // hyper hands us the `Upgraded` itself and keeps whatever it read
+            // ahead inside it, so there is no tail to carry over here.
+            leftover: Vec::new(),
         });
     }
 

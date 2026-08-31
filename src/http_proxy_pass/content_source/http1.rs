@@ -99,6 +99,7 @@ impl Http1ContentSource {
                 stream,
                 response,
                 disconnection,
+                leftover,
             } => {
                 if self.is_mcp {
                     println!(
@@ -110,6 +111,7 @@ impl Http1ContentSource {
                     stream: WebSocketUpgradeStream::TcpStream(stream),
                     response,
                     disconnection,
+                    leftover,
                 })
             }
         }
