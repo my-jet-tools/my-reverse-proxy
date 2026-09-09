@@ -1,5 +1,6 @@
 mod get_applied_settings_tool_call;
 mod get_client_ca_endpoints_status_tool_call;
+mod get_client_certificate_ca_tool_call;
 mod get_dynamic_settings_tool_call;
 mod get_proxy_logs_tool_call;
 mod get_proxy_state_snapshot_tool_call;
@@ -14,6 +15,7 @@ mod set_dynamic_settings_tool_call;
 
 pub use get_applied_settings_tool_call::*;
 pub use get_client_ca_endpoints_status_tool_call::*;
+pub use get_client_certificate_ca_tool_call::*;
 pub use get_dynamic_settings_tool_call::*;
 pub use get_proxy_logs_tool_call::*;
 pub use get_proxy_state_snapshot_tool_call::*;

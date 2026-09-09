@@ -85,6 +85,10 @@ pub fn build_controllers() -> ControllersMiddleware {
         super::controllers::client_certificates::GetClientCertificateCaAction,
     ));
 
+    result.register_delete_action(Arc::new(
+        super::controllers::client_certificates::DeleteClientCertificateCaAction,
+    ));
+
     result.register_post_action(Arc::new(super::controllers::ssh::InitPassKeyAction));
 
     result.register_get_action(Arc::new(

@@ -145,11 +145,26 @@ impl SettingsCompiled {
     ) -> Result<(), String> {
         if let Some(ssl) = settings_model.ssl_certificates.take() {
             for itm in ssl {
-                self.ssl_certificates.push(SslCertificatesSettingsModel {
+                let itm = SslCertificatesSettingsModel {
                     id: variables.apply_variables(itm.id)?,
                     certificate: variables.apply_variables_opt(itm.certificate)?,
                     private_key: variables.apply_variables_opt(itm.private_key)?,
-                });
+                };
+
+                // Same reason as for the client certificate ca list: the first match wins, so a
+                // duplicate id quietly shadows the other entry.
+                if self
+                    .ssl_certificates
+                    .iter()
+                    .any(|existing| existing.id == itm.id)
+                {
+                    return Err(format!(
+                        "SSL certificate id '{}' is declared more than once. Ids must be unique - the duplicate would be ignored.",
+                        itm.id
+                    ));
+                }
+
+                self.ssl_certificates.push(itm);
             }
         }
 
@@ -173,6 +188,20 @@ impl SettingsCompiled {
                 // deliberately non-fatal (the endpoint keeps listening so the ca can be uploaded),
                 // and it would otherwise swallow an entry that can never work at all.
                 itm.get_source()?;
+
+                // Lookups take the first match, so a duplicate id silently shadows the other
+                // entry - and with `ca:` optional the shadowed one may be the only one with a
+                // source.
+                if self
+                    .client_certificate_ca
+                    .iter()
+                    .any(|existing| existing.id == itm.id)
+                {
+                    return Err(format!(
+                        "Client certificate ca id '{}' is declared more than once. Ids must be unique - the duplicate would be ignored.",
+                        itm.id
+                    ));
+                }
 
                 self.client_certificate_ca.push(itm);
             }

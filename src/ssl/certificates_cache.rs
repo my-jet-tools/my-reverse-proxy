@@ -33,4 +33,14 @@ impl CertificatesCache {
         let mut inner = self.inner.write().await;
         convert(&mut inner)
     }
+
+    /// Same as [`Self::write`] for a mutation that has to report something back - e.g. a check
+    /// that has to be made under the same lock as the write it guards.
+    pub async fn write_with_result<TResult>(
+        &self,
+        convert: impl FnOnce(&mut CertificatesCacheInner) -> TResult,
+    ) -> TResult {
+        let mut inner = self.inner.write().await;
+        convert(&mut inner)
+    }
 }

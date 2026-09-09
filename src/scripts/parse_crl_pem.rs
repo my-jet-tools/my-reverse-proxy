@@ -45,3 +45,31 @@ pub fn parse_crl_pem(src: &[u8]) -> Result<Vec<CrlRecord>, String> {
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_crl_pem;
+
+    #[test]
+    fn reads_a_well_formed_crl() {
+        // `my_tls` ships a real (empty) CRL - good enough to prove the PEM+DER path works.
+        let records = parse_crl_pem(my_tls::crl::EMPTY_CRL.as_bytes()).unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn broken_material_is_an_error_not_a_panic() {
+        // This is the whole point of not calling `my_tls::crl::read` on operator input.
+        assert!(
+            parse_crl_pem(b"-----BEGIN X509 CRL-----\nnot base64\n-----END X509 CRL-----").is_err()
+        );
+        assert!(parse_crl_pem(b"").is_err());
+        assert!(parse_crl_pem(b"nothing here at all").is_err());
+    }
+
+    #[test]
+    fn a_certificate_is_not_a_revocation_list() {
+        let not_a_crl = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+        assert!(parse_crl_pem(not_a_crl.as_bytes()).is_err());
+    }
+}

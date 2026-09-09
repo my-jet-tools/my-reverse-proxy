@@ -36,6 +36,13 @@ impl ClientCertificatesCache {
         self.data.keys().cloned().collect()
     }
 
+    /// Drops the CA loaded under this id. The endpoints requiring it go back to cutting every
+    /// TLS connection (fail-closed) until a CA is provided again - which is what makes this a
+    /// usable undo for a wrong upload.
+    pub fn remove(&mut self, cert_id: SslCertificateIdRef) -> bool {
+        self.data.remove(cert_id.as_str()).is_some()
+    }
+
     pub fn get_list_of_crl(&self) -> Vec<(String, OverSshConnectionSettings)> {
         let mut result = Vec::new();
 

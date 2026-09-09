@@ -196,7 +196,7 @@ fn render_success(result: &InitClientCaResultModel) -> Element {
                     "No revocation list is in effect for this CA: a client certificate can not be revoked until one is uploaded."
                 }
             }
-            div { class: "cert-note", "{crl_note}" }
+            div { class: "cert-note", "{crl_note}{LIVE_CONNECTIONS_NOTE}" }
         }
     }
 }
@@ -210,6 +210,11 @@ fn crl_source_text(result: &InitClientCaResultModel) -> &'static str {
         _ => "no revocation list",
     }
 }
+
+/// Every note ends with this: mTLS identity is decided during the handshake, so a replacement
+/// (or a new revocation list) does not touch sessions that are already open.
+const LIVE_CONNECTIONS_NOTE: &str =
+    " Connections that are already open keep the CA they handshook with — replacing a compromised CA does not by itself drop the clients connected under it.";
 
 fn crl_note(result: &InitClientCaResultModel) -> &'static str {
     match result.crl_source.as_str() {
