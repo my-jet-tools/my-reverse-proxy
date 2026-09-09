@@ -130,7 +130,7 @@ pub fn ClientCertDialog(
                                 }
                             }
                             div { class: "cert-note",
-                                "This CA decides which clients the endpoint trusts: every client certificate presented to it has to be signed by this CA. Leaving the revocation list empty keeps the one the current CA was loaded with — nothing is un-revoked behind your back. Nothing is stored if the material does not parse or no endpoint requires this id."
+                                "This CA decides which clients the endpoint trusts: every client certificate presented to it has to be signed directly by this CA — paste exactly one certificate (for a root → issuing-CA → client chain, the issuing CA). No CA is loaded under this id yet, so if the configuration declares no 'revocation_list' for it, leaving the box empty installs the CA with NO revocation list. If it does declare one, the proxy loads it itself and refuses the upload when it can not be read."
                             }
                         }
                     }
@@ -159,11 +159,8 @@ fn render_target(request: &ClientCertDialogRequest) -> Element {
 
 fn render_success(result: &InitClientCaResultModel) -> Element {
     let endpoints = result.endpoints.join(", ");
-    let crl_records = if result.crl_kept_from_previous {
-        format!("{} (kept from the replaced CA)", result.crl_records)
-    } else {
-        result.crl_records.to_string()
-    };
+    let crl_records = format!("{} ({})", result.crl_records, crl_source_text(result));
+    let crl_note = crl_note(result);
 
     rsx! {
         div { class: "cert-success",
@@ -189,10 +186,36 @@ fn render_success(result: &InitClientCaResultModel) -> Element {
                     "The uploaded certificate is not marked as a CA (no BasicConstraints CA:TRUE). It works as a trust anchor here, but if you meant to upload an issuing CA, check that you pasted the right file."
                 }
             }
-            div { class: "cert-note",
-                "Used from the next TLS handshake — no reload needed. The CA now has no configured source, so its revocation list is no longer refreshed automatically until the source is re-established."
+            if result.expired {
+                div { class: "cert-warning",
+                    "This CA is already past its expiry date. Client certificate verification here does not check validity dates, so it still works — but it is almost certainly not the file you meant to upload."
+                }
             }
+            if result.crl_records == 0 {
+                div { class: "cert-warning",
+                    "No revocation list is in effect for this CA: a client certificate can not be revoked until one is uploaded."
+                }
+            }
+            div { class: "cert-note", "{crl_note}" }
         }
+    }
+}
+
+/// Where the revocation list the CA ended up with came from - mirrors `crl_source` in the proxy.
+fn crl_source_text(result: &InitClientCaResultModel) -> &'static str {
+    match result.crl_source.as_str() {
+        "uploaded" => "from the list you pasted",
+        "configured_revocation_list" => "loaded from the configured revocation_list",
+        "kept_from_previous" => "kept from the CA it replaced",
+        _ => "no revocation list",
+    }
+}
+
+fn crl_note(result: &InitClientCaResultModel) -> &'static str {
+    match result.crl_source.as_str() {
+        "configured_revocation_list" => "Used from the next TLS handshake — no reload needed. The revocation list keeps being refreshed from the source the configuration declares; the CA certificate itself is now provided by hand and is not re-read from anywhere.",
+        "uploaded" => "Used from the next TLS handshake — no reload needed. Both the CA and the revocation list are now provided by hand: nothing refreshes them until the configured source is re-established.",
+        _ => "Used from the next TLS handshake — no reload needed. The CA now has no configured source, so nothing refreshes it or its revocation list until the source is re-established.",
     }
 }
 

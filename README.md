@@ -62,10 +62,44 @@ client_certificate_ca:
   - id: ca_id
     ca: ~/certs/ca.cer  
     revocation_list: ~/certs/revocation_list.crl
-    
+
+  # Sources are optional. An entry with no `ca:` (or no entry at all, just the id referenced by
+  # an endpoint) means the CA is uploaded at runtime - see "Certificates provided at runtime".
+  - id: uploaded_ca
+
+
 variables:
   my_ssh_config: ssh:user@10.12.13.14:22
 ```
+
+## Certificates provided at runtime
+
+Both certificate kinds can be declared without a source and provided later, without a restart:
+
+- `ssl_certificates`: omit **both** `certificate:` and `private_key:` (specifying only one is an error).
+- `client_certificate_ca`: omit `ca:`. The whole entry may be omitted too - referencing an id from an
+  endpoint is enough. A `revocation_list:` without a `ca:` is refused: a revocation list alone is never
+  applied.
+
+Such an endpoint **starts and keeps listening**, but its TLS handshake is cut until the material arrives -
+nothing is ever served with a missing server certificate, and nothing is served unverified when the client
+CA is missing. The admin ui (served on the control port) marks the endpoint with a red *SSL cert not
+loaded* / *Client cert CA not loaded* badge; clicking it opens a dialog to paste the PEM material. The same
+uploads over the API:
+
+| what | endpoint | notes |
+| --- | --- | --- |
+| TLS server certificate | `POST /api/SslCertificates/Init` (multipart) or `/InitFromPem` (json, base64) | key must match the certificate; the certificate must cover the endpoint's SNI and that of the certificate it replaces |
+| client certificate CA | `POST /api/ClientCertificates/Init` (multipart) or `/InitFromPem` (json, base64) | exactly one certificate - the CA that directly issues the client certificates; replacing a loaded CA with a different authority needs `replace_different_ca=true` |
+
+Reading them back gives metadata only (`GET /api/SslCertificates/Certificate?certId=`,
+`GET /api/ClientCertificates/Ca?caId=`) - no PEM material and never a private key. Both are also exposed
+over MCP (`init_ssl_certificate`, `init_client_certificate_ca`, and the two status tools).
+
+An uploaded certificate is **manually managed**: nothing re-reads or renews it until the configured source
+is re-established with `POST /api/configuration/RefreshSslCertificate` / `RefreshCaCertificate`. The one
+exception is a client CA whose configuration declares a `revocation_list:` - that list is loaded during the
+upload (the upload is refused if it can not be read) and keeps being refreshed from its source.
 
 ## Http request endpoints
 ### Headers

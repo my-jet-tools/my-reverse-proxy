@@ -18,8 +18,14 @@ pub struct InitClientCaResultModel {
     pub ca_id: String,
     pub cn: String,
     pub expires: String,
+    #[serde(default)]
+    pub expired: bool,
     pub is_ca: bool,
     pub endpoints: Vec<String>,
     pub crl_records: usize,
-    pub crl_kept_from_previous: bool,
+    /// `uploaded` | `configured_revocation_list` | `kept_from_previous` | `none`.
+    #[serde(default)]
+    pub crl_source: String,
+    #[serde(default)]
+    pub replaced_different_authority: bool,
 }

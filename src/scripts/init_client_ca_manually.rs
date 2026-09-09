@@ -106,17 +106,20 @@ pub async fn init_client_ca_manually(
 
     // (4) Everything that needs I/O is resolved before the cache is touched: the uploaded CRL, or
     // the one the configuration declares for this ca id.
-    let explicit_crl: Option<(Vec<CrlRecord>, Option<OverSshConnectionSettings>, &'static str)> =
-        match crl_pem {
-            Some(crl_pem) => Some((
-                crate::scripts::parse_crl_pem(crl_pem.as_slice())?,
-                // The pasted list is the operator's explicit intent: it is not tied to a source,
-                // so the refresh timer will not overwrite it.
-                None,
-                crl_source::UPLOADED,
-            )),
-            None => load_configured_revocation_list(ca_id).await?,
-        };
+    let explicit_crl: Option<(
+        Vec<CrlRecord>,
+        Option<OverSshConnectionSettings>,
+        &'static str,
+    )> = match crl_pem {
+        Some(crl_pem) => Some((
+            crate::scripts::parse_crl_pem(crl_pem.as_slice())?,
+            // The pasted list is the operator's explicit intent: it is not tied to a source,
+            // so the refresh timer will not overwrite it.
+            None,
+            crl_source::UPLOADED,
+        )),
+        None => load_configured_revocation_list(ca_id).await?,
+    };
 
     let info = uploaded_ca.get_ca_info();
     let now = DateTimeAsMicroseconds::now();
@@ -210,7 +213,14 @@ pub async fn init_client_ca_manually(
 /// certificates the configuration says are revoked.
 async fn load_configured_revocation_list(
     ca_id: &str,
-) -> Result<Option<(Vec<CrlRecord>, Option<OverSshConnectionSettings>, &'static str)>, String> {
+) -> Result<
+    Option<(
+        Vec<CrlRecord>,
+        Option<OverSshConnectionSettings>,
+        &'static str,
+    )>,
+    String,
+> {
     let settings = crate::app::APP_CTX.applied_settings.load_full();
 
     let Some(settings) = settings else {
