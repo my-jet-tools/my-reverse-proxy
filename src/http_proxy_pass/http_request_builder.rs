@@ -505,6 +505,15 @@ impl HttpRequestBuilder {
         &self.parts.uri
     }
 
+    /// Raw `Authorization` value as received, for the location's `auth_header`
+    /// gate. `None` when the header is absent.
+    pub fn get_authorization_header(&self) -> Option<&[u8]> {
+        self.parts
+            .headers
+            .get(hyper::header::AUTHORIZATION)
+            .map(|value| value.as_bytes())
+    }
+
     /*
        pub fn get_from_query(&self, param: &str) -> Option<String> {
            let query = self.get_uri().query()?;

@@ -27,6 +27,29 @@ pub struct ProxyPassLocationConfig {
     pub auth_header: Option<String>,
 }
 
+/// Byte-for-byte comparison of the configured `auth_header` value against the
+/// request's `Authorization` value after stripping surrounding SP / HTAB. No
+/// scheme parsing on purpose: `Bearer x` and `bearer x` are different values.
+/// An absent header and a wrong value are indistinguishable to the caller.
+pub fn auth_header_matches(expected: &str, actual: Option<&[u8]>) -> bool {
+    match actual {
+        Some(actual) => trim_ascii_blanks(actual) == expected.as_bytes(),
+        None => false,
+    }
+}
+
+fn trim_ascii_blanks(input: &[u8]) -> &[u8] {
+    let mut start = 0;
+    let mut end = input.len();
+    while start < end && (input[start] == b' ' || input[start] == b'\t') {
+        start += 1;
+    }
+    while end > start && (input[end - 1] == b' ' || input[end - 1] == b'\t') {
+        end -= 1;
+    }
+    &input[start..end]
+}
+
 impl ProxyPassLocationConfig {
     pub fn new(
         path: String,
@@ -65,6 +88,17 @@ impl ProxyPassLocationConfig {
     }
     pub fn get_proxy_pass_to_as_string(&self) -> String {
         self.proxy_pass_to.to_string()
+    }
+
+    /// The per-location `auth_header` gate. `actual` is the request's raw
+    /// `Authorization` value (`None` when the header is absent). Shared by the
+    /// h1 byte pipeline and the hyper (h2 endpoint) path so both enforce the
+    /// same rule.
+    pub fn auth_header_accepts(&self, actual: Option<&[u8]>) -> bool {
+        match self.auth_header.as_deref() {
+            Some(expected) => auth_header_matches(expected, actual),
+            None => true,
+        }
     }
 
     pub async fn create_data_source(
@@ -785,4 +819,39 @@ pub(crate) fn make_uds_h2_pool_factory(
         )
     });
     (desc, params, factory)
+}
+
+#[cfg(test)]
+mod auth_header_tests {
+    use super::auth_header_matches;
+
+    #[test]
+    fn exact_value_matches() {
+        assert!(auth_header_matches("Bearer abc", Some(b"Bearer abc")));
+    }
+
+    #[test]
+    fn surrounding_blanks_are_ignored() {
+        assert!(auth_header_matches("Bearer abc", Some(b"  Bearer abc\t")));
+    }
+
+    #[test]
+    fn absent_header_is_refused() {
+        assert!(!auth_header_matches("Bearer abc", None));
+    }
+
+    #[test]
+    fn wrong_value_is_refused() {
+        assert!(!auth_header_matches("Bearer abc", Some(b"Bearer abd")));
+        assert!(!auth_header_matches(
+            "Bearer abc",
+            Some(b"Bearer abc extra")
+        ));
+        assert!(!auth_header_matches("Bearer abc", Some(b"")));
+    }
+
+    #[test]
+    fn scheme_is_case_sensitive() {
+        assert!(!auth_header_matches("Bearer abc", Some(b"bearer abc")));
+    }
 }

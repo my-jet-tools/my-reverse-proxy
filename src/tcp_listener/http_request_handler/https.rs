@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::StatusCode;
@@ -12,10 +11,11 @@ use crate::{
     types::ConnectionIp,
 };
 
+use super::LiveEndpointCache;
+
 pub struct HttpsRequestsHandler {
-    proxy_passes: Mutex<HashMap<String, Arc<HttpProxyPass>>>,
+    endpoints: LiveEndpointCache,
     connection_ip: ConnectionIp,
-    listen_port_config: Arc<HttpListenPortConfiguration>,
     client_certificate: Option<Arc<ClientCertificateData>>,
 }
 
@@ -26,9 +26,8 @@ impl HttpsRequestsHandler {
         client_certificate: Option<Arc<ClientCertificateData>>,
     ) -> Self {
         Self {
-            proxy_passes: Mutex::new(HashMap::new()),
+            endpoints: LiveEndpointCache::new(listen_port_config),
             connection_ip,
-            listen_port_config,
             client_certificate,
         }
     }
@@ -37,6 +36,13 @@ impl HttpsRequestsHandler {
         &self,
         req: &hyper::Request<hyper::body::Incoming>,
     ) -> Result<Arc<HttpProxyPass>, hyper::Result<hyper::Response<BoxBody<Bytes, String>>>> {
+        // Picks up a `reload_settings` that happened while this connection was
+        // open, and drops the cached per-Host proxy passes if it replaced this
+        // port's configuration. Every mTLS / IP / auth check below therefore
+        // runs against the configuration that is live NOW, not the one this
+        // connection was accepted with.
+        let listen_port_config = self.endpoints.load_current().await;
+
         let host: String = if let Some(host) = req.uri().host() {
             host.to_string()
         } else if let Some(host) = req
@@ -52,7 +58,7 @@ impl HttpsRequestsHandler {
             host.to_string()
         } else {
             crate::app::APP_CTX.proxy_logs.write_port(
-                self.listen_port_config.listen_host.get_log_key().as_str(),
+                listen_port_config.listen_host.get_log_key().as_str(),
                 self.connection_ip.get_ip_log(),
                 format!(
                     "Rejected request: can not detect host. Uri:{}. Headers: {:?}",
@@ -68,19 +74,14 @@ impl HttpsRequestsHandler {
 
         let host_key = host.to_ascii_lowercase();
 
-        {
-            let map = self.proxy_passes.lock().unwrap();
-            if let Some(existing) = map.get(&host_key) {
-                return Ok(existing.clone());
-            }
+        if let Some(existing) = self.endpoints.get(&host_key) {
+            return Ok(existing);
         }
 
-        let http_endpoint_info = self
-            .listen_port_config
-            .get_http_endpoint_info(Some(host.as_str()));
+        let http_endpoint_info = listen_port_config.get_http_endpoint_info(Some(host.as_str()));
         let Some(http_endpoint_info) = http_endpoint_info else {
             crate::app::APP_CTX.proxy_logs.write_port(
-                self.listen_port_config.listen_host.get_log_key().as_str(),
+                listen_port_config.listen_host.get_log_key().as_str(),
                 self.connection_ip.get_ip_log(),
                 format!(
                     "Rejected request: no endpoint configured for host [{}]",
@@ -103,7 +104,7 @@ impl HttpsRequestsHandler {
         if !http_endpoint_info.connection_satisfies_client_cert(self.client_certificate.as_deref())
         {
             crate::app::APP_CTX.proxy_logs.write_port(
-                self.listen_port_config.listen_host.get_log_key().as_str(),
+                listen_port_config.listen_host.get_log_key().as_str(),
                 self.connection_ip.get_ip_log(),
                 format!(
                     "Rejected request for host [{}]: endpoint requires a client certificate but the TLS connection presented none or one from a different CA (HTTP/2 coalescing or SNI mismatch)",
@@ -139,7 +140,7 @@ impl HttpsRequestsHandler {
                     .await;
                 if !is_whitelisted {
                     crate::app::APP_CTX.proxy_logs.write_port(
-                        self.listen_port_config.listen_host.get_log_key().as_str(),
+                        listen_port_config.listen_host.get_log_key().as_str(),
                         self.connection_ip.get_ip_log(),
                         format!(
                             "Rejected request for host [{}]: client IP is not in the endpoint allow-list",
@@ -167,7 +168,7 @@ impl HttpsRequestsHandler {
 
         let listening_port_info = HttpListenPortInfo {
             endpoint_type: http_endpoint_info.listen_endpoint_type,
-            listen_host: self.listen_port_config.listen_host.clone(),
+            listen_host: listen_port_config.listen_host.clone(),
         };
 
         // The connection's client-cert identity is scoped to endpoints that
@@ -189,17 +190,9 @@ impl HttpsRequestsHandler {
         )
         .await;
 
-        let http_proxy_pass = Arc::new(http_proxy_pass);
-
-        {
-            let mut map = self.proxy_passes.lock().unwrap();
-            if let Some(existing) = map.get(&host_key) {
-                return Ok(existing.clone());
-            }
-            map.insert(host_key, http_proxy_pass.clone());
-        }
-
-        Ok(http_proxy_pass)
+        Ok(self
+            .endpoints
+            .insert_or_get_existing(host_key, Arc::new(http_proxy_pass)))
     }
 
     pub async fn handle_request(
@@ -215,13 +208,7 @@ impl HttpsRequestsHandler {
     }
 
     pub async fn dispose(&self) {
-        let proxy_passes: Vec<Arc<HttpProxyPass>> = {
-            let mut map = self.proxy_passes.lock().unwrap();
-            map.drain().map(|(_, v)| v).collect()
-        };
-        for proxy_pass in proxy_passes {
-            proxy_pass.dispose().await;
-        }
+        self.endpoints.dispose().await;
     }
 }
 

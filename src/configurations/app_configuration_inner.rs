@@ -42,4 +42,25 @@ impl AppConfigurationInner {
             error_configurations: BTreeMap::new(),
         }
     }
+
+    /// The HTTP port configuration currently applied for a listener, TCP or
+    /// unix. `None` for a port that is not configured or is a raw TCP forward.
+    pub fn get_http_listen_config(
+        &self,
+        listen_host: &crate::types::ListenHost,
+    ) -> Option<Arc<HttpListenPortConfiguration>> {
+        let listen_config = match listen_host {
+            crate::types::ListenHost::Tcp(socket_addr) => {
+                self.listen_tcp_endpoints.get(&socket_addr.port())
+            }
+            crate::types::ListenHost::Unix(socket) => self.listen_unix_socket_endpoints.get(socket),
+        };
+
+        match listen_config? {
+            ListenConfiguration::Http(config) | ListenConfiguration::Mcp(config) => {
+                Some(config.clone())
+            }
+            ListenConfiguration::Tcp(_) => None,
+        }
+    }
 }

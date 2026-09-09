@@ -187,18 +187,35 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             Some(host_no_port.trim().to_string())
         });
 
-    let needs_endpoint_resolve = match http_connection_info.endpoint_info.as_ref() {
-        None => true,
-        Some(current) => match request_host_for_metric.as_deref() {
-            Some(host) => !current.is_my_endpoint(host),
-            None => false,
-        },
-    };
+    // A settings reload replaces the port configuration; the endpoint (and its
+    // locations) held by this connection must be resolved again from the new one.
+    let config_reloaded = http_connection_info.pick_up_reload().await;
+
+    let needs_endpoint_resolve = config_reloaded
+        || match http_connection_info.endpoint_info.as_ref() {
+            None => true,
+            Some(current) => match request_host_for_metric.as_deref() {
+                Some(host) => !current.is_my_endpoint(host),
+                None => false,
+            },
+        };
 
     if needs_endpoint_resolve {
         let was_none = http_connection_info.endpoint_info.is_none();
-        http_connection_info.endpoint_info =
-            h1_reader.try_find_endpoint_info(&request_headers, &http_connection_info.listen_config);
+        // Only relevant on the reload path: a request with no `Host` keeps the
+        // vhost this connection was accepted with (from the TLS SNI) instead of
+        // being refused because a multi-vhost port cannot pick one on its own.
+        let accepted_server_name = http_connection_info
+            .endpoint_info
+            .as_ref()
+            .and_then(|endpoint_info| endpoint_info.host_endpoint.get_server_name())
+            .map(|server_name| server_name.to_string());
+
+        http_connection_info.endpoint_info = h1_reader.try_find_endpoint_info(
+            &request_headers,
+            &http_connection_info.listen_config,
+            accepted_server_name.as_deref(),
+        );
         if was_none && http_connection_info.endpoint_info.is_some() {
             if let Some(ip) = http_connection_info.connection_ip.get_ip_addr() {
                 crate::app::APP_CTX.ip_blocklist.register_success(&ip);

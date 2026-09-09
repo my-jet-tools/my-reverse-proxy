@@ -19,25 +19,11 @@ fn find_authorization_value<'a>(http_headers: &Http1Headers, data: &'a [u8]) -> 
         if let Some(header) = HttpHeader::new(data, pos, next) {
             if header.is_my_header_name(AUTHORIZATION_HEADER) {
                 let value_pos = header.get_value();
-                let raw = &data[value_pos.start..value_pos.end];
-                let trimmed = trim_ascii(raw);
-                return Some(trimmed);
+                return Some(&data[value_pos.start..value_pos.end]);
             }
         }
         pos = next + crate::consts::HTTP_CR_LF.len();
     }
-}
-
-fn trim_ascii(input: &[u8]) -> &[u8] {
-    let mut start = 0;
-    let mut end = input.len();
-    while start < end && (input[start] == b' ' || input[start] == b'\t') {
-        start += 1;
-    }
-    while end > start && (input[end - 1] == b' ' || input[end - 1] == b'\t') {
-        end -= 1;
-    }
-    &input[start..end]
 }
 
 impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<TNetworkReadPart> {
@@ -60,13 +46,9 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
             .cloned()
             .map(HttpProxyPassIdentity::ClientCert);
 
-        if let Some(expected) = location.auth_header.as_deref() {
+        if location.auth_header.is_some() {
             let actual = find_authorization_value(http_headers, self.loop_buffer.get_data());
-            let matches = match actual {
-                Some(actual) => actual == expected.as_bytes(),
-                None => false,
-            };
-            if !matches {
+            if !location.auth_header_accepts(actual) {
                 return Err(ProxyServerError::NotAuthorized);
             }
         }

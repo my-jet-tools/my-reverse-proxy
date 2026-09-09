@@ -34,10 +34,12 @@ hosts:
       auth_header: "Bearer secret-token-123"
 ```
 
-Any location type accepts `auth_header`: `http`, `https`, `mcp`,
-`unix+http`, files, static. The check is applied uniformly at the
-HTTP/1 server layer before the request is dispatched to the upstream
-or content source.
+Any location type accepts `auth_header`: `http`, `http2`, `https`,
+`mcp`, `mcp-h2`, `unix+http`, files, static. The check is applied on
+both request paths — the h1 byte pipeline (`http` / `https`
+endpoints) and the hyper path (`http2` / `https2` endpoints) — before
+the request is dispatched to the upstream or content source, and both
+compare the value the same way.
 
 ### With a variable
 
@@ -91,6 +93,37 @@ hosts:
       # no auth_header — anyone may hit /public
 ```
 
+## Setting and rotating the value at runtime
+
+`auth_header` can be written into the dynamic settings file and applied
+without restarting the proxy:
+
+1. `get_dynamic_settings` — read the current YAML.
+2. Edit it (the file is merged like an `include:`, so a host declared
+   there carries its locations and their `auth_header`) and write it
+   back with `set_dynamic_settings`. It is a full-file replace, so send
+   everything you want to keep.
+3. `reload_settings` — compile and apply.
+
+**Connections already open pick the new value up on their next
+request.** This matters for MCP: a Streamable-HTTP client keeps one
+connection open for hours, and a reload does not restart listeners or
+drop sockets. Each connection notices that the port's configuration was
+replaced and re-resolves its endpoint and locations before serving the
+next request, so the window in which the old token still works is one
+in-flight request, not the lifetime of the connection.
+
+The same mechanism applies to everything else a location or endpoint
+declares — upstream, header rules, `client_certificate_ca`. Adding an
+mTLS requirement to an endpoint makes an already-open connection that
+presented no certificate get 421 on its next request, so the client
+re-opens one and performs mTLS: the fail-closed direction.
+
+Only one expected value per location is supported, so a rotation is a
+cut-over rather than an overlap: clients that still send the old token
+are refused from the reload onwards. Roll the clients first, or publish
+the new token on a second location.
+
 ## Validation rules
 
 - **Header name**: `Authorization`, matched case-insensitively
@@ -134,11 +167,19 @@ locations:
 `google_auth` and `client_certificate_ca` are per-endpoint identity
 mechanisms. They layer cleanly:
 
-1. The location-level header check runs **first**. Failure → 401, the
-   request stops here.
+1. The location-level header check runs **first** on the h1 pipeline.
+   Failure → 401, the request stops here.
 2. If the header check passes (or is not configured), the endpoint-level
    auth runs. Google OAuth may issue a redirect; client-certificate
    verification attaches a `HttpProxyPassIdentity::ClientCert` value.
+
+On the hyper path the order is reversed — the endpoint's `oauth` gate,
+`google_auth` and `allowed_users` run before the location is resolved,
+so the `auth_header` check happens after them. The outcome only differs
+for a location that combines `auth_header` with an endpoint-level
+mechanism, which is not what either is used for: `auth_header` gates
+machine endpoints, and the endpoint mechanisms identify humans. Both
+paths contact the upstream only after every check has passed.
 
 Use this layering when, for example, a public-facing UI uses Google
 OAuth to identify the human user, but the same domain also exposes a
@@ -173,12 +214,21 @@ machine-to-machine endpoint that needs a static API key — set
 - `src/settings/location_settings.rs` — YAML field `auth_header`.
 - `src/settings_compiled/populate_settings.rs` — variable substitution
   for `auth_header`.
-- `src/configurations/proxy_pass_location_config.rs` — runtime field
-  carried on `ProxyPassLocationConfig`.
 - `src/scripts/compile_location_proxy_pass_to.rs` — passes the value
   from settings into the runtime config.
-- `src/h1_proxy_server/authorize.rs` — the actual check; finds the
-  request's `Authorization` header and compares against the configured
-  expected value.
-- `src/h1_proxy_server/server_loop.rs` — passes the resolved location
-  into `authorize`.
+- `src/configurations/proxy_pass_location_config.rs` — runtime field
+  carried on `ProxyPassLocationConfig`, plus `auth_header_matches` /
+  `auth_header_accepts`: the one comparison both request paths use.
+- `src/h1_proxy_server/authorize.rs` — the h1 check; finds the
+  request's `Authorization` header in the raw byte buffer and hands it
+  to `auth_header_accepts`.
+- `src/h1_proxy_server/pipeline/reader.rs` — passes the resolved
+  location into `authorize`.
+- `src/http_proxy_pass/http_proxy_pass.rs` — the hyper check, right
+  after the location is resolved and before any header processing;
+  refusal is `ProxyPassError::Unauthorized` (the 401 tech page).
+- `src/configurations/app_configuration.rs` — `generation` +
+  `pick_up_reload`: how an open connection notices a reload.
+- `src/tcp_listener/http_request_handler/live_endpoint_cache.rs` — the
+  hyper connection's live port configuration and per-`Host` proxy-pass
+  cache, invalidated together on a reload.

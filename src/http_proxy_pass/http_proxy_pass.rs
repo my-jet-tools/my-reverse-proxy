@@ -123,6 +123,16 @@ impl HttpProxyPass {
 
             let proxy_pass_location = inner.locations.find(&location_index);
 
+            // Per-location `auth_header` gate — same rule as the h1 pipeline's
+            // `H1Reader::authorize`: refused before anything is sent upstream,
+            // and an absent header is indistinguishable from a wrong one.
+            if !proxy_pass_location
+                .config
+                .auth_header_accepts(req.get_authorization_header())
+            {
+                return Err(ProxyPassError::Unauthorized);
+            }
+
             let location_debug = crate::app::APP_CTX
                 .debug_flags
                 .is_location_debug(location_index.id);

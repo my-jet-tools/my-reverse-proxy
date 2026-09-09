@@ -174,6 +174,12 @@ server; it strips the `authorization` header before the upstream, as the MCP
 authorization spec requires), per-location `auth_header`, or no proxy-level auth
 at all. See [mcp-oauth.md](mcp-oauth.md).
 
+`auth_header` works on `mcp` and `mcp-h2` alike — the h1 pipeline and the hyper
+path enforce the same check. It can be written into the dynamic settings file
+and applied with `reload_settings`, and a client holding an h2 connection open
+picks the new value up on its next request rather than on its next connection.
+See [header-auth.md](header-auth.md).
+
 ## Files involved
 
 - `src/configurations/proxy_pass_to_config.rs` — `McpHttp1` / `McpHttp2`

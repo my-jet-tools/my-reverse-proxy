@@ -73,20 +73,30 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
         }
     }
 
+    /// Resolves the vhost this request targets out of the port's configuration.
+    ///
+    /// `fallback_server_name` is used only when the request carries no usable
+    /// `Host` header (HTTP/1.0, or an unparseable value). Passing the name this
+    /// connection was accepted with — the TLS SNI — keeps such a request on its
+    /// own vhost when the endpoint is looked up again after a settings reload;
+    /// without it a port serving more than one vhost has no way to choose and
+    /// the request would be refused. `None` reproduces the plain-HTTP behaviour:
+    /// the port's single nameless endpoint, or nothing.
     pub fn try_find_endpoint_info(
         &self,
         http_headers: &Http1Headers,
         listen_config: &Arc<HttpListenPortConfiguration>,
+        fallback_server_name: Option<&str>,
     ) -> Option<Arc<HttpEndpointInfo>> {
         let buffer = self.loop_buffer.get_data();
 
         let Some(header_position) = http_headers.host_value.as_ref() else {
-            return listen_config.get_http_endpoint_info(None);
+            return listen_config.get_http_endpoint_info(fallback_server_name);
         };
 
         let Ok(host) = std::str::from_utf8(&buffer[header_position.start..header_position.end])
         else {
-            return listen_config.get_http_endpoint_info(None);
+            return listen_config.get_http_endpoint_info(fallback_server_name);
         };
 
         match host.find(':') {
