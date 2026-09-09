@@ -529,6 +529,22 @@ table.locations tbody tr.upstream-unknown td.upstream {
     color: #5f370e;
 }
 
+/* Client certificate ca referenced but not loaded — red warning, same as the SSL chip */
+.meta-chip.auth.client.missing .label {
+    background: #c53030;
+}
+.meta-chip.auth.client.missing .value {
+    background: #fed7d7;
+    color: #742a2a;
+}
+.meta-chip.auth.client.missing .value.state {
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+    font-weight: 700;
+    border-left: 1px solid #fc8181;
+}
+
 /* Google-auth — blue tint */
 .meta-chip.auth.google .label {
     background: #2b6cb0;

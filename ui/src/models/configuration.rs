@@ -63,6 +63,10 @@ pub struct HttpEndpointInfoModel {
     pub ssl_cert_missing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_cert_id: Option<String>,
+    /// True when this endpoint requires a client certificate ca that is not currently loaded —
+    /// the endpoint listens but cuts every TLS connection until the ca is provided.
+    #[serde(default)]
+    pub client_cert_missing: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub g_auth: Option<String>,
 }

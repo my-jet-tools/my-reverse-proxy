@@ -6,10 +6,10 @@ use my_http_server::{
 };
 
 use crate::mcp::{
-    GetAppliedSettingsHandler, GetDynamicSettingsHandler, GetProxyLogsHandler,
-    GetProxyStateSnapshotHandler, GetSettingsHandler, GetSslCertificateHandler,
-    GetSslEndpointsStatusHandler, InitSslCertificateHandler, LookupPoolHandler,
-    ReloadSettingsHandler, SetDynamicSettingsHandler,
+    GetAppliedSettingsHandler, GetClientCaEndpointsStatusHandler, GetDynamicSettingsHandler,
+    GetProxyLogsHandler, GetProxyStateSnapshotHandler, GetSettingsHandler,
+    GetSslCertificateHandler, GetSslEndpointsStatusHandler, InitClientCertificateCaHandler,
+    InitSslCertificateHandler, LookupPoolHandler, ReloadSettingsHandler, SetDynamicSettingsHandler,
 };
 
 const DEFAULT_PORT: u16 = 8000;
@@ -50,6 +50,8 @@ pub fn start() {
     mcp.register_tool_call(Arc::new(GetSslEndpointsStatusHandler));
     mcp.register_tool_call(Arc::new(GetSslCertificateHandler));
     mcp.register_tool_call(Arc::new(InitSslCertificateHandler));
+    mcp.register_tool_call(Arc::new(GetClientCaEndpointsStatusHandler));
+    mcp.register_tool_call(Arc::new(InitClientCertificateCaHandler));
 
     http_server.add_middleware(Arc::new(mcp));
 

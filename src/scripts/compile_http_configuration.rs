@@ -35,6 +35,27 @@ pub async fn compile_http_configuration(
 
         (g_auth, Some(ssl_cert_id), client_cert_ca)
     } else {
+        // A client certificate is presented during a TLS handshake, so on a plain-http endpoint
+        // the setting can not be applied at all. Silently dropping it would leave an endpoint the
+        // operator believes is mTLS-protected serving everyone - and with no "ca not loaded"
+        // badge to hint at it, since the endpoint carries no ca id.
+        let client_cert_ca = super::get_from_host_or_templates(
+            settings_model,
+            host_settings,
+            |host_settings| host_settings.endpoint.client_certificate_ca.as_ref(),
+            |templates| templates.client_certificate_ca.as_ref(),
+        )?;
+
+        if client_cert_ca.is_some() {
+            return Err(format!(
+                "Endpoint '{}' is 'type: {}', which has no TLS layer, so 'client_certificate_ca' \
+                 can not be applied to it - the endpoint would serve every client unverified. Use \
+                 'type: https' / 'type: https2' on the endpoint, or remove 'client_certificate_ca'",
+                host_endpoint.as_str(),
+                http_type.as_str()
+            ));
+        }
+
         (None, None, None)
     };
 

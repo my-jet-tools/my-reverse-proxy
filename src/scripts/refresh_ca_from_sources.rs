@@ -29,11 +29,19 @@ pub async fn refresh_ca_from_sources<'s>(
 
     let client_certificate: &ClientCertificateCaSettings = found_certificate.unwrap();
 
-    let ca_file_src =
-        OverSshConnectionSettings::try_parse(client_certificate.ca.as_str()).ok_or(format!(
-            "Invalid Client Certificate file source {}",
-            client_certificate.ca.as_str()
-        ))?;
+    // A "manual" ca has no source configured — it is uploaded at runtime from the admin ui or
+    // POST /api/ClientCertificates/Init(FromPem). Nothing to resolve here, so the endpoint is
+    // allowed to start with the ca absent from the cache (every TLS handshake to it is cut until
+    // the ca is pushed).
+    let ca_source = match client_certificate.get_source()? {
+        Some(ca_source) => ca_source,
+        None => return Ok(()),
+    };
+
+    let ca_file_src = OverSshConnectionSettings::try_parse(ca_source).ok_or(format!(
+        "Invalid Client Certificate file source {}",
+        ca_source
+    ))?;
 
     let ca = super::load_file(&ca_file_src, crate::consts::DEFAULT_HTTP_CONNECT_TIMEOUT).await?;
 
@@ -47,14 +55,14 @@ pub async fn refresh_ca_from_sources<'s>(
         let crl =
             super::load_file(&crl_file_src, crate::consts::DEFAULT_HTTP_CONNECT_TIMEOUT).await?;
 
-        let crl = my_tls::crl::read(crl.as_slice())?;
+        let crl = super::parse_crl_pem(crl.as_slice())?;
 
-        Some((crl, crl_file_src))
+        Some((crl, Some(crl_file_src)))
     } else {
         None
     };
 
-    let client_cert = ClientCertificateCa::from_bytes(ca.as_slice(), ca_file_src, crl)?;
+    let client_cert = ClientCertificateCa::from_bytes(ca.as_slice(), Some(ca_file_src), crl)?;
 
     let client_cert = Arc::new(client_cert);
 

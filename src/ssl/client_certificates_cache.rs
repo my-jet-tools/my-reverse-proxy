@@ -30,6 +30,12 @@ impl ClientCertificatesCache {
         return self.data.get(cert_id.as_str()).cloned();
     }
 
+    /// Ids of every client CA currently loaded - used to tell which endpoints reference a CA
+    /// that has not arrived yet.
+    pub fn get_ids(&self) -> Vec<String> {
+        self.data.keys().cloned().collect()
+    }
+
     pub fn get_list_of_crl(&self) -> Vec<(String, OverSshConnectionSettings)> {
         let mut result = Vec::new();
 

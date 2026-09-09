@@ -163,12 +163,18 @@ impl SettingsCompiled {
     ) -> Result<(), String> {
         if let Some(ca_certs) = settings_model.client_certificate_ca.take() {
             for itm in ca_certs {
-                self.client_certificate_ca
-                    .push(ClientCertificateCaSettings {
-                        id: variables.apply_variables(itm.id)?,
-                        ca: variables.apply_variables(itm.ca)?,
-                        revocation_list: variables.apply_variables_opt(itm.revocation_list)?,
-                    });
+                let itm = ClientCertificateCaSettings {
+                    id: variables.apply_variables(itm.id)?,
+                    ca: variables.apply_variables_opt(itm.ca)?,
+                    revocation_list: variables.apply_variables_opt(itm.revocation_list)?,
+                };
+
+                // Structural validation belongs here: a per-endpoint failure to RESOLVE a ca is
+                // deliberately non-fatal (the endpoint keeps listening so the ca can be uploaded),
+                // and it would otherwise swallow an entry that can never work at all.
+                itm.get_source()?;
+
+                self.client_certificate_ca.push(itm);
             }
         }
 

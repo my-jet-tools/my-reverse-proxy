@@ -77,10 +77,19 @@ impl CurrentConfigurationHttpModel {
         let ssl_certs = collect_ssl_certs().await;
 
         // Flag every endpoint that references a real (non self-signed) certificate which is not in
-        // the loaded set — these listen but cut TLS until the certificate arrives.
+        // the loaded set — these listen but cut TLS until the certificate arrives. The same holds
+        // for an endpoint whose client-certificate CA has not been resolved.
         {
             let loaded_cert_ids: std::collections::HashSet<&str> =
                 ssl_certs.iter().map(|cert| cert.id.as_str()).collect();
+
+            let loaded_client_ca_ids = crate::app::APP_CTX
+                .ssl_certificates_cache
+                .read(|cache| cache.client_ca.get_ids())
+                .await;
+
+            let loaded_client_ca_ids: std::collections::HashSet<&str> =
+                loaded_client_ca_ids.iter().map(|id| id.as_str()).collect();
 
             for port in ports.iter_mut() {
                 for endpoint in port.endpoints.iter_mut() {
@@ -89,6 +98,12 @@ impl CurrentConfigurationHttpModel {
                             && !loaded_cert_ids.contains(cert_id)
                         {
                             endpoint.ssl_cert_missing = true;
+                        }
+                    }
+
+                    if let Some(client_cert_id) = endpoint.client_cert_id.as_deref() {
+                        if !loaded_client_ca_ids.contains(client_cert_id) {
+                            endpoint.client_cert_missing = true;
                         }
                     }
                 }
@@ -254,6 +269,9 @@ pub struct HttpEndpointInfoModel {
     // currently loaded in the cache — the endpoint listens but cuts TLS until the cert arrives.
     pub ssl_cert_missing: bool,
     pub client_cert_id: Option<String>,
+    // True when this endpoint requires a client certificate ca that is NOT currently loaded —
+    // the endpoint listens but cuts every TLS connection until the ca arrives.
+    pub client_cert_missing: bool,
     pub g_auth: Option<String>,
 }
 
@@ -290,6 +308,8 @@ impl HttpEndpointInfoModel {
                 .client_certificate_id
                 .as_ref()
                 .map(|itm| itm.as_str().to_string()),
+            // Same second pass as `ssl_cert_missing`.
+            client_cert_missing: false,
             g_auth: endpoint.g_auth.clone(),
             inbound_connections,
             locations: endpoint
@@ -329,6 +349,7 @@ impl HttpEndpointInfoModel {
             ssl_cert_id: None,
             ssl_cert_missing: false,
             client_cert_id: None,
+            client_cert_missing: false,
             g_auth: None,
         }
     }

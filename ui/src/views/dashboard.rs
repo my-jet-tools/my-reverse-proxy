@@ -10,7 +10,10 @@ use crate::{
         GatewayServerStatusModel, HttpEndpointInfoModel, HttpProxyPassLocationModel,
         PortConfigurationModel, SslCertificateInfoModel,
     },
-    views::{LogScope, LogsDialog, LogsDialogRequest, SslCertDialog, SslCertDialogRequest},
+    views::{
+        ClientCertDialog, ClientCertDialogRequest, LogScope, LogsDialog, LogsDialogRequest,
+        SslCertDialog, SslCertDialogRequest,
+    },
 };
 
 /// The dialogs the dashboard can open. `Signal` is `Copy`, so this travels through the render
@@ -19,6 +22,7 @@ use crate::{
 struct DashboardDialogs {
     logs: Signal<Option<LogsDialogRequest>>,
     ssl_cert: Signal<Option<SslCertDialogRequest>>,
+    client_cert: Signal<Option<ClientCertDialogRequest>>,
 }
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -44,6 +48,7 @@ pub fn Dashboard() -> Element {
     let dialogs = DashboardDialogs {
         logs: use_signal(|| Option::<LogsDialogRequest>::None),
         ssl_cert: use_signal(|| Option::<SslCertDialogRequest>::None),
+        client_cert: use_signal(|| Option::<ClientCertDialogRequest>::None),
     };
 
     let state_ra = state.read();
@@ -63,6 +68,7 @@ pub fn Dashboard() -> Element {
 
     let open_logs = dialogs.logs.read().clone();
     let open_ssl_cert = dialogs.ssl_cert.read().clone();
+    let open_client_cert = dialogs.client_cert.read().clone();
 
     rsx! {
         {content}
@@ -71,6 +77,9 @@ pub fn Dashboard() -> Element {
         }
         if let Some(request) = open_ssl_cert {
             SslCertDialog { request, dialog: dialogs.ssl_cert }
+        }
+        if let Some(request) = open_client_cert {
+            ClientCertDialog { request, dialog: dialogs.client_cert }
         }
     }
 }
@@ -435,6 +444,32 @@ fn render_cert_missing_badge(
     }
 }
 
+/// The "Client cert CA not loaded" badge. It is a button: clicking it opens the dialog where
+/// the CA (and optionally its revocation list) is pasted and uploaded for this endpoint's
+/// client-certificate id.
+fn render_client_ca_missing_badge(
+    endpoint: &HttpEndpointInfoModel,
+    dialogs: DashboardDialogs,
+) -> Element {
+    let mut client_cert = dialogs.client_cert;
+
+    // `client_cert_missing` is only raised for an endpoint that references a ca id, so the
+    // fallback here is defensive.
+    let request = ClientCertDialogRequest {
+        ca_id: endpoint.client_cert_id.clone().unwrap_or_default(),
+        endpoint_host: endpoint.host.clone(),
+    };
+
+    rsx! {
+        button {
+            class: "cert-missing-badge",
+            title: "Client certificate CA is not loaded — this endpoint listens but every TLS connection is cut until the CA is uploaded. Click to paste the CA certificate.",
+            onclick: move |_| client_cert.set(Some(request.clone())),
+            "⚠ Client cert CA not loaded"
+        }
+    }
+}
+
 #[derive(Clone)]
 enum DebugTarget {
     Endpoint(String),
@@ -485,6 +520,12 @@ fn render_endpoint(endpoint: &HttpEndpointInfoModel, dialogs: DashboardDialogs) 
         "meta-chip ssl"
     };
 
+    let client_cert_chip_class = if endpoint.client_cert_missing {
+        "meta-chip auth client missing"
+    } else {
+        "meta-chip auth client"
+    };
+
     rsx! {
         div { class: "endpoint",
             div { class: "endpoint-header",
@@ -495,6 +536,9 @@ fn render_endpoint(endpoint: &HttpEndpointInfoModel, dialogs: DashboardDialogs) 
                 }
                 if endpoint.ssl_cert_missing {
                     {render_cert_missing_badge(endpoint, dialogs)}
+                }
+                if endpoint.client_cert_missing {
+                    {render_client_ca_missing_badge(endpoint, dialogs)}
                 }
                 {render_debug_toggle(DebugTarget::Endpoint(endpoint.host.clone()), endpoint.debug)}
                 {
@@ -524,9 +568,12 @@ fn render_endpoint(endpoint: &HttpEndpointInfoModel, dialogs: DashboardDialogs) 
                         }
                     }
                     if let Some(client) = endpoint.client_cert_id.as_ref() {
-                        span { class: "meta-chip auth client",
+                        span { class: "{client_cert_chip_class}",
                             span { class: "label", "Client-Cert" }
                             span { class: "value", "{client}" }
+                            if endpoint.client_cert_missing {
+                                span { class: "value state", "not loaded" }
+                            }
                         }
                     }
                     if let Some(auth) = endpoint.g_auth.as_ref() {
