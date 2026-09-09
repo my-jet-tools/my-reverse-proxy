@@ -17,12 +17,18 @@ pub struct ClientCaEndpointStatus {
     pub expired: bool,
     /// How many revoked serials the loaded CA carries (from its CRL).
     pub crl_records: Option<usize>,
+    /// `unlimited_expiration:` on the ca entry - client certificates verified against it are
+    /// accepted regardless of their validity dates.
+    pub unlimited_expiration: bool,
 }
 
 /// Enumerates every https/mcp endpoint that requires a client certificate and reports whether
 /// the CA it verifies against is currently loaded.
 pub async fn get_client_ca_endpoints_status() -> Vec<ClientCaEndpointStatus> {
-    let endpoints: Vec<(String, String)> = crate::app::APP_CTX
+    // (endpoint_host, ca_id, unlimited_expiration). The flag is read from the compiled endpoint,
+    // not from `applied_settings`: that snapshot is only refreshed by a FULL reload, so after a
+    // ReloadEndpoint it would report something the handshake no longer does.
+    let endpoints: Vec<(String, String, bool)> = crate::app::APP_CTX
         .current_configuration
         .get(|cfg| {
             let mut out = Vec::new();
@@ -40,7 +46,7 @@ pub async fn get_client_ca_endpoints_status() -> Vec<ClientCaEndpointStatus> {
 
     let mut result = Vec::with_capacity(endpoints.len());
 
-    for (endpoint_host, ca_id) in endpoints {
+    for (endpoint_host, ca_id, unlimited_expiration) in endpoints {
         let ca = crate::app::APP_CTX
             .ssl_certificates_cache
             .read(|c| c.client_ca.get(SslCertificateIdRef::new(ca_id.as_str())))
@@ -68,13 +74,14 @@ pub async fn get_client_ca_endpoints_status() -> Vec<ClientCaEndpointStatus> {
             expires,
             expired,
             crl_records,
+            unlimited_expiration,
         });
     }
 
     result
 }
 
-fn collect_endpoints(listen: &ListenConfiguration, out: &mut Vec<(String, String)>) {
+fn collect_endpoints(listen: &ListenConfiguration, out: &mut Vec<(String, String, bool)>) {
     let http = match listen {
         ListenConfiguration::Http(http) | ListenConfiguration::Mcp(http) => http,
         ListenConfiguration::Tcp(_) => return,
@@ -85,6 +92,10 @@ fn collect_endpoints(listen: &ListenConfiguration, out: &mut Vec<(String, String
             continue;
         };
 
-        out.push((endpoint.as_str().to_string(), ca_id.as_str().to_string()));
+        out.push((
+            endpoint.as_str().to_string(),
+            ca_id.as_str().to_string(),
+            endpoint.client_certificate_unlimited_expiration,
+        ));
     }
 }

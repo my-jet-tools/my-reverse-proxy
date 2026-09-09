@@ -574,6 +574,13 @@ fn render_endpoint(endpoint: &HttpEndpointInfoModel, dialogs: DashboardDialogs) 
                             if endpoint.client_cert_missing {
                                 span { class: "value state", "not loaded" }
                             }
+                            if endpoint.client_cert_unlimited_expiration {
+                                span {
+                                    class: "value state unlimited",
+                                    title: "unlimited_expiration: client certificates signed by this CA are accepted however old they are",
+                                    "expiry not enforced"
+                                }
+                            }
                         }
                     }
                     if let Some(auth) = endpoint.g_auth.as_ref() {

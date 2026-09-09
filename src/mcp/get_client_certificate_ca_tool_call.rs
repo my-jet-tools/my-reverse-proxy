@@ -26,7 +26,7 @@ pub struct GetClientCertificateCaResponse {
     pub expires: String,
 
     #[property(
-        description = "The ca is past its expiry. It still verifies clients (the ca's own validity is not enforced), but it is almost certainly not what the operator intends."
+        description = "The ca is past its expiry. It still verifies clients - the ca's OWN validity is not enforced (unlike the client certificates', which is) - but it is almost certainly not what the operator intends."
     )]
     pub expired: bool,
 
@@ -44,6 +44,11 @@ pub struct GetClientCertificateCaResponse {
         description = "How many revoked serials its revocation list carries. 0 means no client certificate can be revoked."
     )]
     pub crl_records: i64,
+
+    #[property(
+        description = "The ca entry declares `unlimited_expiration: true`, so client certificates verified against it are accepted regardless of their validity dates."
+    )]
+    pub unlimited_expiration: bool,
 }
 
 pub struct GetClientCertificateCaHandler;
@@ -71,6 +76,7 @@ impl McpToolCall<GetClientCertificateCaInputData, GetClientCertificateCaResponse
                 is_ca: details.is_ca,
                 origin: details.origin,
                 crl_records: details.crl_records as i64,
+                unlimited_expiration: details.unlimited_expiration,
             }),
             None => Ok(GetClientCertificateCaResponse {
                 found: false,
@@ -81,6 +87,7 @@ impl McpToolCall<GetClientCertificateCaInputData, GetClientCertificateCaResponse
                 is_ca: false,
                 origin: String::new(),
                 crl_records: 0,
+                unlimited_expiration: false,
             }),
         }
     }

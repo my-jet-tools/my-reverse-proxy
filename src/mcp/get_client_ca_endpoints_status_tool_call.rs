@@ -25,7 +25,7 @@ pub struct ClientCaEndpointStatusEntry {
     pub cn: String,
 
     #[property(
-        description = "RFC3339 expiry of the loaded ca. Empty when the ca is not loaded. Note the client certificate verification does not check validity dates."
+        description = "RFC3339 expiry of the loaded ca. Empty when the ca is not loaded. The ca's OWN expiry is not enforced (an expired ca keeps verifying clients); the validity dates of the CLIENT certificates are enforced, unless this entry declares unlimited_expiration."
     )]
     pub expires: String,
 
@@ -38,6 +38,11 @@ pub struct ClientCaEndpointStatusEntry {
         description = "The loaded ca is past its expiry. It still verifies clients (validity dates are not checked during verification), but it is almost certainly not what the operator intends."
     )]
     pub expired: bool,
+
+    #[property(
+        description = "The ca entry declares `unlimited_expiration: true` - client certificates verified against it are accepted however old they are. Deliberate, but worth reporting when an endpoint's access is being reviewed."
+    )]
+    pub unlimited_expiration: bool,
 }
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
@@ -89,6 +94,7 @@ impl McpToolCall<GetClientCaEndpointsStatusInputData, GetClientCaEndpointsStatus
                 expires: status.expires.map(|e| e.to_rfc3339()).unwrap_or_default(),
                 crl_records: status.crl_records.unwrap_or(0) as i64,
                 expired: status.expired,
+                unlimited_expiration: status.unlimited_expiration,
             });
         }
 

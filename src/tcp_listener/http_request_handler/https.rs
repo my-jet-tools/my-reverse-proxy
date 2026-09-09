@@ -100,9 +100,8 @@ impl HttpsRequestsHandler {
         // presented none — or one verified by a different CA — refuse with 421
         // Misdirected Request so the client re-opens a dedicated connection
         // (with the right SNI) and performs mTLS against this endpoint's CA.
-        if !http_endpoint_info.connection_satisfies_client_cert(
-            self.client_certificate.as_ref().map(|c| c.ca_id.as_str()),
-        ) {
+        if !http_endpoint_info.connection_satisfies_client_cert(self.client_certificate.as_deref())
+        {
             crate::app::APP_CTX.proxy_logs.write_port(
                 self.listen_port_config.listen_host.get_log_key().as_str(),
                 self.connection_ip.get_ip_log(),
@@ -179,7 +178,7 @@ impl HttpsRequestsHandler {
         let client_certificate = self
             .client_certificate
             .as_ref()
-            .filter(|cert| http_endpoint_info.client_cert_identity_applies(cert.ca_id.as_str()))
+            .filter(|cert| http_endpoint_info.client_cert_identity_applies(cert))
             .cloned();
 
         let http_proxy_pass = HttpProxyPass::new(

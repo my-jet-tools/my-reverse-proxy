@@ -141,6 +141,7 @@ pub async fn create_config(
             client_cert_ca,
             ca_id,
             endpoint_port,
+            http_endpoint_info.client_certificate_unlimited_expiration,
         ));
 
         let mut server_config =

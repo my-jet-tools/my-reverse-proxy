@@ -56,7 +56,7 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
         let cert_identity = http_connection_info
             .cn_user_name
             .as_ref()
-            .filter(|cert| endpoint_info.client_cert_identity_applies(cert.ca_id.as_str()))
+            .filter(|cert| endpoint_info.client_cert_identity_applies(cert))
             .cloned()
             .map(HttpProxyPassIdentity::ClientCert);
 

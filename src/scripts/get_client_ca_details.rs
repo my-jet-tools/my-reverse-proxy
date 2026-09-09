@@ -14,6 +14,9 @@ pub struct ClientCaDetails {
     pub origin: String,
     /// Amount of revoked serials the CA is loaded with.
     pub crl_records: usize,
+    /// `unlimited_expiration:` on the ca entry - the validity dates of client certificates
+    /// verified against it are not enforced.
+    pub unlimited_expiration: bool,
 }
 
 /// Returns metadata about the client-certificate CA currently loaded under the given id, or
@@ -28,6 +31,13 @@ pub async fn get_client_ca_details(ca_id: &str) -> Option<ClientCaDetails> {
 
     let info = ca.get_ca_info();
 
+    // From the running endpoints that require this ca (the value the handshake enforces), not from
+    // the `applied_settings` snapshot, which a partial reload leaves behind.
+    let unlimited_expiration = super::get_client_ca_endpoints_status()
+        .await
+        .into_iter()
+        .any(|endpoint| endpoint.ca_id == ca_id && endpoint.unlimited_expiration);
+
     Some(ClientCaDetails {
         id: ca_id.to_string(),
         cn: info.cn,
@@ -36,5 +46,6 @@ pub async fn get_client_ca_details(ca_id: &str) -> Option<ClientCaDetails> {
         expired: info.expires.unix_microseconds <= DateTimeAsMicroseconds::now().unix_microseconds,
         origin: ca.origin_as_str().to_string(),
         crl_records: ca.crl_list.len(),
+        unlimited_expiration,
     })
 }

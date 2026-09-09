@@ -188,7 +188,12 @@ fn render_success(result: &InitClientCaResultModel) -> Element {
             }
             if result.expired {
                 div { class: "cert-warning",
-                    "This CA is already past its expiry date. Client certificate verification here does not check validity dates, so it still works — but it is almost certainly not the file you meant to upload."
+                    "This CA is already past its expiry date. The CA's own validity is not enforced, so it still verifies clients — but it is almost certainly not the file you meant to upload."
+                }
+            }
+            if result.unlimited_expiration {
+                div { class: "cert-warning",
+                    "This CA is configured with 'unlimited_expiration: true': client certificates signed by it are accepted however old they are. Expiry is not a limit for this endpoint until that setting is removed."
                 }
             }
             if result.crl_records == 0 {

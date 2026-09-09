@@ -39,6 +39,9 @@ pub struct InitClientCaResult {
     /// The upload replaced a CA of a DIFFERENT authority (only possible with
     /// `replace_different_ca`), i.e. the set of clients this endpoint trusts has changed.
     pub replaced_different_authority: bool,
+    /// `unlimited_expiration:` on the ca entry - client certificates verified against this ca are
+    /// accepted regardless of their validity dates.
+    pub unlimited_expiration: bool,
 }
 
 /// Uploads (or replaces) a client-certificate CA in the running cache by id.
@@ -100,10 +103,18 @@ pub async fn init_client_ca_manually(
     let uploaded_ca = ClientCertificateCa::new(certs, None, vec![], None)?;
 
     // (2) The CA must actually be required by an endpoint.
-    let endpoints: Vec<String> = crate::scripts::get_client_ca_endpoints_status()
+    let referencing: Vec<_> = crate::scripts::get_client_ca_endpoints_status()
         .await
         .into_iter()
         .filter(|endpoint| endpoint.ca_id == ca_id)
+        .collect();
+
+    let unlimited_expiration = referencing
+        .iter()
+        .any(|endpoint| endpoint.unlimited_expiration);
+
+    let endpoints: Vec<String> = referencing
+        .into_iter()
         .map(|endpoint| endpoint.endpoint_host)
         .collect();
 
@@ -208,7 +219,32 @@ pub async fn init_client_ca_manually(
         crl_records,
         crl_source,
         replaced_different_authority,
+        unlimited_expiration,
     })
+}
+
+/// The `client_certificate_ca` entry declaring this id, read from the settings FILES rather than
+/// from the `applied_settings` snapshot: that snapshot is only refreshed by a full reload, and a
+/// stale `revocation_list` must never decide which certificates count as revoked. A settings file
+/// that does not compile fails the upload with its own error - it is the same file that declares
+/// this ca, so the operator has to fix it either way.
+async fn configured_ca_entry(
+    ca_id: &str,
+) -> Result<Option<crate::settings::ClientCertificateCaSettings>, String> {
+    let settings = crate::settings_compiled::SettingsCompiled::load_settings()
+        .await
+        .map_err(|err| {
+            format!(
+                "Can not read the configuration to resolve the revocation list of client certificate ca '{}': {}",
+                ca_id, err
+            )
+        })?;
+
+    Ok(settings
+        .client_certificate_ca
+        .iter()
+        .find(|itm| itm.id == ca_id)
+        .cloned())
 }
 
 /// Whether the PEM text carries a block whose label contains `needle` (e.g. `PRIVATE KEY`).
@@ -233,17 +269,7 @@ async fn load_configured_revocation_list(
     )>,
     String,
 > {
-    let settings = crate::app::APP_CTX.applied_settings.load_full();
-
-    let Some(settings) = settings else {
-        return Ok(None);
-    };
-
-    let Some(configured) = settings
-        .client_certificate_ca
-        .iter()
-        .find(|itm| itm.id == ca_id)
-    else {
+    let Some(configured) = configured_ca_entry(ca_id).await? else {
         return Ok(None);
     };
 

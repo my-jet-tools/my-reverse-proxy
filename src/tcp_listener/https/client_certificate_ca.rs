@@ -17,6 +17,11 @@ pub struct ClientCertificateData {
     /// per-endpoint decision must check that the endpoint requires THIS CA —
     /// the CN below means nothing to an endpoint trusting a different CA.
     pub ca_id: String,
+    /// The certificate was outside its validity window and was accepted anyway, because the
+    /// endpoint that opened this connection declares `unlimited_expiration`. Another endpoint
+    /// sharing the same ca but NOT declaring it must refuse requests carried over this
+    /// connection - the escape hatch belongs to the endpoint that opted into it.
+    pub accepted_outside_validity: bool,
 }
 
 /// Metadata of the CA certificate a client-certificate id is currently loaded with.
@@ -102,15 +107,18 @@ impl ClientCertificateCa {
         Ok(resut)
     }
 
-    /// Verifies a client certificate against this trust anchor. `now` is the handshake time
-    /// rustls provides - the certificate's own validity window is enforced against it, because
-    /// expiry is how most deployments retire a client certificate (a CRL is optional, and often
-    /// absent). Returns `None` for every rejection.
+    /// Verifies a client certificate against this trust anchor.
+    ///
+    /// `check_validity_at` is the handshake time rustls provides - the certificate's own validity
+    /// window is enforced against it, because expiry is how most deployments retire a client
+    /// certificate (a CRL is optional, and often absent). It is `None` only when the ca is
+    /// declared `unlimited_expiration: true` in the configuration, which is the operator saying
+    /// "accept these certificates however old they are". Returns `None` for every rejection.
     pub fn verify_cert(
         &self,
         certificate_to_check: &rustls_pki_types::CertificateDer,
         ca_id: &str,
-        now: rustls_pki_types::UnixTime,
+        check_validity_at: Option<rustls_pki_types::UnixTime>,
     ) -> Option<Arc<ClientCertificateData>> {
         // Both sides are parsed defensively: `certificate_to_check` is whatever the client put
         // into the TLS handshake, so an unparseable certificate must be rejected, not panic the
@@ -127,11 +135,32 @@ impl ClientCertificateCa {
             .unwrap_or_default()
             .to_string();
 
-        let now = x509_parser::prelude::ASN1Time::from_timestamp(now.as_secs() as i64).ok()?;
+        let accepted_outside_validity = match check_validity_at {
+            Some(now) => {
+                let now =
+                    x509_parser::prelude::ASN1Time::from_timestamp(now.as_secs() as i64).ok()?;
 
-        if !cert_to_check.validity().is_valid_at(now) {
-            return None;
-        }
+                if !cert_to_check.validity().is_valid_at(now) {
+                    return None;
+                }
+
+                false
+            }
+            None => {
+                // Expiry is not enforced here, but WHETHER it would have failed is recorded on the
+                // connection: a stricter endpoint reached over the same connection has to be able
+                // to refuse it.
+                let now = rust_extensions::date_time::DateTimeAsMicroseconds::now();
+                match x509_parser::prelude::ASN1Time::from_timestamp(
+                    now.unix_microseconds / 1_000_000,
+                ) {
+                    Ok(now) => !cert_to_check.validity().is_valid_at(now),
+                    // The clock could not be expressed as an ASN.1 time: assume the worst, so the
+                    // certificate is only honoured where expiry is not enforced.
+                    Err(_) => true,
+                }
+            }
+        };
 
         if cert_to_check
             .verify_signature(Some(issuer.public_key()))
@@ -146,6 +175,7 @@ impl ClientCertificateCa {
             let cert_data = ClientCertificateData {
                 cn,
                 ca_id: ca_id.to_string(),
+                accepted_outside_validity,
             };
 
             let cert_data = Arc::new(cert_data);

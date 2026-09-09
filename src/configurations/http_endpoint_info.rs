@@ -20,6 +20,10 @@ pub struct HttpEndpointInfo {
     pub oauth: Option<String>,
     pub ssl_certificate_id: Option<SslCertificateId>,
     pub client_certificate_id: Option<SslCertificateId>,
+    /// `unlimited_expiration:` of the client certificate ca this endpoint requires. Kept on the
+    /// endpoint rather than on the cached ca, so a change in the settings applies on the next
+    /// reload without re-resolving or re-uploading the certificate.
+    pub client_certificate_unlimited_expiration: bool,
     pub locations: Vec<Arc<ProxyPassLocationConfig>>,
     pub allowed_user_list_id: Option<String>,
     pub modify_request_headers: ModifyHeadersConfig,
@@ -49,6 +53,7 @@ pub struct HttpEndpointInfoParams {
     pub oauth: Option<String>,
     pub ssl_certificate_id: Option<SslCertificateId>,
     pub client_certificate_id: Option<SslCertificateId>,
+    pub client_certificate_unlimited_expiration: bool,
     pub whitelisted_ip_list_id: Option<String>,
     pub locations: Vec<Arc<ProxyPassLocationConfig>>,
     pub allowed_user_list_id: Option<String>,
@@ -71,6 +76,7 @@ impl HttpEndpointInfo {
             oauth,
             ssl_certificate_id,
             client_certificate_id,
+            client_certificate_unlimited_expiration,
             whitelisted_ip_list_id,
             locations,
             allowed_user_list_id,
@@ -105,6 +111,7 @@ impl HttpEndpointInfo {
             g_auth,
             oauth,
             client_certificate_id,
+            client_certificate_unlimited_expiration,
             locations,
             allowed_user_list_id,
             modify_request_headers,
@@ -166,11 +173,15 @@ impl HttpEndpointInfo {
     /// alone is not enough: a certificate trusted by another vhost's CA says
     /// nothing about this endpoint's mTLS requirement. The caller answers 421
     /// so the client re-opens a dedicated connection and performs mTLS here.
-    pub fn connection_satisfies_client_cert(&self, connection_cert_ca: Option<&str>) -> bool {
-        match self.client_certificate_id.as_ref() {
-            Some(required_ca) => connection_cert_ca == Some(required_ca.as_str()),
-            None => true,
-        }
+    pub fn connection_satisfies_client_cert(
+        &self,
+        connection_cert: Option<&crate::tcp_listener::https::ClientCertificateData>,
+    ) -> bool {
+        client_cert_satisfies(
+            self.client_certificate_id.as_ref().map(|itm| itm.as_str()),
+            self.client_certificate_unlimited_expiration,
+            connection_cert,
+        )
     }
 
     /// Whether the connection's client-certificate identity (CN) is meaningful
@@ -181,11 +192,12 @@ impl HttpEndpointInfo {
     /// for a vhost whose CA never saw that certificate. This also keeps a
     /// coalesced request's outcome identical to a dedicated-connection one
     /// (where a no-mTLS endpoint never asks for a certificate at all).
-    pub fn client_cert_identity_applies(&self, connection_cert_ca: &str) -> bool {
-        match self.client_certificate_id.as_ref() {
-            Some(required_ca) => required_ca.as_str() == connection_cert_ca,
-            None => false,
-        }
+    pub fn client_cert_identity_applies(
+        &self,
+        connection_cert: &crate::tcp_listener::https::ClientCertificateData,
+    ) -> bool {
+        self.connection_satisfies_client_cert(Some(connection_cert))
+            && self.client_certificate_id.is_some()
     }
 
     pub fn must_be_authorized<'s>(&'s self) -> Option<AuthorizationRequired<'s>> {
@@ -213,5 +225,93 @@ impl HttpEndpointInfo {
             .allowed_users_list
             .is_allowed(allowed_user_list_id, identity.as_str())
             .await
+    }
+}
+
+/// Whether a connection's client certificate satisfies an endpoint's mTLS requirement.
+///
+/// `required_ca` is the endpoint's `client_certificate_ca` (None - the endpoint requires none),
+/// `endpoint_unlimited_expiration` its `unlimited_expiration` flag, and `connection_cert` what the
+/// TLS handshake of the connection actually verified.
+fn client_cert_satisfies(
+    required_ca: Option<&str>,
+    endpoint_unlimited_expiration: bool,
+    connection_cert: Option<&crate::tcp_listener::https::ClientCertificateData>,
+) -> bool {
+    let Some(required_ca) = required_ca else {
+        return true;
+    };
+
+    let Some(connection_cert) = connection_cert else {
+        return false;
+    };
+
+    if connection_cert.ca_id != required_ca {
+        return false;
+    }
+
+    // The certificate may have been accepted past its expiry because the endpoint that opened the
+    // connection declares `unlimited_expiration`. That exception belongs to the endpoint that opted
+    // into it: one that enforces expiry must not inherit it over a coalesced or reused connection -
+    // and the two can differ while a targeted reload has applied a settings change to only one.
+    if connection_cert.accepted_outside_validity && !endpoint_unlimited_expiration {
+        return false;
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod client_cert_guard_tests {
+    use super::client_cert_satisfies;
+    use crate::tcp_listener::https::ClientCertificateData;
+
+    fn cert(ca_id: &str, accepted_outside_validity: bool) -> ClientCertificateData {
+        ClientCertificateData {
+            cn: "client".to_string(),
+            ca_id: ca_id.to_string(),
+            accepted_outside_validity,
+        }
+    }
+
+    #[test]
+    fn endpoint_without_mtls_accepts_anything() {
+        assert!(client_cert_satisfies(None, false, None));
+        assert!(client_cert_satisfies(
+            None,
+            false,
+            Some(&cert("other", true))
+        ));
+    }
+
+    #[test]
+    fn a_certificate_is_required_and_must_come_from_this_ca() {
+        assert!(client_cert_satisfies(
+            Some("partner"),
+            false,
+            Some(&cert("partner", false))
+        ));
+        assert!(!client_cert_satisfies(Some("partner"), false, None));
+        assert!(!client_cert_satisfies(
+            Some("partner"),
+            false,
+            Some(&cert("other", false))
+        ));
+    }
+
+    #[test]
+    fn an_expired_certificate_does_not_travel_to_an_endpoint_that_enforces_expiry() {
+        // Accepted at an endpoint declaring unlimited_expiration, then reused (h2 coalescing or a
+        // keep-alive request for another Host) for an endpoint that does not declare it.
+        assert!(client_cert_satisfies(
+            Some("partner"),
+            true,
+            Some(&cert("partner", true))
+        ));
+        assert!(!client_cert_satisfies(
+            Some("partner"),
+            false,
+            Some(&cert("partner", true))
+        ));
     }
 }

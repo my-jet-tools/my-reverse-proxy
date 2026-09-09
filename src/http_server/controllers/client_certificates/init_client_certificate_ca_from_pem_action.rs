@@ -89,6 +89,9 @@ pub struct InitClientCertificateCaResultHttpModel {
     // kept_from_previous / none.
     pub crl_source: String,
     pub replaced_different_authority: bool,
+    // `unlimited_expiration:` on the ca entry - the validity dates of client certificates
+    // verified against this ca are not enforced.
+    pub unlimited_expiration: bool,
 }
 
 impl InitClientCertificateCaResultHttpModel {
@@ -103,6 +106,7 @@ impl InitClientCertificateCaResultHttpModel {
             crl_records: src.crl_records,
             crl_source: src.crl_source.to_string(),
             replaced_different_authority: src.replaced_different_authority,
+            unlimited_expiration: src.unlimited_expiration,
         }
     }
 }

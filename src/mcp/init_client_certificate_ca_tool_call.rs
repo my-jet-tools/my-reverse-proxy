@@ -36,7 +36,7 @@ pub struct InitClientCertificateCaResponse {
     pub expires: String,
 
     #[property(
-        description = "The installed ca is already past its expiry. It still verifies clients here (validity dates are not checked during verification), but it is almost certainly the wrong file."
+        description = "The installed ca is already past its expiry. It still verifies clients - the ca's OWN validity is not enforced (the client certificates' is) - but it is almost certainly the wrong file."
     )]
     pub expired: bool,
 
@@ -60,6 +60,11 @@ pub struct InitClientCertificateCaResponse {
         description = "True when the upload replaced a ca of a different authority - the set of clients the endpoint trusts has changed."
     )]
     pub replaced_different_authority: bool,
+
+    #[property(
+        description = "The ca entry declares `unlimited_expiration: true`, so client certificates verified against it are accepted regardless of their validity dates."
+    )]
+    pub unlimited_expiration: bool,
 }
 
 pub struct InitClientCertificateCaHandler;
@@ -101,6 +106,7 @@ impl McpToolCall<InitClientCertificateCaInputData, InitClientCertificateCaRespon
             crl_records: result.crl_records as i64,
             crl_source: result.crl_source.to_string(),
             replaced_different_authority: result.replaced_different_authority,
+            unlimited_expiration: result.unlimited_expiration,
         })
     }
 }

@@ -63,9 +63,12 @@ client_certificate_ca:
     ca: ~/certs/ca.cer  
     revocation_list: ~/certs/revocation_list.crl
 
-  # Sources are optional. An entry with no `ca:` (or no entry at all, just the id referenced by
-  # an endpoint) means the CA is uploaded at runtime - see "Certificates provided at runtime".
+  # The `ca:` source is optional: an entry without it means the certificate is uploaded at
+  # runtime - see "Certificates provided at runtime". Everything ELSE about the ca (its
+  # revocation list, `unlimited_expiration`) is always taken from this entry, so an endpoint may
+  # only reference an id declared here.
   - id: uploaded_ca
+    unlimited_expiration: true   # accept client certificates whose validity dates have passed
 
 
 variables:
@@ -74,32 +77,180 @@ variables:
 
 ## Certificates provided at runtime
 
-Both certificate kinds can be declared without a source and provided later, without a restart:
+A TLS server certificate and a client-certificate CA can both be **declared in the configuration without a
+source and delivered later**, from the admin ui or over the API, without restarting the proxy. This is the
+supported way to run a host whose certificate material must not sit on disk next to the configuration.
 
-- `ssl_certificates`: omit **both** `certificate:` and `private_key:` (specifying only one is an error).
-- `client_certificate_ca`: omit `ca:`. The whole entry may be omitted too - referencing an id from an
-  endpoint is enough. A `revocation_list:` without a `ca:` is refused: a revocation list alone is never
-  applied.
+### 1. Declare it
 
-Such an endpoint **starts and keeps listening**, but its TLS handshake is cut until the material arrives -
-nothing is ever served with a missing server certificate, and nothing is served unverified when the client
-CA is missing. The admin ui (served on the control port) marks the endpoint with a red *SSL cert not
-loaded* / *Client cert CA not loaded* badge; clicking it opens a dialog to paste the PEM material. The same
-uploads over the API:
+```yaml
+ssl_certificates:
+  - id: my_ssl_cert          # no `certificate:` / `private_key:` -> uploaded at runtime
+                             # (specifying only one of the two is an error)
 
-| what | endpoint | notes |
+client_certificate_ca:
+  - id: partner_ca           # no `ca:` -> uploaded at runtime
+    revocation_list: ~/certs/partners.crl   # optional, and read even for an uploaded ca
+    unlimited_expiration: false             # optional, see "How a client certificate is verified"
+
+hosts:
+  "partners.example.com:443":
+    endpoint:
+      type: https
+      ssl_certificate: my_ssl_cert
+      client_certificate_ca: partner_ca     # must be an id declared above
+    locations:
+      - proxy_pass_to: http://10.0.0.5:5123
+```
+
+Rules the configuration loader enforces (all of them fail loudly, with the id in the message):
+
+| Configuration | Result |
+| --- | --- |
+| `client_certificate_ca` id on an endpoint that is not declared in the `client_certificate_ca` section | the **host** fails to compile and appears in `errors` of `GET /api/configuration/Current` |
+| `revocation_list:` without `ca:` | the whole settings load fails - a revocation list alone is never applied |
+| the same `id` twice in `ssl_certificates` or `client_certificate_ca` | the whole settings load fails - the duplicate would be silently ignored |
+| `client_certificate_ca` on a `type: http` / `http2` endpoint | the host fails to compile - there is no TLS handshake to present a client certificate in |
+
+### 2. What happens until the material arrives
+
+The endpoint **starts and keeps listening**, but every TLS handshake on it is cut:
+
+- no server certificate -> the handshake is aborted (the waiting client is *not* added to the ip blocklist);
+- no client-certificate CA -> the same, so an endpoint that requires mTLS **never serves anyone unverified**.
+
+`GET /api/configuration/Current` marks such endpoints per endpoint object:
+
+```json
+{ "host": "partners.example.com:443",
+  "ssl_cert_id": "my_ssl_cert",  "ssl_cert_missing": true,
+  "client_cert_id": "partner_ca", "client_cert_missing": true }
+```
+
+The admin ui (served on `http_control_port`, typically reached over an SSH port-forward) shows the same as a
+red **SSL cert not loaded** / **Client cert CA not loaded** badge on the endpoint. Clicking the badge opens a
+dialog that takes the PEM text and performs the upload below.
+
+### 3. Upload
+
+Multipart form-data (what Swagger sends; `-F 'field=<file'` makes curl send the file *content* as the field):
+
+```bash
+# TLS server certificate
+curl -X POST http://127.0.0.1:8000/api/SslCertificates/Init \
+     -F 'cert_id=my_ssl_cert' -F 'certificate=<fullchain.pem' -F 'private_key=<privkey.pem'
+
+# client certificate CA (+ optional revocation list)
+curl -X POST http://127.0.0.1:8000/api/ClientCertificates/Init \
+     -F 'ca_id=partner_ca' -F 'ca=<partner-ca.crt' -F 'crl=<partners.crl'
+```
+
+The same over a json body - this is what the admin ui uses. PEM travels **base64-encoded on a SINGLE line**
+(`base64 < file | tr -d '\n'`), because a json string would otherwise carry unresolved escapes:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/ClientCertificates/InitFromPem \
+     -H 'Content-Type: application/json' \
+     -d '{"ca_id":"partner_ca","ca":"<base64 of the PEM>","crl":"<base64, optional>",
+          "replace_different_ca":false}'
+```
+
+| endpoint | fields |
+| --- | --- |
+| `POST /api/SslCertificates/Init` (form-data) | `cert_id`, `certificate`, `private_key` (PEM text) |
+| `POST /api/SslCertificates/InitFromPem` (json) | `cert_id`, `cert`, `private_key` (base64 of PEM) |
+| `POST /api/ClientCertificates/Init` (form-data) | `ca_id`, `ca`, `crl` (optional), `replace_different_ca` (optional) |
+| `POST /api/ClientCertificates/InitFromPem` (json) | `ca_id`, `ca`, `crl` (optional), `replace_different_ca` (optional) - PEM fields base64 |
+
+A client-CA upload answers with what was actually installed:
+
+```json
+{ "ca_id": "partner_ca", "cn": "Partner Issuing CA",
+  "expires": "2027-09-09T08:59:52+00:00", "expired": false, "is_ca": true,
+  "endpoints": ["partners.example.com:443"],
+  "crl_records": 12, "crl_source": "configured_revocation_list",
+  "replaced_different_authority": false, "unlimited_expiration": false }
+```
+
+`crl_source` says where the revocation list came from: `uploaded`, `configured_revocation_list` (read from the
+`revocation_list:` of the entry, and kept refreshed from it afterwards), `kept_from_previous` (the list of the
+ca being replaced) or `none` (**nothing can be revoked**).
+
+### 4. Why an upload is refused
+
+Nothing is stored unless the whole check passes, so a refusal always leaves the previous state intact.
+
+| Message | Cause | What to do |
 | --- | --- | --- |
-| TLS server certificate | `POST /api/SslCertificates/Init` (multipart) or `/InitFromPem` (json, base64) | key must match the certificate; the certificate must cover the endpoint's SNI and that of the certificate it replaces |
-| client certificate CA | `POST /api/ClientCertificates/Init` (multipart) or `/InitFromPem` (json, base64) | exactly one certificate - the CA that directly issues the client certificates; replacing a loaded CA with a different authority needs `replace_different_ca=true` |
+| `No https endpoint requires client certificate ca 'x'` | no endpoint in the RUNNING configuration references the id (typo, or the host failed to compile) | fix the configuration and reload first, then upload |
+| `The uploaded PEM contains N certificates` | a bundle was pasted | upload the single CA that **directly issues** the client certificates (for root -> issuing-ca -> client, the issuing ca) |
+| `The pasted material contains a PRIVATE KEY block` | the wrong file, or a cert+key bundle | paste only the `-----BEGIN CERTIFICATE-----` block; treat the pasted key as compromised |
+| `... is currently loaded with a DIFFERENT authority` | the uploaded ca is not a renewal of the loaded one (subject + public key differ), so it changes which clients are trusted | intended rotation: repeat with `replace_different_ca=true` |
+| `... declares 'revocation_list: ...' which can not be read` | the configured revocation list is unreachable | fix the source, or upload the CRL together with the ca - the proxy refuses to install a ca without the revocations it is configured to enforce |
+| `Can not read the configuration to resolve the revocation list ...` | the settings files do not compile right now | fix the configuration; the upload reads it to find the ca entry |
 
-Reading them back gives metadata only (`GET /api/SslCertificates/Certificate?certId=`,
-`GET /api/ClientCertificates/Ca?caId=`) - no PEM material and never a private key. Both are also exposed
-over MCP (`init_ssl_certificate`, `init_client_certificate_ca`, and the two status tools).
+### 5. Read back, and undo
 
-An uploaded certificate is **manually managed**: nothing re-reads or renews it until the configured source
-is re-established with `POST /api/configuration/RefreshSslCertificate` / `RefreshCaCertificate`. The one
-exception is a client CA whose configuration declares a `revocation_list:` - that list is loaded during the
-upload (the upload is refused if it can not be read) and keeps being refreshed from its source.
+```bash
+GET    /api/SslCertificates/Current                  # every loaded server certificate
+GET    /api/SslCertificates/Certificate?certId=...   # metadata: cn, expires, origin, domains
+GET    /api/ClientCertificates/Ca?caId=...           # metadata: cn, expires, expired, is_ca,
+                                                     #           origin, crl_records, unlimited_expiration
+DELETE /api/ClientCertificates/Ca?caId=...           # drop a loaded ca (the undo for a wrong upload)
+```
+
+Reads return **metadata only** - no PEM material is ever handed out, and a private key never leaves the proxy.
+`DELETE` is fail-closed: the endpoints requiring that ca go back to cutting every connection until a ca is
+provided again; a ca that has a `ca:` source returns on the next `RefreshCaCertificate` or reload, a manually
+uploaded one has to be uploaded again.
+
+### 6. From an agent (MCP)
+
+The control port also serves MCP at `/mcp`. The workflow is status -> inspect -> upload:
+
+| tool | purpose |
+| --- | --- |
+| `get_ssl_endpoints_status` / `get_client_ca_endpoints_status` | which endpoints are missing material, with the `cert_id` / `ca_id` to use |
+| `get_ssl_certificate` / `get_client_certificate_ca` | metadata of what is loaded under an id (check before replacing) |
+| `init_ssl_certificate` / `init_client_certificate_ca` | the upload, same validation as the REST endpoints |
+
+### 7. How a client certificate is verified
+
+At the TLS handshake, in this order - failing any of them rejects the connection:
+
+1. it is inside its own validity window - **unless** the ca entry declares `unlimited_expiration: true`;
+2. it is signed by the loaded ca (the signature is verified against the ca's public key);
+3. its serial is not in the ca's revocation list;
+4. the client proves it holds the certificate's private key (rustls hands the CertificateVerify signature
+   to the proxy, which verifies it against the presented certificate - so a copy of someone else's
+   certificate, or of the ca certificate itself, is not enough to authenticate).
+
+Per request, the ca that verified the connection must be the ca the endpoint requires - a connection reused
+for another vhost (HTTP/2 coalescing, keep-alive with a different `Host`) does not carry its identity over.
+
+`unlimited_expiration: true` turns off **only** step 3, for that ca - the escape hatch for a partner whose
+certificates have expired but who still has to connect. Everything else stays in force. It is reported by the
+dashboard, `GET /api/ClientCertificates/Ca`, both MCP tools and the upload result, so it can not be quietly
+forgotten. Because the flag is carried on the endpoint configuration, changing it applies on the next
+`ReloadEndpoint` - the certificate does not have to be re-uploaded.
+
+What is deliberately **not** enforced, and worth knowing before relying on it:
+
+- **no chain building**: exactly one certificate is the trust anchor and intermediates sent by the client are
+  ignored, which is why an upload refuses a multi-certificate PEM;
+- **the ca's own expiry** is not checked (an expired ca keeps verifying clients); it is reported as `expired`
+  on every surface instead;
+- mTLS identity is decided **during the handshake**: replacing a compromised ca, or uploading a new revocation
+  list, does not drop connections that are already open.
+
+### 8. Lifecycle
+
+An uploaded certificate is **manually managed**: nothing re-reads or renews it, and for a server certificate
+the renewal timer skips it, until the configured source is re-established with
+`POST /api/configuration/RefreshSslCertificate` / `RefreshCaCertificate` (both take the id as form-data;
+`RefreshCaCertificate` answers `400` for an entry that has no `ca:` source, because there is nothing to
+refresh from). The one exception is a client ca whose entry declares a `revocation_list:` - that list is
+loaded during the upload and keeps being refreshed from its source by the CRL timer.
 
 ## Http request endpoints
 ### Headers

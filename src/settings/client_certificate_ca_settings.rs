@@ -10,9 +10,18 @@ pub struct ClientCertificateCaSettings {
     /// endpoints requiring it is cut, so nothing is ever served unverified.
     pub ca: Option<String>,
     pub revocation_list: Option<String>,
+    /// When true, client certificates verified against this ca are accepted regardless of their
+    /// validity dates. It is the deliberate escape hatch for a partner whose certificates are
+    /// expired but who still has to connect - off by default, and reported on every admin
+    /// surface so it can not be forgotten.
+    pub unlimited_expiration: Option<bool>,
 }
 
 impl ClientCertificateCaSettings {
+    pub fn get_unlimited_expiration(&self) -> bool {
+        self.unlimited_expiration.unwrap_or(false)
+    }
+
     /// `None` means the CA has no configured source and is uploaded at runtime.
     ///
     /// A revocation list without a CA source is refused: the CRL of a manually uploaded CA

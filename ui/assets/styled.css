@@ -545,6 +545,17 @@ table.locations tbody tr.upstream-unknown td.upstream {
     border-left: 1px solid #fc8181;
 }
 
+/* unlimited_expiration on the client-cert ca — the escape hatch must be visible */
+.meta-chip.auth.client .value.state.unlimited {
+    background: #fefcbf;
+    color: #744210;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+    font-weight: 700;
+    border-left: 1px solid #d69e2e;
+}
+
 /* Google-auth — blue tint */
 .meta-chip.auth.google .label {
     background: #2b6cb0;

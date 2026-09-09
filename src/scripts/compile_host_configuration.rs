@@ -78,6 +78,20 @@ pub async fn compile_host_configuration(
             return Ok(ListenConfiguration::Http(config.into()));
         }
         EndpointTypeSettings::Tcp => {
+            // A 'type: tcp' endpoint is a raw byte bridge - it never performs a TLS handshake of
+            // its own, so a client certificate can not be requested or verified here. Refusing is
+            // the same rule the http/http2 endpoints get in `compile_http_configuration`: an
+            // endpoint the operator believes is mTLS-protected must never quietly serve everyone.
+            if host_settings.endpoint.client_certificate_ca.is_some() {
+                return Err(format!(
+                    "Endpoint '{}' is 'type: tcp', a raw byte bridge with no TLS layer of its own, \
+                     so 'client_certificate_ca' can not be applied to it - the endpoint would pass \
+                     every client through unverified. Use 'type: https' / 'type: https2', or \
+                     remove 'client_certificate_ca'",
+                    host_endpoint.as_str()
+                ));
+            }
+
             let tcp_configuration =
                 TcpEndpointHostConfig::new(settings_model, host_endpoint, host_settings).await?;
 

@@ -49,14 +49,14 @@ pub async fn compile_http_configuration(
         if client_cert_ca.is_some() {
             return Err(format!(
                 "Endpoint '{}' is 'type: {}', which has no TLS layer, so 'client_certificate_ca' \
-                 can not be applied to it - the endpoint would serve every client unverified. Use \
-                 'type: https' / 'type: https2' on the endpoint, or remove 'client_certificate_ca'",
+             can not be applied to it - the endpoint would serve every client unverified. Use \
+             'type: https' / 'type: https2' on the endpoint, or remove 'client_certificate_ca'",
                 host_endpoint.as_str(),
                 http_type.as_str()
             ));
         }
 
-        (None, None, None)
+        (None, None, None::<super::ClientCaRequirement>)
     };
 
     // Unlike google_auth this is resolved for plain-http endpoints too: an
@@ -153,7 +153,11 @@ pub async fn compile_http_configuration(
         g_auth,
         oauth,
         ssl_certificate_id: ssl_cert_id,
-        client_certificate_id: client_cert_ca,
+        client_certificate_unlimited_expiration: client_cert_ca
+            .as_ref()
+            .map(|itm| itm.unlimited_expiration)
+            .unwrap_or(false),
+        client_certificate_id: client_cert_ca.map(|itm| itm.id),
         whitelisted_ip_list_id: endpoint_whitelisted_ip,
         locations,
         allowed_user_list_id: allowed_user_list,

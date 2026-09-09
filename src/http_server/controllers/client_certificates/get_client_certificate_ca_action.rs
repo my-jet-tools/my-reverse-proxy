@@ -43,6 +43,7 @@ async fn handle_request(
         expired: details.expired,
         origin: details.origin,
         crl_records: details.crl_records,
+        unlimited_expiration: details.unlimited_expiration,
     };
 
     HttpOutput::as_json(model).into_ok_result(true).into()
@@ -63,4 +64,5 @@ pub struct ClientCertificateCaHttpModel {
     pub expired: bool,
     pub origin: String,
     pub crl_records: usize,
+    pub unlimited_expiration: bool,
 }

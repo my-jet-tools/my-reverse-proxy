@@ -241,12 +241,9 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
     // verified by a different CA (a deliberate cross-vhost request on a
     // keep-alive connection) — refuse it with 421 so the client re-opens a
     // dedicated connection and performs mTLS against this endpoint's CA.
-    if !end_point_info.connection_satisfies_client_cert(
-        http_connection_info
-            .cn_user_name
-            .as_ref()
-            .map(|c| c.ca_id.as_str()),
-    ) {
+    if !end_point_info
+        .connection_satisfies_client_cert(http_connection_info.cn_user_name.as_deref())
+    {
         crate::app::APP_CTX.proxy_logs.write_port(
             http_connection_info
                 .listen_config

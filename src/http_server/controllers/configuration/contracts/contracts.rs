@@ -272,6 +272,9 @@ pub struct HttpEndpointInfoModel {
     // True when this endpoint requires a client certificate ca that is NOT currently loaded —
     // the endpoint listens but cuts every TLS connection until the ca arrives.
     pub client_cert_missing: bool,
+    // True when the endpoint's client certificate ca declares `unlimited_expiration` - the
+    // validity dates of client certificates are not enforced on this endpoint.
+    pub client_cert_unlimited_expiration: bool,
     pub g_auth: Option<String>,
 }
 
@@ -310,6 +313,7 @@ impl HttpEndpointInfoModel {
                 .map(|itm| itm.as_str().to_string()),
             // Same second pass as `ssl_cert_missing`.
             client_cert_missing: false,
+            client_cert_unlimited_expiration: endpoint.client_certificate_unlimited_expiration,
             g_auth: endpoint.g_auth.clone(),
             inbound_connections,
             locations: endpoint
@@ -350,6 +354,7 @@ impl HttpEndpointInfoModel {
             ssl_cert_missing: false,
             client_cert_id: None,
             client_cert_missing: false,
+            client_cert_unlimited_expiration: false,
             g_auth: None,
         }
     }

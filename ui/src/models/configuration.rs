@@ -67,6 +67,10 @@ pub struct HttpEndpointInfoModel {
     /// the endpoint listens but cuts every TLS connection until the ca is provided.
     #[serde(default)]
     pub client_cert_missing: bool,
+    /// The endpoint's client certificate ca declares `unlimited_expiration` — client certificate
+    /// validity dates are not enforced here.
+    #[serde(default)]
+    pub client_cert_unlimited_expiration: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub g_auth: Option<String>,
 }

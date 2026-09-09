@@ -28,4 +28,8 @@ pub struct InitClientCaResultModel {
     pub crl_source: String,
     #[serde(default)]
     pub replaced_different_authority: bool,
+    /// The ca entry declares `unlimited_expiration: true` — expiry is not enforced for the
+    /// client certificates verified against it.
+    #[serde(default)]
+    pub unlimited_expiration: bool,
 }

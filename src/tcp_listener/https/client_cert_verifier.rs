@@ -16,6 +16,9 @@ pub struct MyClientCertVerifier {
     /// CA actually verified the connection's certificate.
     ca_id: String,
     endpoint_port: u16,
+    /// From `unlimited_expiration:` on this endpoint's ca entry: when set, the validity dates of
+    /// the client certificate are not enforced.
+    unlimited_expiration: bool,
     /// The signature algorithms the crypto provider can actually verify. Used both to tell the
     /// client which schemes its certificate may sign with, and to check the CertificateVerify
     /// message it sends back.
@@ -28,6 +31,7 @@ impl MyClientCertVerifier {
         ca: Arc<ClientCertificateCa>,
         ca_id: String,
         endpoint_port: u16,
+        unlimited_expiration: bool,
     ) -> Self {
         // `main` installs the provider before anything listens; the ring default is only a
         // fallback so this can never end up with no algorithms (which would reject every client).
@@ -41,6 +45,7 @@ impl MyClientCertVerifier {
             client_cert_cell,
             ca_id,
             endpoint_port,
+            unlimited_expiration,
             supported_algs,
         }
     }
@@ -102,7 +107,17 @@ impl ClientCertVerifier for MyClientCertVerifier {
         my_tls::tokio_rustls::rustls::server::danger::ClientCertVerified,
         my_tls::tokio_rustls::rustls::Error,
     > {
-        if let Some(client_certificate) = self.ca.verify_cert(end_entity, self.ca_id.as_str(), now)
+        // `unlimited_expiration` on the ca entry is the operator saying "these certificates are
+        // accepted however old they are"; otherwise the handshake time bounds them.
+        let check_validity_at = if self.unlimited_expiration {
+            None
+        } else {
+            Some(now)
+        };
+
+        if let Some(client_certificate) =
+            self.ca
+                .verify_cert(end_entity, self.ca_id.as_str(), check_validity_at)
         {
             self.client_cert_cell.set(client_certificate);
 

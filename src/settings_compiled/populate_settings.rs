@@ -182,6 +182,7 @@ impl SettingsCompiled {
                     id: variables.apply_variables(itm.id)?,
                     ca: variables.apply_variables_opt(itm.ca)?,
                     revocation_list: variables.apply_variables_opt(itm.revocation_list)?,
+                    unlimited_expiration: itm.unlimited_expiration,
                 };
 
                 // Structural validation belongs here: a per-endpoint failure to RESOLVE a ca is
