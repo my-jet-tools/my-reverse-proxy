@@ -84,10 +84,11 @@ impl ClientCertificateCa {
             let (_, cert) = X509Certificate::from_der(ca)
                 .map_err(|err| format!("Can not parse client CA certificate: {}", err))?;
 
-            let issuer = cert.issuer();
-
-            //println!("Issuer: {}", issuer.);
-            names.push(issuer.as_raw().to_vec().into());
+            // These DNs go out in the CertificateRequest as `certificate_authorities` - the
+            // acceptable ISSUERS of the client certificate, which for a trust anchor is the
+            // anchor's own SUBJECT. Sending its issuer instead only coincides for a self-signed
+            // root; for an intermediate it makes conforming clients select no certificate at all.
+            names.push(cert.subject().as_raw().to_vec().into());
         }
 
         let resut = Self {
@@ -101,10 +102,15 @@ impl ClientCertificateCa {
         Ok(resut)
     }
 
+    /// Verifies a client certificate against this trust anchor. `now` is the handshake time
+    /// rustls provides - the certificate's own validity window is enforced against it, because
+    /// expiry is how most deployments retire a client certificate (a CRL is optional, and often
+    /// absent). Returns `None` for every rejection.
     pub fn verify_cert(
         &self,
         certificate_to_check: &rustls_pki_types::CertificateDer,
         ca_id: &str,
+        now: rustls_pki_types::UnixTime,
     ) -> Option<Arc<ClientCertificateData>> {
         // Both sides are parsed defensively: `certificate_to_check` is whatever the client put
         // into the TLS handshake, so an unparseable certificate must be rejected, not panic the
@@ -120,6 +126,12 @@ impl ClientCertificateCa {
             .and_then(|cn| cn.as_str().ok())
             .unwrap_or_default()
             .to_string();
+
+        let now = x509_parser::prelude::ASN1Time::from_timestamp(now.as_secs() as i64).ok()?;
+
+        if !cert_to_check.validity().is_valid_at(now) {
+            return None;
+        }
 
         if cert_to_check
             .verify_signature(Some(issuer.public_key()))
