@@ -94,6 +94,49 @@ variables:
   my_ssh_config: ssh:user@10.12.13.14:22
 ```
 
+## Reaching a remote resource by ip (no A record needed)
+
+Several settings point at a resource the proxy loads: a local path, `ssh:user@host:port->/path`, or an
+`http://` / `https://` url it downloads.
+
+| Setting | What is loaded |
+| --- | --- |
+| `ssl_certificates` → `certificate:`, `private_key:` | the TLS certificate and its private key |
+| `client_certificate_ca` → `ca:`, `revocation_list:` | the client ca and its revocation list |
+| `ssh` → `private_key_file:` | the key for ssh connections (the gateway reads it only from a local file) |
+| `type: static` location → `body:` | the response body |
+
+A url addressed by a domain only works once the domain resolves: someone has to create an A record at the
+registrar (or in the DNS zone) and keep it pointed at the right server. When you already know the server's
+ip, write the domain first and the ip after an `@`. Taking the service that issues certificates as the
+example:
+
+```yaml
+ssl_certificates:
+  - id: my_ssl_cert
+    # the usual form - needs an A record for certs.example.com:
+    #   https://certs.example.com:8005/api/certificates/v1/certificate?domain=x-fine.online
+    certificate: https://certs.example.com@12.3.3.2:8005/api/certificates/v1/certificate?domain=x-fine.online
+    private_key: https://certs.example.com@12.3.3.2:8005/api/certificates/v1/private-key?domain=x-fine.online
+```
+
+No A record is needed at all: the proxy connects to `12.3.3.2:8005` directly and never asks DNS about
+`certs.example.com`. Everything else works as if the domain had been resolved:
+
+- the TLS handshake presents `certs.example.com` as the server name (SNI), so a server that holds several
+  certificates picks the right one;
+- the server certificate is verified against `certs.example.com` - an ip that answers with a certificate for
+  another name is refused, so pinning the ip does not weaken TLS;
+- the request carries `Host: certs.example.com:8005`, so the server routes it exactly as a request made by
+  the domain.
+
+The same form reaches a server that the domain's public A record does not point to - for example an internal
+instance serving the same name.
+
+The part after `@` must be an ip, optionally with a port (IPv6 as `[addr]:port`); a name there is refused,
+not resolved. The form applies to the resources in the table above when they are fetched directly - not
+behind `ssh:...->`, and not to `proxy_pass_to`, whose upstreams are connected to by a different path.
+
 ## Certificates provided at runtime
 
 A TLS server certificate and a client-certificate CA can both be **delivered while the proxy is running**,
