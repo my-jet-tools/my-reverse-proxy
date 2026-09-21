@@ -1,8 +1,4 @@
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use http::Method;
 use http_body_util::BodyExt;
@@ -74,12 +70,9 @@ async fn load_from_http_or_https<'s>(
             .await;
     }
 
-    let fl_url = match split_domain_at_ip(remote_endpoint.as_str())? {
-        Some(domain_at_ip) => FlUrl::new(domain_at_ip.url).with_header("Host", domain_at_ip.host),
-        None => FlUrl::new(remote_endpoint.as_str()),
-    };
-
-    let response = fl_url
+    // try_new, not new: a malformed `https://domain@ip:port/...` source must fail the load, not panic
+    let response = FlUrl::try_new(remote_endpoint.as_str())
+        .map_err(|err| format!("Invalid url {}. Error: {:?}", remote_endpoint.as_str(), err))?
         .get()
         .await
         .map_err(|err| format!("Error loading file from HTTP. Error: {:?}", err))?;
@@ -90,57 +83,6 @@ async fn load_from_http_or_https<'s>(
         .map_err(|itm| format!("Error loading file from HTTP. Error: {:?}", itm))?;
 
     Ok(result)
-}
-
-/// `https://domain@ip:port/path` - the connection goes straight to `ip:port`, `domain` is never
-/// resolved: it becomes the Host header, and FlUrl takes the TLS server name from that header.
-struct DomainAtIp {
-    url: String,
-    host: String,
-}
-
-fn split_domain_at_ip(src: &str) -> Result<Option<DomainAtIp>, String> {
-    let authority_start = match src.find("://") {
-        Some(index) => index + 3,
-        None => return Ok(None),
-    };
-
-    let authority_end = src[authority_start..]
-        .find(|c| matches!(c, '/' | '?' | '#'))
-        .map_or(src.len(), |index| authority_start + index);
-
-    let Some((domain, ip_port)) = src[authority_start..authority_end].split_once('@') else {
-        return Ok(None);
-    };
-
-    let port = match ip_port.parse::<SocketAddr>() {
-        Ok(socket_addr) => Some(socket_addr.port()),
-        Err(_) if ip_port.parse::<Ipv4Addr>().is_ok() => None,
-        Err(_) => {
-            return Err(format!(
-                "Invalid url {}: '{}' after '@' must be ip or ip:port",
-                src, ip_port
-            ))
-        }
-    };
-
-    if domain.is_empty() {
-        return Err(format!("Invalid url {}: no domain before '@'", src));
-    }
-
-    let host = match port {
-        Some(port) => format!("{}:{}", domain, port),
-        None => domain.to_string(),
-    };
-
-    Ok(Some(DomainAtIp {
-        url: format!(
-            "{}{}",
-            &src[..authority_start],
-            &src[authority_start + domain.len() + 1..]
-        ),
-        host,
-    }))
 }
 
 async fn loading_file_from_ssh<'s>(
@@ -203,67 +145,4 @@ async fn load_content_from_http_via_ssh<'s>(
     let body = body.to_bytes();
 
     Ok(body.into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::split_domain_at_ip;
-
-    #[test]
-    fn test_domain_at_ip_port() {
-        let result = split_domain_at_ip(
-            "https://domain.com@12.3.3.2:8005/api/certificates/v1/private-key?domain=x-fine.online",
-        )
-        .unwrap()
-        .unwrap();
-
-        assert_eq!(
-            result.url,
-            "https://12.3.3.2:8005/api/certificates/v1/private-key?domain=x-fine.online"
-        );
-        assert_eq!(result.host, "domain.com:8005");
-    }
-
-    #[test]
-    fn test_domain_at_ip_without_port() {
-        let result = split_domain_at_ip("https://domain.com@12.3.3.2/cert.pem")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(result.url, "https://12.3.3.2/cert.pem");
-        assert_eq!(result.host, "domain.com");
-    }
-
-    #[test]
-    fn test_domain_at_ipv6_port() {
-        let result = split_domain_at_ip("https://domain.com@[::1]:8005/cert.pem")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(result.url, "https://[::1]:8005/cert.pem");
-        assert_eq!(result.host, "domain.com:8005");
-    }
-
-    #[test]
-    fn test_url_without_domain_at_ip() {
-        assert!(split_domain_at_ip("https://domain.com:8005/cert.pem")
-            .unwrap()
-            .is_none());
-
-        assert!(
-            split_domain_at_ip("https://domain.com:8005/private-key?email=me@domain.com")
-                .unwrap()
-                .is_none()
-        );
-
-        assert!(split_domain_at_ip("https://domain.com?email=me@domain.com")
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn test_domain_at_not_ip() {
-        assert!(split_domain_at_ip("https://domain.com@other.com:8005/cert.pem").is_err());
-        assert!(split_domain_at_ip("https://@12.3.3.2:8005/cert.pem").is_err());
-    }
 }

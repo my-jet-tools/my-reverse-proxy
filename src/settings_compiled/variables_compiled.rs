@@ -106,3 +106,31 @@ fn name_characteristics(src: &str) -> Result<VariableNameType, String> {
 
     Ok(VariableNameType::Variable)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::VariablesCompiled;
+
+    #[test]
+    fn test_variables_in_domain_at_ip_url() {
+        let mut variables = VariablesCompiled::default();
+        variables
+            .data
+            .insert("cert_domain".to_string(), "certs.example.com".to_string());
+        variables
+            .data
+            .insert("cert_ip".to_string(), "12.3.3.2".to_string());
+
+        let result = variables
+            .apply_variables(
+                "https://${cert_domain}@${cert_ip}:8005/api/certificates/v1/private-key?domain=x-fine.online"
+                    .to_string(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            result,
+            "https://certs.example.com@12.3.3.2:8005/api/certificates/v1/private-key?domain=x-fine.online"
+        );
+    }
+}

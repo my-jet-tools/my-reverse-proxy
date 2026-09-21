@@ -133,8 +133,24 @@ No A record is needed at all: the proxy connects to `12.3.3.2:8005` directly and
 The same form reaches a server that the domain's public A record does not point to - for example an internal
 instance serving the same name.
 
-The part after `@` must be an ip, optionally with a port (IPv6 as `[addr]:port`); a name there is refused,
-not resolved. The form applies to the resources in the table above when they are fetched directly - not
+Both parts can come from variables, like any other value in the settings:
+
+```yaml
+variables:
+  certs_domain: certs.example.com
+  certs_ip: 12.3.3.2
+
+ssl_certificates:
+  - id: my_ssl_cert
+    private_key: https://${certs_domain}@${certs_ip}:8005/api/certificates/v1/private-key?domain=x-fine.online
+```
+
+Only `${lower_case}` names are substituted in a source - from `variables:`, then from the environment. An
+`${UPPER_CASE}` name is reserved for the system variables resolved per request and is not substituted here.
+
+The part after `@` must be an ip, optionally with a port (IPv6 in brackets: `[addr]` or `[addr]:port`); a
+name there is refused, not resolved. The part before `@` is the bare domain - the port always goes after the
+ip. A malformed url is reported the same way as an unreachable source. The form applies to the resources in the table above when they are fetched directly - not
 behind `ssh:...->`, and not to `proxy_pass_to`, whose upstreams are connected to by a different path.
 
 ## Certificates provided at runtime
