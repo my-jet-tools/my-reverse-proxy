@@ -636,6 +636,10 @@ side. Supported endpoint × upstream combinations:
 Notes:
 - Browsers do WebSocket over HTTP/2 only on TLS — use `https2` for
   browser-initiated WebSocket.
+- On `https2` the client's ALPN pick decides how a WebSocket arrives: an
+  RFC 8441 extended CONNECT over h2 (browsers), or a plain HTTP/1.1 `Upgrade`
+  when the client negotiates `http/1.1`. Cloudflare always reaches an origin
+  the second way, even with "HTTP/2 to Origin" on. Both are proxied.
 - For an upstream of type `http2` (or `unix+http2`) the upstream service must
   itself support WebSocket-over-HTTP/2. Services built on `MyHttpServer`
   support it from version `0.8.3`.

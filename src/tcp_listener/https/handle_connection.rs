@@ -203,9 +203,14 @@ async fn serve_https2(
 
     let https_requests_handler_dispose = https_requests_handler.clone();
 
+    // `with_upgrades` is what lets an HTTP/1.1 client on this endpoint open a
+    // websocket: Cloudflare reaches an origin this way even with "HTTP/2 to
+    // Origin" on. Without it hyper sends the `101` and then closes the
+    // connection, so the upgrade never resolves and the pump drops the upstream.
+    // The h2 side (extended CONNECT) is served the same either way.
     let _ = http_builder
         .clone()
-        .serve_connection(
+        .serve_connection_with_upgrades(
             TokioIo::new(tls_stream),
             service_fn(move |req| {
                 super::super::http_request_handler::https::handle_request(

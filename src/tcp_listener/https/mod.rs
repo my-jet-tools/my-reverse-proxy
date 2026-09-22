@@ -10,3 +10,6 @@ mod server_cert_resolver;
 mod tls_acceptor;
 pub use server_cert_resolver::*;
 pub mod utils;
+
+#[cfg(test)]
+mod websocket_tests;

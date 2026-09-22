@@ -33,6 +33,11 @@ pub const APP_NAME: &'static str = env!("CARGO_PKG_NAME");
 pub const APP_VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 pub static APP_CTX: std::sync::LazyLock<AppContext> = std::sync::LazyLock::new(|| {
+    // Tests start from empty settings rather than the `~/.my-reverse-proxy` of
+    // whoever runs them, and build the endpoints they need themselves.
+    #[cfg(test)]
+    let settings_model = SettingsCompiled::default();
+    #[cfg(not(test))]
     let settings_model = SettingsCompiled::load_settings_block().unwrap();
     AppContext::new(settings_model)
 });
