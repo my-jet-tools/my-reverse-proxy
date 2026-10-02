@@ -35,10 +35,7 @@ pub enum ProxyPassError {
 
 impl ProxyPassError {
     pub fn is_disposed(&self) -> bool {
-        match self {
-            ProxyPassError::ConnectionIsDisposed => true,
-            _ => false,
-        }
+        matches!(self, ProxyPassError::ConnectionIsDisposed)
     }
 
     pub fn is_hyper_canceled(&self) -> bool {

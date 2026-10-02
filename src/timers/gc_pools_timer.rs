@@ -20,7 +20,7 @@ impl MyTimerTick for GcPoolsTimer {
     async fn tick(&self) -> RepeatTimerIteration {
         let desired = APP_CTX
             .current_configuration
-            .get(|cfg| collect_desired_keys(cfg))
+            .get(collect_desired_keys)
             .await;
 
         APP_CTX.h1_tcp_pools.drain_unused(&desired.h1_tcp);

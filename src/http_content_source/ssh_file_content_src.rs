@@ -60,7 +60,7 @@ impl PathOverSshContentSource {
         &self,
         req: http::Request<http_body_util::Full<bytes::Bytes>>,
     ) -> Result<HttpResponse, ProxyPassError> {
-        let request_executor = self.get_request_executor(&req.uri()).await?;
+        let request_executor = self.get_request_executor(req.uri()).await?;
         let result = request_executor.execute_request().await?;
         Ok(HttpResponse::Response(result.into()))
     }
@@ -80,11 +80,11 @@ impl RequestExecutor for FileOverSshRequestExecutor {
             let home_value = match self.home_value.load_full() {
                 Some(value) => value,
                 None => {
-                    let (home, _) = self
+                    let (home, _, _) = self
                         .ssh_session
                         .execute_command("echo $HOME", self.execute_timeout)
                         .await?;
-                    let value = Arc::new(home.trim().to_string());
+                    let value = Arc::new(String::from_utf8_lossy(&home).trim().to_string());
                     self.home_value.store(Some(value.clone()));
                     value
                 }
@@ -95,10 +95,12 @@ impl RequestExecutor for FileOverSshRequestExecutor {
             self.file_path.clone()
         };
 
-        let result = self
-            .ssh_session
-            .download_remote_file(&file_path, self.execute_timeout)
-            .await;
+        let result = crate::scripts::ssh::download_remote_file(
+            &self.ssh_session,
+            &file_path,
+            self.execute_timeout,
+        )
+        .await;
 
         match result {
             Ok(content) => Ok(RequestExecutorResult {
@@ -108,21 +110,12 @@ impl RequestExecutor for FileOverSshRequestExecutor {
             }),
             Err(err) => {
                 println!("{} -> Error: {:?}", file_path, err);
-                match &err {
-                    my_ssh::SshSessionError::SshError(ssh_err) => {
-                        if let Some(ssh2_error) = ssh_err.as_ssh2() {
-                            if let my_ssh::ssh2::ErrorCode::Session(value) = ssh2_error.code() {
-                                if value == -28 {
-                                    return Ok(RequestExecutorResult {
-                                        status_code: 404,
-                                        content_type: None,
-                                        body: "Not found".as_bytes().to_vec(),
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
+                if crate::scripts::ssh::is_remote_file_not_found(&err) {
+                    return Ok(RequestExecutorResult {
+                        status_code: 404,
+                        content_type: None,
+                        body: "Not found".as_bytes().to_vec(),
+                    });
                 }
 
                 Err(ProxyPassError::SshSessionError(err))

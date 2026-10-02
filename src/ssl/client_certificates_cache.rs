@@ -23,11 +23,11 @@ impl ClientCertificatesCache {
     }
 
     pub fn has_certificate(&self, cert_id: SslCertificateIdRef) -> bool {
-        return self.data.contains_key(cert_id.as_str());
+        self.data.contains_key(cert_id.as_str())
     }
 
     pub fn get(&self, cert_id: SslCertificateIdRef) -> Option<Arc<ClientCertificateCa>> {
-        return self.data.get(cert_id.as_str()).cloned();
+        self.data.get(cert_id.as_str()).cloned()
     }
 
     /// Ids of every client CA currently loaded - used to tell which endpoints reference a CA
@@ -46,12 +46,9 @@ impl ClientCertificatesCache {
     pub fn get_list_of_crl(&self) -> Vec<(String, OverSshConnectionSettings)> {
         let mut result = Vec::new();
 
-        for itm in self.data.iter() {
-            if itm.1.crl_file_source.is_some() {
-                result.push((
-                    itm.0.to_string(),
-                    itm.1.crl_file_source.as_ref().unwrap().clone(),
-                ));
+        for (id, itm) in self.data.iter() {
+            if let Some(crl_file_source) = itm.crl_file_source.as_ref() {
+                result.push((id.to_string(), crl_file_source.clone()));
             }
         }
 

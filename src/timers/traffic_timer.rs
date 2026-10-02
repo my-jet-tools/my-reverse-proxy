@@ -9,17 +9,7 @@ impl MyTimerTick for TrafficTimer {
     async fn tick(&self) -> RepeatTimerIteration {
         let snapshot = APP_CTX.traffic.snapshot_and_reset();
         for (domain, stats) in snapshot {
-            APP_CTX.prometheus.set_traffic(
-                &domain,
-                stats.c2s_events as i64,
-                stats.c2s_bytes as i64,
-                stats.s2c_events as i64,
-                stats.s2c_bytes as i64,
-                stats.ws_c2s_events as i64,
-                stats.ws_c2s_bytes as i64,
-                stats.ws_s2c_events as i64,
-                stats.ws_s2c_bytes as i64,
-            );
+            APP_CTX.prometheus.set_traffic(&domain, &stats);
         }
 
         RepeatTimerIteration::WithInterval

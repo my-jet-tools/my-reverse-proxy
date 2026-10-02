@@ -34,7 +34,6 @@ async fn handle_request(
         removed,
     })
     .into_ok_result(true)
-    .into()
 }
 
 #[derive(MyHttpInput)]

@@ -1,0 +1,9 @@
+# Modules here are laid out as `mod x; pub use x::*;`, one file per struct and named after
+# it, so a directory named after its main struct holds a file of the same name
+# (`settings/settings.rs`). The inner module is private - its name never shows in a path.
+allow-private-module-inception = true
+
+# Every HTTP action returns `Result<HttpOkResult, HttpFailResult>` - the signature the
+# `http_route` macro requires - and `my_http_server::HttpFailResult` is 136 bytes, 8 over
+# the default limit of 128. Drop this line once the type gets smaller upstream.
+large-error-threshold = 137

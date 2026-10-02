@@ -91,9 +91,12 @@ async fn loading_file_from_ssh<'s>(
 ) -> Result<Vec<u8>, String> {
     let ssh_session = super::ssh::get_ssh_session(ssh_credentials).await?;
 
-    let result = ssh_session
-        .download_remote_file(remote_endpoint.as_str(), Duration::from_secs(5))
-        .await;
+    let result = super::ssh::download_remote_file(
+        &ssh_session,
+        remote_endpoint.as_str(),
+        Duration::from_secs(5),
+    )
+    .await;
 
     if let Err(err) = result {
         return Err(format!(

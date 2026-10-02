@@ -6,12 +6,15 @@ use crate::my_http2_client::MyHttp2Client;
 use parking_lot::Mutex;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
+/// Idle clients by remote endpoint, each with the moment it was returned to the pool.
+type IdleClients<TStream, TConnector> =
+    HashMap<String, Vec<(DateTimeAsMicroseconds, MyHttp2Client<TStream, TConnector>)>>;
+
 pub struct Http2ClientPoolInner<
     TStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
     TConnector: MyHttpClientConnector<TStream> + Send + Sync + 'static,
 > {
-    items:
-        Mutex<HashMap<String, Vec<(DateTimeAsMicroseconds, MyHttp2Client<TStream, TConnector>)>>>,
+    items: Mutex<IdleClients<TStream, TConnector>>,
 }
 
 impl<
@@ -28,7 +31,7 @@ impl<
     pub fn fill_connections_amount(&self, dest: &mut HashMap<String, usize>) {
         let items = self.items.lock();
         for (key, value) in items.iter() {
-            if value.len() > 0 {
+            if !value.is_empty() {
                 dest.insert(key.clone(), value.len());
             }
         }
@@ -87,7 +90,7 @@ impl<
         let mut items_access = self.items.lock();
 
         for v in items_access.values_mut() {
-            while v.len() > 0 {
+            while !v.is_empty() {
                 let first = v.first().unwrap().0;
                 if now.duration_since(first).get_full_minutes() > 2 {
                     v.remove(0);

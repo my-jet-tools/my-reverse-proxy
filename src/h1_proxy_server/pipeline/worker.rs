@@ -237,11 +237,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
                     Some(location_id),
                     ip.clone(),
                     503,
-                    format!(
-                        "can not connect to upstream {}: {:?}",
-                        proxy_pass_to.to_string(),
-                        err
-                    ),
+                    format!("can not connect to upstream {}: {:?}", proxy_pass_to, err),
                 );
                 fail_request(
                     &response_tx,
@@ -270,10 +266,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
                 Some(location_id),
                 ip.clone(),
                 503,
-                format!(
-                    "upstream {} did not accept request head",
-                    proxy_pass_to.to_string()
-                ),
+                format!("upstream {} did not accept request head", proxy_pass_to),
             );
             fail_request(
                 &response_tx,
@@ -308,7 +301,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
                 502,
                 format!(
                     "upstream {} broke while forwarding request body",
-                    proxy_pass_to.to_string()
+                    proxy_pass_to
                 ),
             );
             fail_request(
@@ -362,9 +355,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
                         502,
                         format!(
                             "reading response head from upstream {} ({}): {:?}",
-                            proxy_pass_to.to_string(),
-                            label,
-                            err
+                            proxy_pass_to, label, err
                         ),
                     );
                     if interim_forwarded {
@@ -416,9 +407,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
                     502,
                     format!(
                         "compiling response head from upstream {} ({}): {:?}",
-                        proxy_pass_to.to_string(),
-                        label,
-                        err
+                        proxy_pass_to, label, err
                     ),
                 );
                 fail_request(&response_tx, is_mcp, page, &mut body).await;

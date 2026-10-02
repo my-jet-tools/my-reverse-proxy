@@ -19,5 +19,5 @@ async fn handle_request(
     _ctx: &HttpContext,
 ) -> Result<HttpOkResult, HttpFailResult> {
     let result = CurrentConfigurationHttpModel::new().await;
-    HttpOutput::as_json(result).into_ok_result(true).into()
+    HttpOutput::as_json(result).into_ok_result(true)
 }

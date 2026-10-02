@@ -88,7 +88,7 @@ impl McpToolCall<GetProxyLogsInputData, GetProxyLogsResponse> for GetProxyLogsHa
         }
 
         // Newest first across all requested scopes.
-        raw.sort_by(|a, b| b.0.cmp(&a.0));
+        raw.sort_by_key(|(moment, _)| std::cmp::Reverse(*moment));
 
         Ok(GetProxyLogsResponse {
             entries: raw.into_iter().map(|(_, entry)| entry).collect(),

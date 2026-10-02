@@ -45,11 +45,7 @@ impl RequestExecutor for StaticContentExecutor {
     async fn execute_request(&self) -> Result<RequestExecutorResult, ProxyPassError> {
         Ok(RequestExecutorResult {
             status_code: self.config.status_code,
-            content_type: if let Some(content_type) = self.config.content_type.clone() {
-                Some(WebContentType::Raw(content_type))
-            } else {
-                None
-            },
+            content_type: self.config.content_type.clone().map(WebContentType::Raw),
             body: self.config.body.clone(),
         })
     }

@@ -78,11 +78,11 @@ impl ModifyHeadersConfig {
         self.remove.insert(header.to_string());
     }
 
-    pub fn iter_remove<'s>(&'s self) -> impl Iterator<Item = &'s String> {
+    pub fn iter_remove(&self) -> impl Iterator<Item = &String> {
         self.remove.iter()
     }
 
-    pub fn iter_add<'s>(&'s self) -> impl Iterator<Item = (&'s String, &'s String)> {
+    pub fn iter_add(&self) -> impl Iterator<Item = (&String, &String)> {
         self.add_headers.iter()
     }
 

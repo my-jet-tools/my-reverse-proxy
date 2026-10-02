@@ -16,10 +16,6 @@ impl SslCertificateId {
         &self.0
     }
 
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
-    }
-
     pub fn as_ref<'s>(&'s self) -> SslCertificateIdRef<'s> {
         SslCertificateIdRef::new(&self.0)
     }
@@ -29,9 +25,9 @@ impl SslCertificateId {
     }
 }
 
-impl Into<SslCertificateId> for String {
-    fn into(self) -> SslCertificateId {
-        SslCertificateId::new(self)
+impl From<String> for SslCertificateId {
+    fn from(val: String) -> Self {
+        SslCertificateId::new(val)
     }
 }
 
@@ -43,16 +39,8 @@ impl<'s> SslCertificateIdRef<'s> {
         Self(cert_id)
     }
 
-    pub fn new_as_self_signed() -> Self {
-        Self(SELF_SIGNED_CERT_NAME)
-    }
-
     pub fn as_str(&'s self) -> &'s str {
         self.0
-    }
-
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
     }
 
     pub fn is_self_signed(&self) -> bool {
@@ -60,14 +48,20 @@ impl<'s> SslCertificateIdRef<'s> {
     }
 }
 
-impl Into<SslCertificateId> for SslCertificateIdRef<'_> {
-    fn into(self) -> SslCertificateId {
-        SslCertificateId::new(self.0.to_string())
+impl std::fmt::Display for SslCertificateIdRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
     }
 }
 
-impl<'s> Into<SslCertificateIdRef<'s>> for &'s SslCertificateId {
-    fn into(self) -> SslCertificateIdRef<'s> {
-        SslCertificateIdRef::new(self.as_str())
+impl From<SslCertificateIdRef<'_>> for SslCertificateId {
+    fn from(val: SslCertificateIdRef<'_>) -> Self {
+        SslCertificateId::new(val.0.to_string())
+    }
+}
+
+impl<'s> From<&'s SslCertificateId> for SslCertificateIdRef<'s> {
+    fn from(val: &'s SslCertificateId) -> Self {
+        SslCertificateIdRef::new(val.as_str())
     }
 }

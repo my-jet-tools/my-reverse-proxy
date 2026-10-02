@@ -97,10 +97,13 @@ async fn read_loop(
     connection_id: u32,
     remote_host: Arc<String>,
 ) {
-    let mut buf = crate::tcp_utils::allocated_read_buffer(None);
+    // One buffer per forwarded connection: it is read into through its spare capacity, so it
+    // is never zeroed up front and only the pages a read really fills become resident.
+    let mut buf = Vec::with_capacity(crate::tcp_utils::READ_LOOP_SIZE);
 
     loop {
-        let read_size = match read.read(&mut buf).await {
+        buf.clear();
+        let read_size = match read.read_buf(&mut buf).await {
             Ok(read_size) => read_size,
             Err(err) => {
                 write.disconnect().await;
@@ -166,12 +169,10 @@ async fn connect_to_tcp_socket(
 
     match result {
         Ok(tcp_stream) => Ok(MyNetworkStream::Tcp(tcp_stream)),
-        Err(err) => {
-            return Err(format!(
-                "Can not connect to tcp-socket {} with id {}. Err: {:?}",
-                remote_endpoint, connection_id, err
-            ));
-        }
+        Err(err) => Err(format!(
+            "Can not connect to tcp-socket {} with id {}. Err: {:?}",
+            remote_endpoint, connection_id, err
+        )),
     }
 }
 
@@ -193,11 +194,9 @@ async fn connect_to_unix_socket(
 
     match result {
         Ok(tcp_stream) => Ok(MyNetworkStream::UnixSocket(tcp_stream)),
-        Err(err) => {
-            return Err(format!(
-                "Can not connect to unix socket {} with id {}. Err: {:?}",
-                remote_endpoint, connection_id, err
-            ));
-        }
+        Err(err) => Err(format!(
+            "Can not connect to unix socket {} with id {}. Err: {:?}",
+            remote_endpoint, connection_id, err
+        )),
     }
 }

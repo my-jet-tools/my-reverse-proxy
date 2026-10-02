@@ -29,7 +29,7 @@ impl ProxyReceiveBuffer {
                         "Can not read. Disconnected",
                     ));
                 }
-                if write_access.buffer.len() > 0 {
+                if !write_access.buffer.is_empty() {
                     let size = if write_access.buffer.len() > out.len() {
                         out.copy_from_slice(write_access.buffer.drain(..out.len()).as_slice());
                         out.len()

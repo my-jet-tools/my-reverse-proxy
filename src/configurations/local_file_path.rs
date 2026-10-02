@@ -18,8 +18,8 @@ impl LocalFilePath {
     }
 }
 
-impl Into<LocalFilePath> for String {
-    fn into(self) -> LocalFilePath {
-        LocalFilePath::new(self)
+impl From<String> for LocalFilePath {
+    fn from(val: String) -> Self {
+        LocalFilePath::new(val)
     }
 }

@@ -56,7 +56,7 @@ impl UnixHttp1ContentSource {
                 disconnection,
                 leftover,
             } => Ok(HttpResponse::WebSocketUpgrade {
-                stream: WebSocketUpgradeStream::UnixStream(stream),
+                stream: Box::new(WebSocketUpgradeStream::UnixStream(stream)),
                 response,
                 disconnection,
                 leftover,

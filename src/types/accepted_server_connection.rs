@@ -13,18 +13,18 @@ pub enum AcceptedServerConnection {
     Unix(tokio::net::UnixStream),
 }
 
-impl Into<AcceptedServerConnection> for (tokio::net::TcpStream, SocketAddr) {
-    fn into(self) -> AcceptedServerConnection {
+impl From<(tokio::net::TcpStream, SocketAddr)> for AcceptedServerConnection {
+    fn from(val: (tokio::net::TcpStream, SocketAddr)) -> Self {
         AcceptedServerConnection::Tcp {
-            network_stream: self.0,
-            addr: self.1,
+            network_stream: val.0,
+            addr: val.1,
         }
     }
 }
 
-impl Into<AcceptedServerConnection> for tokio::net::UnixStream {
-    fn into(self) -> AcceptedServerConnection {
-        AcceptedServerConnection::Unix(self)
+impl From<tokio::net::UnixStream> for AcceptedServerConnection {
+    fn from(val: tokio::net::UnixStream) -> Self {
+        AcceptedServerConnection::Unix(val)
     }
 }
 

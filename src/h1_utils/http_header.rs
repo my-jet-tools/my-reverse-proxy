@@ -70,10 +70,7 @@ impl<'s> HttpHeader<'s> {
 
     pub fn get_usize_value(&self) -> Option<usize> {
         let value = self.get_value_as_str()?;
-        match value.parse() {
-            Ok(result) => Some(result),
-            Err(_) => None,
-        }
+        value.parse().ok()
     }
 }
 
@@ -95,7 +92,7 @@ pub fn compare_case_insensitive(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn to_lower_case(b: u8) -> u8 {
-    if b >= b'A' && b <= b'Z' {
+    if b.is_ascii_uppercase() {
         return b - b'A' + b'a';
     }
 

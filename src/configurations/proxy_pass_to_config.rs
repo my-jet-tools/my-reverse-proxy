@@ -9,9 +9,10 @@ pub struct StaticContentConfig {
     pub body: Vec<u8>,
 }
 
-impl StaticContentConfig {
-    pub fn to_string(&self) -> String {
-        format!(
+impl std::fmt::Display for StaticContentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
             "status_code: {}, content_type: {:?}, body: {}bytes",
             self.status_code,
             self.content_type,
@@ -25,9 +26,9 @@ pub struct ProxyPassFilesPathModel {
     pub default_file: Option<String>,
 }
 
-impl ProxyPassFilesPathModel {
-    pub fn to_string(&self) -> String {
-        self.files_path.to_string()
+impl std::fmt::Display for ProxyPassFilesPathModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.files_path)
     }
 }
 
@@ -65,23 +66,27 @@ pub enum ProxyPassToConfig {
     DynamicProxy(Arc<DynamicProxyConfig>),
 }
 
-impl ProxyPassToConfig {
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for ProxyPassToConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProxyPassToConfig::Http1(proxy_pass) => proxy_pass.remote_host.to_string(),
-            ProxyPassToConfig::McpHttp1(proxy_pass) => proxy_pass.remote_host.to_string(),
-            ProxyPassToConfig::McpHttp2(proxy_pass) => proxy_pass.remote_host.to_string(),
-            ProxyPassToConfig::UnixHttp1(proxy_pass) => proxy_pass.remote_host.to_string(),
-            ProxyPassToConfig::UnixHttp2(proxy_pass) => proxy_pass.remote_host.to_string(),
-            ProxyPassToConfig::Http2(proxy_pass) => proxy_pass.remote_host.to_string(),
+            ProxyPassToConfig::Http1(proxy_pass)
+            | ProxyPassToConfig::McpHttp1(proxy_pass)
+            | ProxyPassToConfig::McpHttp2(proxy_pass)
+            | ProxyPassToConfig::UnixHttp1(proxy_pass)
+            | ProxyPassToConfig::UnixHttp2(proxy_pass)
+            | ProxyPassToConfig::Http2(proxy_pass) => write!(f, "{}", proxy_pass.remote_host),
 
-            ProxyPassToConfig::FilesPath(model) => model.to_string(),
-            ProxyPassToConfig::Static(model) => model.to_string(),
-            ProxyPassToConfig::Drop => "drop".to_string(),
-            ProxyPassToConfig::DynamicProxy(_) => crate::consts::location_type::DYNAMIC.to_string(),
+            ProxyPassToConfig::FilesPath(model) => write!(f, "{}", model),
+            ProxyPassToConfig::Static(model) => write!(f, "{}", model),
+            ProxyPassToConfig::Drop => f.write_str("drop"),
+            ProxyPassToConfig::DynamicProxy(_) => {
+                f.write_str(crate::consts::location_type::DYNAMIC)
+            }
         }
     }
+}
 
+impl ProxyPassToConfig {
     pub fn get_type_as_str(&self) -> &'static str {
         match self {
             Self::UnixHttp1(_) => "unix+http1",

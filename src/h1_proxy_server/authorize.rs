@@ -114,7 +114,7 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
             };
         }
 
-        return Ok(cert_identity);
+        Ok(cert_identity)
     }
 }
 
@@ -128,33 +128,31 @@ fn from_google_auth_error(
                 headers_reader,
                 "You have successfully logged out!",
             );
-            return ProxyServerError::HttpResponse(
+            ProxyServerError::HttpResponse(
                 Http1ResponseBuilder::new_as_html().build_with_body(body.as_bytes()),
-            );
+            )
         }
         crate::google_auth::GoogleAuthError::EmailDomainIsNotAuthorized => {
-            return ProxyServerError::NotAuthorized;
+            ProxyServerError::NotAuthorized
         }
         crate::google_auth::GoogleAuthError::ShowEmailDomainIsNotAuthorizedPage => {
             let body = crate::google_auth::generate_logout_page(
                 headers_reader,
                 "Unauthorized email domain",
             );
-            return ProxyServerError::HttpResponse(
+            ProxyServerError::HttpResponse(
                 Http1ResponseBuilder::new_as_html().build_with_body(body.as_bytes()),
-            );
+            )
         }
         crate::google_auth::GoogleAuthError::ShowUserAuthenticatedPage(email) => {
             let body =
                 crate::google_auth::generate_authenticated_user(headers_reader, email.as_str());
-            return ProxyServerError::HttpResponse(
+            ProxyServerError::HttpResponse(
                 Http1ResponseBuilder::new_as_html().build_with_body(body.as_bytes()),
-            );
+            )
         }
-        crate::google_auth::GoogleAuthError::ShowError(err) => {
-            return ProxyServerError::HttpResponse(
-                Http1ResponseBuilder::new_as_html().build_with_body(err.as_bytes()),
-            );
-        }
+        crate::google_auth::GoogleAuthError::ShowError(err) => ProxyServerError::HttpResponse(
+            Http1ResponseBuilder::new_as_html().build_with_body(err.as_bytes()),
+        ),
     }
 }

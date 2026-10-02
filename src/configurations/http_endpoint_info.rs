@@ -156,7 +156,7 @@ impl HttpEndpointInfo {
             let path_prefix = &path[..location.path.len()];
 
             if path_prefix.eq_ignore_ascii_case(&location.path) {
-                return Some(&location);
+                return Some(location);
             }
         }
 

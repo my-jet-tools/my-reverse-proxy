@@ -5,7 +5,6 @@ use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use hyper_util::rt::TokioIo;
 use my_http_client::utils::into_full_body_response;
-use my_http_client::MyHttpClientDisconnect;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
@@ -17,7 +16,7 @@ use crate::{
 
 use super::{
     HttpListenPortInfo, HttpProxyPassIdentity, HttpProxyPassInner, HttpRequestBuilder,
-    ProxyPassError, ProxyPassLocations, WebSocketUpgrade,
+    ProxyPassError, ProxyPassLocations, WebSocketPumpContext, WebSocketUpgrade,
 };
 
 pub struct HttpProxyPass {
@@ -36,7 +35,7 @@ impl HttpProxyPass {
         let locations = ProxyPassLocations::new(&endpoint_info).await;
         Self {
             inner: ArcSwapOption::from(Some(Arc::new(HttpProxyPassInner::new(
-                client_cert.map(|itm| HttpProxyPassIdentity::ClientCert(itm)),
+                client_cert.map(HttpProxyPassIdentity::ClientCert),
                 locations,
                 listening_port_info.clone(),
                 connection_ip,
@@ -249,24 +248,25 @@ impl HttpProxyPass {
                     .endpoint_info
                     .tracked_domain(request_host_for_metric.as_deref())
                     .map(str::to_owned);
-                let timeouts = self.endpoint_info.timeouts;
-                let log_scope = crate::app::ProxyLogScope::new(
-                    Arc::new(self.endpoint_info.host_endpoint.as_str().to_string()),
-                    location_index.id,
-                    ip.clone(),
-                );
-                match stream {
+                let pump_context = WebSocketPumpContext {
+                    log_scope: crate::app::ProxyLogScope::new(
+                        Arc::new(self.endpoint_info.host_endpoint.as_str().to_string()),
+                        location_index.id,
+                        ip.clone(),
+                    ),
+                    disconnection,
+                    trace_payload: location_debug,
+                    domain,
+                    timeouts: self.endpoint_info.timeouts,
+                };
+                match *stream {
                     super::content_source::WebSocketUpgradeStream::TcpStream(tcp_stream) => {
                         spawn_websocket_pump(
                             request.web_socket_upgrade,
                             tcp_stream,
                             leftover,
                             response,
-                            log_scope.clone(),
-                            disconnection,
-                            location_debug,
-                            domain,
-                            timeouts,
+                            pump_context,
                         )
                     }
 
@@ -276,25 +276,17 @@ impl HttpProxyPass {
                             unix_stream,
                             leftover,
                             response,
-                            log_scope.clone(),
-                            disconnection,
-                            location_debug,
-                            domain,
-                            timeouts,
+                            pump_context,
                         )
                     }
 
                     super::content_source::WebSocketUpgradeStream::TlsStream(tls_stream) => {
                         spawn_websocket_pump(
                             request.web_socket_upgrade,
-                            tls_stream,
+                            *tls_stream,
                             leftover,
                             response,
-                            log_scope.clone(),
-                            disconnection,
-                            location_debug,
-                            domain,
-                            timeouts,
+                            pump_context,
                         )
                     }
                     super::content_source::WebSocketUpgradeStream::SshChannel(async_channel) => {
@@ -303,11 +295,7 @@ impl HttpProxyPass {
                             async_channel,
                             leftover,
                             response,
-                            log_scope.clone(),
-                            disconnection,
-                            location_debug,
-                            domain,
-                            timeouts,
+                            pump_context,
                         )
                     }
                     super::content_source::WebSocketUpgradeStream::H2Upgraded(h2_upgraded) => {
@@ -316,10 +304,7 @@ impl HttpProxyPass {
                             h2_upgraded,
                             leftover,
                             response,
-                            log_scope.clone(),
-                            disconnection,
-                            domain,
-                            timeouts,
+                            pump_context,
                         )
                     }
                 }
@@ -338,7 +323,7 @@ impl HttpProxyPass {
             &location_index,
         );
 
-        return Ok(Ok(response));
+        Ok(Ok(response))
     }
 
     pub async fn dispose(&self) {
@@ -351,11 +336,7 @@ fn spawn_websocket_pump<S>(
     upstream: S,
     upstream_leftover: Vec<u8>,
     fallback_response: hyper::Response<BoxBody<Bytes, String>>,
-    log_scope: crate::app::ProxyLogScope,
-    disconnection: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
-    trace_payload: bool,
-    domain: Option<String>,
-    timeouts: HttpTimeouts,
+    ctx: WebSocketPumpContext,
 ) -> hyper::Response<BoxBody<Bytes, String>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
@@ -371,16 +352,7 @@ where
         } => {
             crate::app::spawn_named(
                 "ws_pump_h1_start",
-                super::start_web_socket_loop(
-                    server_web_socket,
-                    upstream,
-                    upstream_leftover,
-                    log_scope,
-                    disconnection,
-                    trace_payload,
-                    domain.clone(),
-                    timeouts,
-                ),
+                super::start_web_socket_loop(server_web_socket, upstream, upstream_leftover, ctx),
             );
             into_full_body_response(upgrade_response)
         }
@@ -390,15 +362,7 @@ where
         } => {
             crate::app::spawn_named(
                 "ws_pump_h2_extended_connect_h1",
-                pump_h2_extended_connect(
-                    on_upgrade,
-                    upstream,
-                    upstream_leftover,
-                    log_scope,
-                    disconnection,
-                    domain,
-                    timeouts,
-                ),
+                pump_h2_extended_connect(on_upgrade, upstream, upstream_leftover, ctx),
             );
             into_full_body_response(upgrade_response)
         }
@@ -410,10 +374,7 @@ fn spawn_h2_websocket_pump<S>(
     upstream: S,
     upstream_leftover: Vec<u8>,
     fallback_response: hyper::Response<BoxBody<Bytes, String>>,
-    log_scope: crate::app::ProxyLogScope,
-    disconnection: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
-    domain: Option<String>,
-    timeouts: HttpTimeouts,
+    ctx: WebSocketPumpContext,
 ) -> hyper::Response<BoxBody<Bytes, String>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -429,22 +390,14 @@ where
         } => {
             crate::app::spawn_named(
                 "ws_pump_h2_extended_connect_h2",
-                pump_h2_extended_connect(
-                    on_upgrade,
-                    upstream,
-                    upstream_leftover,
-                    log_scope,
-                    disconnection,
-                    domain,
-                    timeouts,
-                ),
+                pump_h2_extended_connect(on_upgrade, upstream, upstream_leftover, ctx),
             );
             into_full_body_response(upgrade_response)
         }
         WebSocketUpgrade::H1 {
             upgrade_response, ..
         } => {
-            log_scope.write(
+            ctx.log_scope.write(
                 "Unexpected h1 WebSocketUpgrade for h2 upstream — returning fallback response"
                     .to_string(),
             );
@@ -453,17 +406,23 @@ where
     }
 }
 
+/// A raw byte pump: it decodes no websocket frames, so `trace_payload` has nothing to trace.
 async fn pump_h2_extended_connect<S>(
     on_upgrade: hyper::upgrade::OnUpgrade,
     upstream: S,
     upstream_leftover: Vec<u8>,
-    log_scope: crate::app::ProxyLogScope,
-    disconnection: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
-    domain: Option<String>,
-    timeouts: HttpTimeouts,
+    ctx: WebSocketPumpContext,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let WebSocketPumpContext {
+        log_scope,
+        disconnection,
+        domain,
+        timeouts,
+        ..
+    } = ctx;
+
     let upgraded = match on_upgrade.await {
         Ok(upgraded) => upgraded,
         Err(err) => {

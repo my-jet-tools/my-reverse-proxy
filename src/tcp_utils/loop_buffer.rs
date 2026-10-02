@@ -39,12 +39,7 @@ impl LoopBuffer {
             return;
         }
 
-        let mut to = 0;
-        for i in self.read_from..self.read_to {
-            let b = self.data[i];
-            self.data[to] = b;
-            to += 1;
-        }
+        self.data.copy_within(self.read_from..self.read_to, 0);
         self.read_to -= self.read_from;
         self.read_from = 0;
     }

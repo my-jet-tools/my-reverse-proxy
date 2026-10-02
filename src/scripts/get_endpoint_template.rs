@@ -13,8 +13,6 @@ pub fn get_endpoint_template<'s>(
 
     match settings_model.endpoint_templates.get(template_id) {
         Some(endpoint_template_settings) => Ok(Some(endpoint_template_settings)),
-        None => {
-            return Err(format!("Template with id '{}' not found", template_id,));
-        }
+        None => Err(format!("Template with id '{}' not found", template_id,)),
     }
 }

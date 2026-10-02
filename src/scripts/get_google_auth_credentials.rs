@@ -48,13 +48,11 @@ pub async fn get_google_auth_credentials(
                 })
                 .await;
 
-            return Ok(Some(google_auth_id.to_string()));
+            Ok(Some(google_auth_id.to_string()))
         }
-        None => {
-            return Err(format!(
-                "Google Auth Credentials {} not found",
-                google_auth_id
-            ));
-        }
+        None => Err(format!(
+            "Google Auth Credentials {} not found",
+            google_auth_id
+        )),
     }
 }

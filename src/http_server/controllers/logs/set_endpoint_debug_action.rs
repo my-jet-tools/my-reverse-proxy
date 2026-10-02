@@ -24,7 +24,7 @@ async fn handle_request(
     crate::app::APP_CTX
         .debug_flags
         .set_endpoint(&input_data.id, input_data.enabled);
-    HttpOutput::Empty.into_ok_result(true).into()
+    HttpOutput::Empty.into_ok_result(true)
 }
 
 #[derive(MyHttpInput)]

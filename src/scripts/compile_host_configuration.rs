@@ -28,7 +28,7 @@ pub async fn compile_host_configuration(
 
             let config = super::merge_http_into_existing(existing, http_endpoint_info)?;
 
-            return Ok(ListenConfiguration::Http(Arc::new(config)));
+            Ok(ListenConfiguration::Http(Arc::new(config)))
         }
 
         EndpointTypeSettings::Http2 => {
@@ -42,7 +42,7 @@ pub async fn compile_host_configuration(
 
             let config = super::merge_http_into_existing(existing, http_endpoint_info)?;
 
-            return Ok(ListenConfiguration::Http(Arc::new(config)));
+            Ok(ListenConfiguration::Http(Arc::new(config)))
         }
 
         EndpointTypeSettings::Https1 => {
@@ -61,7 +61,7 @@ pub async fn compile_host_configuration(
 
             let config = super::merge_http_into_existing(existing, http_endpoint_info)?;
 
-            return Ok(ListenConfiguration::Http(Arc::new(config)));
+            Ok(ListenConfiguration::Http(Arc::new(config)))
         }
 
         EndpointTypeSettings::Https2 => {
@@ -75,7 +75,7 @@ pub async fn compile_host_configuration(
 
             let config = super::merge_http_into_existing(existing, http_endpoint_info)?;
 
-            return Ok(ListenConfiguration::Http(config.into()));
+            Ok(ListenConfiguration::Http(config.into()))
         }
         EndpointTypeSettings::Tcp => {
             // A 'type: tcp' endpoint is a raw byte bridge - it never performs a TLS handshake of
@@ -95,7 +95,7 @@ pub async fn compile_host_configuration(
             let tcp_configuration =
                 TcpEndpointHostConfig::new(settings_model, host_endpoint, host_settings).await?;
 
-            return Ok(ListenConfiguration::Tcp(tcp_configuration.into()));
+            Ok(ListenConfiguration::Tcp(tcp_configuration.into()))
         }
 
         EndpointTypeSettings::Mcp => {
@@ -110,7 +110,7 @@ pub async fn compile_host_configuration(
             println!("Merging MCP configuration {}", http_endpoint_info.as_str());
             let config = super::merge_http_into_existing(existing, http_endpoint_info)?;
 
-            return Ok(ListenConfiguration::Mcp(config.into()));
+            Ok(ListenConfiguration::Mcp(config.into()))
         }
     }
 }

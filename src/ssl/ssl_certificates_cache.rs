@@ -81,7 +81,7 @@ impl SslCertificatesCache {
     }
 
     pub fn get(&self, cert_id: SslCertificateIdRef) -> Option<Arc<SslCertificateHolder>> {
-        self.data.get(cert_id.as_str()).map(|holder| holder.clone())
+        self.data.get(cert_id.as_str()).cloned()
     }
 
     pub fn get_list(&self) -> BTreeMap<String, Arc<SslCertificateHolder>> {

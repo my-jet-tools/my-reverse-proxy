@@ -228,12 +228,12 @@ impl HttpRequestBuilder {
             }
         }
 
-        return Ok(TransformedRequest {
+        Ok(TransformedRequest {
             req_parts: parts.clone(),
             request: body.into_transformed(parts),
 
             web_socket_upgrade,
-        });
+        })
         //return Ok((location_index, ));
     }
 
@@ -494,11 +494,11 @@ impl HttpRequestBuilder {
             );
         }
 
-        return Ok(TransformedRequest {
+        Ok(TransformedRequest {
             req_parts,
             request: TransformedRequestBody::Buffered(request),
             web_socket_upgrade: None,
-        });
+        })
     }
 
     pub fn uri(&self) -> &Uri {
@@ -664,10 +664,10 @@ impl HttpRequestBuilder {
         Ok((parts, body))
     }
 
-    pub fn process_headers<'s>(
+    pub fn process_headers(
         &mut self,
         proxy_pass: &HttpProxyPass,
-        inner: &'s HttpProxyPassInner,
+        inner: &HttpProxyPassInner,
         location: &ProxyPassLocation,
     ) {
         modify_headers(
@@ -738,7 +738,7 @@ fn into_full_body(src: Bytes, location_id: i64, ip: Option<String>) -> Full<Byte
     http_body_util::Full::new(src)
 }
 
-fn modify_headers<'s>(
+fn modify_headers(
     inner: &HttpProxyPassInner,
     parts: &mut Parts,
     modify_headers: &ModifyHeadersConfig,
@@ -772,21 +772,21 @@ impl HttpRequestReader for Parts {
         }
     }
 
-    fn get_path<'s>(&'s self) -> &'s str {
+    fn get_path(&self) -> &str {
         self.uri.path()
     }
 
-    fn get_path_and_query<'s>(&'s self) -> Option<&'s str> {
+    fn get_path_and_query(&self) -> Option<&str> {
         let path_and_query = self.uri.path_and_query()?;
         Some(path_and_query.as_str())
     }
 
-    fn get_query_string<'s>(&'s self) -> Option<&'s str> {
+    fn get_query_string(&self) -> Option<&str> {
         let path_and_query = self.uri.path_and_query()?;
         path_and_query.query()
     }
 
-    fn get_host<'s>(&'s self) -> Option<&'s str> {
+    fn get_host(&self) -> Option<&str> {
         self.uri.host()
     }
 }

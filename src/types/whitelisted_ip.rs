@@ -62,12 +62,14 @@ impl WhitelistedIp {
             WhitelistedIp::Range { ip_from, ip_to } => *ip_from <= value && value <= *ip_to,
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for WhitelistedIp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WhitelistedIp::SingleIp(ip) => format!("{}", to_ip(*ip)),
+            WhitelistedIp::SingleIp(ip) => write!(f, "{}", to_ip(*ip)),
             WhitelistedIp::Range { ip_from, ip_to } => {
-                format!("{}-{}", to_ip(*ip_from), to_ip(*ip_to))
+                write!(f, "{}-{}", to_ip(*ip_from), to_ip(*ip_to))
             }
         }
     }

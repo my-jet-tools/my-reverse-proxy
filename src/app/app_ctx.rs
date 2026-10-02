@@ -22,15 +22,19 @@ use crate::{
     settings::ConnectionsSettingsModel,
     settings_compiled::SettingsCompiled,
     ssl::CertificatesCache,
-    tcp_gateway::{client::TcpGatewayClient, server::TcpGatewayServer, TcpGatewayConnection},
+    tcp_gateway::{
+        client::{TcpGatewayClient, TcpGatewayClientParams},
+        server::TcpGatewayServer,
+        TcpGatewayConnection,
+    },
     upstream_h1_pool::H1PoolRegistry,
     upstream_h2_pool::H2PoolRegistry,
 };
 
 use super::{ActiveListenPorts, CertPassKeys, Metrics, Prometheus};
 
-pub const APP_NAME: &'static str = env!("CARGO_PKG_NAME");
-pub const APP_VERSION: &'static str = env!("CARGO_PKG_VERSION");
+pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub static APP_CTX: std::sync::LazyLock<AppContext> = std::sync::LazyLock::new(|| {
     // Tests start from empty settings rather than the `~/.my-reverse-proxy` of
@@ -134,16 +138,17 @@ impl AppContext {
             let signing_key = client_settings
                 .load_signing_key(id.as_str(), ssh_registry)
                 .unwrap();
-            let client = TcpGatewayClient::new(
-                id.to_string(),
-                client_settings.remote_host.to_string(),
+            let client = TcpGatewayClient::new(TcpGatewayClientParams {
+                id: id.to_string(),
+                remote_endpoint: client_settings.remote_host.to_string(),
                 signing_key,
-                client_settings.get_supported_compression(),
-                client_settings.get_allow_incoming_forward_connections(),
-                client_settings.get_connect_timeout(),
-                client_settings.is_debug(),
-                client_settings.get_sync_ssl_certificates(),
-            );
+                compress_outbound: client_settings.get_supported_compression(),
+                allow_incoming_forward_connections: client_settings
+                    .get_allow_incoming_forward_connections(),
+                connect_timeout: client_settings.get_connect_timeout(),
+                debug: client_settings.is_debug(),
+                sync_ssl_certificates: client_settings.get_sync_ssl_certificates(),
+            });
 
             gateway_clients.insert(id.clone(), client);
         }
@@ -184,8 +189,8 @@ impl AppContext {
             h1_tcp_pools: H1PoolRegistry::new(),
             h1_tls_pools: H1PoolRegistry::new(),
             h1_uds_pools: H1PoolRegistry::new(),
-            gateway_server: gateway_server,
-            gateway_clients: gateway_clients,
+            gateway_server,
+            gateway_clients,
             http_control_port,
             ssh_sessions_pool: SshSessionsPool::new(),
             self_signed_cert: Arc::new(
@@ -241,7 +246,7 @@ fn generate_random_token_secret_key() -> Vec<u8> {
     let mut key = vec![];
 
     while result.len() < 48 {
-        if key.len() == 0 {
+        if key.is_empty() {
             key = uuid::Uuid::new_v4().as_bytes().to_vec();
         }
 
@@ -257,7 +262,7 @@ fn get_token_secret_key_from_settings(session_key: &[u8]) -> Vec<u8> {
     let mut key = vec![];
 
     while result.len() < 48 {
-        if key.len() == 0 {
+        if key.is_empty() {
             key = session_key.to_vec();
         }
 

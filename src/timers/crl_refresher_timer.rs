@@ -10,7 +10,7 @@ impl MyTimerTick for CrlRefresherTimer {
             .read(|config| config.client_ca.get_list_of_crl())
             .await;
 
-        if list_of_crl.len() == 0 {
+        if list_of_crl.is_empty() {
             return RepeatTimerIteration::WithInterval;
         }
 

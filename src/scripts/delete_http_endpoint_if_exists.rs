@@ -11,7 +11,7 @@ pub async fn delete_http_endpoint_if_exists(
         crate::configurations::EndpointPort::Tcp(port) => {
             crate::app::APP_CTX
                 .current_configuration
-                .get(move |config| config.listen_tcp_endpoints.get(&port).cloned())
+                .get(move |config| config.listen_tcp_endpoints.get(port).cloned())
                 .await
         }
         crate::configurations::EndpointPort::UnixSocket(unix_host) => {

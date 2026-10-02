@@ -10,17 +10,17 @@ pub struct RequestExecutorResult {
     pub body: Vec<u8>,
 }
 
-impl Into<hyper::Response<BoxBody<Bytes, String>>> for RequestExecutorResult {
-    fn into(self) -> hyper::Response<BoxBody<Bytes, String>> {
-        let mut builder = hyper::Response::builder().status(self.status_code);
+impl From<RequestExecutorResult> for hyper::Response<BoxBody<Bytes, String>> {
+    fn from(val: RequestExecutorResult) -> Self {
+        let mut builder = hyper::Response::builder().status(val.status_code);
 
-        if let Some(content_type) = self.content_type {
+        if let Some(content_type) = val.content_type {
             builder = builder.header("Content-Type", content_type.as_str());
         }
 
-        let full_body = http_body_util::Full::new(hyper::body::Bytes::from(self.body));
+        let full_body = http_body_util::Full::new(hyper::body::Bytes::from(val.body));
         builder
-            .body(full_body.map_err(|e| crate::to_hyper_error(e)).boxed())
+            .body(full_body.map_err(crate::to_hyper_error).boxed())
             .unwrap()
     }
 }

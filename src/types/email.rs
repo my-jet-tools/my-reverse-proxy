@@ -9,7 +9,7 @@ impl Email {
     pub fn get_domain(&self) -> Option<&str> {
         let index = self.0.find('@')?;
 
-        return Some(&self.0[index + 1..]);
+        Some(&self.0[index + 1..])
     }
 
     pub fn as_str(&self) -> &str {

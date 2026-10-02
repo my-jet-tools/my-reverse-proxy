@@ -94,19 +94,19 @@ impl LocationSettings {
         use crate::consts::location_type::*;
         if let Some(location_type) = self.location_type.as_ref() {
             match location_type.as_str() {
-                "unix+http" => return Ok(LocationType::UnixSocketHttp.into()),
-                "unix+http2" => return Ok(LocationType::UnixSocketHttp2.into()),
-                "http" => return Ok(LocationType::Http.into()),
-                "http2" => return Ok(LocationType::Http2.into()),
-                "https" => return Ok(LocationType::Https1.into()),
-                "https1" => return Ok(LocationType::Https1.into()),
-                "https2" => return Ok(LocationType::Https2.into()),
-                STATIC => return Ok(LocationType::StaticContent.into()),
-                MCP => return Ok(LocationType::Mcp.into()),
-                MCP_H2 => return Ok(LocationType::McpH2.into()),
-                "drop" => return Ok(LocationType::Drop.into()),
-                DYNAMIC | "dynamic_proxy" => return Ok(LocationType::DynamicProxy.into()),
-                _ => return Err(format!("Unknown remote location type {}", location_type)),
+                "unix+http" => Ok(LocationType::UnixSocketHttp.into()),
+                "unix+http2" => Ok(LocationType::UnixSocketHttp2.into()),
+                "http" => Ok(LocationType::Http.into()),
+                "http2" => Ok(LocationType::Http2.into()),
+                "https" => Ok(LocationType::Https1.into()),
+                "https1" => Ok(LocationType::Https1.into()),
+                "https2" => Ok(LocationType::Https2.into()),
+                STATIC => Ok(LocationType::StaticContent.into()),
+                MCP => Ok(LocationType::Mcp.into()),
+                MCP_H2 => Ok(LocationType::McpH2.into()),
+                "drop" => Ok(LocationType::Drop.into()),
+                DYNAMIC | "dynamic_proxy" => Ok(LocationType::DynamicProxy.into()),
+                _ => Err(format!("Unknown remote location type {}", location_type)),
             }
         } else {
             Ok(None)

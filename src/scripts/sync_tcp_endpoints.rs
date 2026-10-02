@@ -7,11 +7,7 @@ async fn sync_tcp_endpoints() {
     let tcp_ports_to_be_listened = crate::app::APP_CTX
         .current_configuration
         .get(|config| {
-            let result: Vec<_> = config
-                .listen_tcp_endpoints
-                .keys()
-                .map(|port| *port)
-                .collect();
+            let result: Vec<_> = config.listen_tcp_endpoints.keys().copied().collect();
             result
         })
         .await;

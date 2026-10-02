@@ -56,7 +56,7 @@ pub async fn copy_streams<
         {
             let buf = loop_buffer.get_data();
 
-            if buf.len() > 0 {
+            if !buf.is_empty() {
                 let len = buf.len();
                 let write_result = writer
                     .write_all_with_timeout(buf, timeouts.write_timeout)

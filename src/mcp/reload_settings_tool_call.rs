@@ -52,15 +52,11 @@ impl McpToolCall<ReloadSettingsInputData, ReloadSettingsResponse> for ReloadSett
         let (hosts_loaded, errors) = APP_CTX
             .current_configuration
             .get(|cfg| {
-                let tcp_hosts: i64 = cfg
-                    .listen_tcp_endpoints
-                    .values()
-                    .map(|listen| count_hosts(listen))
-                    .sum();
+                let tcp_hosts: i64 = cfg.listen_tcp_endpoints.values().map(count_hosts).sum();
                 let unix_hosts: i64 = cfg
                     .listen_unix_socket_endpoints
                     .values()
-                    .map(|listen| count_hosts(listen))
+                    .map(count_hosts)
                     .sum();
                 let errors: Vec<ConfigurationErrorEntry> = cfg
                     .error_configurations

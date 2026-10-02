@@ -17,7 +17,7 @@ impl MyTimerTick for SslCertsRefreshTimer {
             .read(|itm| itm.ssl_certs.get_list())
             .await;
 
-        if ssl_certs.len() == 0 {
+        if ssl_certs.is_empty() {
             return RepeatTimerIteration::WithInterval;
         }
 

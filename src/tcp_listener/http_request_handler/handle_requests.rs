@@ -102,7 +102,7 @@ pub async fn handle_requests(
                 }
             }
 
-            return response;
+            response
         }
         Err(err) => {
             if endpoint_debug {
@@ -146,7 +146,7 @@ pub async fn handle_requests(
                     format!("{} {} {}", req_str, err_desc, sw.duration_as_string()),
                 );
             }
-            return Ok(response);
+            Ok(response)
         }
     }
 }

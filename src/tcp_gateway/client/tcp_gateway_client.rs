@@ -10,22 +10,35 @@ use tokio::net::TcpStream;
 use crate::tcp_gateway::handshake::perform_client_handshake;
 use crate::tcp_gateway::{client::*, *};
 
+pub struct TcpGatewayClientParams {
+    pub id: String,
+    pub remote_endpoint: String,
+    pub signing_key: SigningKey,
+    pub compress_outbound: bool,
+    pub allow_incoming_forward_connections: bool,
+    pub connect_timeout: Duration,
+    pub debug: bool,
+    pub sync_ssl_certificates: Vec<String>,
+}
+
 pub struct TcpGatewayClient {
     inner: Arc<TcpGatewayInner>,
     next_connection_id: AtomicU32,
 }
 
 impl TcpGatewayClient {
-    pub fn new(
-        id: String,
-        remote_endpoint: String,
-        signing_key: SigningKey,
-        compress_outbound: bool,
-        allow_incoming_forward_connections: bool,
-        connect_timeout: Duration,
-        debug: bool,
-        sync_ssl_certificates: Vec<String>,
-    ) -> Self {
+    pub fn new(params: TcpGatewayClientParams) -> Self {
+        let TcpGatewayClientParams {
+            id,
+            remote_endpoint,
+            signing_key,
+            compress_outbound,
+            allow_incoming_forward_connections,
+            connect_timeout,
+            debug,
+            sync_ssl_certificates,
+        } = params;
+
         let inner = Arc::new(TcpGatewayInner::new_client(
             id,
             remote_endpoint,

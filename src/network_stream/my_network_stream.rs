@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use my_ssh::SshSession;
 use rust_extensions::remote_endpoint::RemoteEndpointOwned;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::{
     tcp_gateway::forwarded_connection::TcpGatewayProxyForwardStream,
@@ -17,9 +17,9 @@ pub enum MyNetworkStream {
     UnixSocket(tokio::net::UnixStream),
 }
 
-impl Into<MyNetworkStream> for AcceptedServerConnection {
-    fn into(self) -> MyNetworkStream {
-        match self {
+impl From<AcceptedServerConnection> for MyNetworkStream {
+    fn from(val: AcceptedServerConnection) -> Self {
+        match val {
             AcceptedServerConnection::Tcp {
                 network_stream,
                 addr: _,
@@ -30,30 +30,6 @@ impl Into<MyNetworkStream> for AcceptedServerConnection {
 }
 
 impl MyNetworkStream {
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
-        match self {
-            MyNetworkStream::Tcp(tcp_stream) => tcp_stream
-                .read(buf)
-                .await
-                .map_err(|err| format!("{:?}", err)),
-            MyNetworkStream::UnixSocket(unix_stream) => unix_stream
-                .read(buf)
-                .await
-                .map_err(|err| format!("{:?}", err)),
-        }
-    }
-
-    pub async fn shutdown(&mut self) {
-        match self {
-            MyNetworkStream::Tcp(tcp_stream) => {
-                let _ = tcp_stream.shutdown().await;
-            }
-            MyNetworkStream::UnixSocket(unix_socket) => {
-                let _ = unix_socket.shutdown().await;
-            }
-        }
-    }
-
     pub fn into_split(self) -> (MyOwnedReadHalf, MyOwnedWriteHalf) {
         match self {
             MyNetworkStream::Tcp(tcp_stream) => {
@@ -68,15 +44,15 @@ impl MyNetworkStream {
     }
 }
 
-impl Into<MyNetworkStream> for tokio::net::TcpStream {
-    fn into(self) -> MyNetworkStream {
-        MyNetworkStream::Tcp(self)
+impl From<tokio::net::TcpStream> for MyNetworkStream {
+    fn from(val: tokio::net::TcpStream) -> Self {
+        MyNetworkStream::Tcp(val)
     }
 }
 
-impl Into<MyNetworkStream> for tokio::net::UnixStream {
-    fn into(self) -> MyNetworkStream {
-        MyNetworkStream::UnixSocket(self)
+impl From<tokio::net::UnixStream> for MyNetworkStream {
+    fn from(val: tokio::net::UnixStream) -> Self {
+        MyNetworkStream::UnixSocket(val)
     }
 }
 
@@ -230,7 +206,7 @@ impl NetworkStream for my_ssh::SshAsyncChannel {
     ) -> Result<Self, NetworkError> {
         let result = ssh_session
             .unwrap()
-            .connect_to_remote_host(
+            .open_remote_tcp_stream(
                 remote_endpoint.get_host(),
                 remote_endpoint.get_port().unwrap(),
                 timeout,
@@ -265,7 +241,7 @@ impl NetworkStream for TcpGatewayProxyForwardStream {
     ) -> Result<Self, NetworkError> {
         let gateway_id = gateway_id.unwrap();
         let Some(connection) =
-            crate::app::APP_CTX.get_gateway_by_id_with_next_connection_id(&gateway_id)
+            crate::app::APP_CTX.get_gateway_by_id_with_next_connection_id(gateway_id)
         else {
             return Err(NetworkError::Other(format!(
                 "Gateway with ID '{}' is not found",

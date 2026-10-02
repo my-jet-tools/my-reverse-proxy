@@ -36,7 +36,7 @@ impl Http2OverSshContentSource {
         );
 
         let response = http_client.do_request(&req, self.request_timeout).await?;
-        return Ok(HttpResponse::Response(response));
+        Ok(HttpResponse::Response(response))
     }
 
     /// Same upstream, with the client's request body forwarded as a stream of
@@ -65,6 +65,6 @@ impl Http2OverSshContentSource {
         let response = http_client
             .do_streamed_request(req, content_size, self.request_timeout)
             .await?;
-        return Ok(HttpResponse::Response(response));
+        Ok(HttpResponse::Response(response))
     }
 }

@@ -17,5 +17,4 @@ async fn handle_request(
         content,
     }
     .into_ok_result(false)
-    .into()
 }

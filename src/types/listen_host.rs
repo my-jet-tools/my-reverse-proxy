@@ -26,13 +26,6 @@ impl ListenHost {
         }
     }
 
-    pub fn to_string(&self) -> String {
-        match self {
-            ListenHost::Tcp(socket_addr) => socket_addr.to_string(),
-            ListenHost::Unix(socket) => socket.to_string(),
-        }
-    }
-
     /// Key used to group in-memory port-level logs: the TCP port number for
     /// TCP listeners, the socket path for unix listeners. Matches the key the
     /// TCP/unix accept loops use when writing port-level rejections.
@@ -51,8 +44,17 @@ impl ListenHost {
     }
 }
 
-impl Into<ListenHost> for SocketAddr {
-    fn into(self) -> ListenHost {
-        ListenHost::Tcp(self)
+impl std::fmt::Display for ListenHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ListenHost::Tcp(socket_addr) => write!(f, "{}", socket_addr),
+            ListenHost::Unix(socket) => f.write_str(socket.as_str()),
+        }
+    }
+}
+
+impl From<SocketAddr> for ListenHost {
+    fn from(val: SocketAddr) -> Self {
+        ListenHost::Tcp(val)
     }
 }

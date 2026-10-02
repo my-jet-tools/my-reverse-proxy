@@ -46,7 +46,7 @@ async fn handle_request(
         unlimited_expiration: details.unlimited_expiration,
     };
 
-    HttpOutput::as_json(model).into_ok_result(true).into()
+    HttpOutput::as_json(model).into_ok_result(true)
 }
 
 #[derive(MyHttpInput)]

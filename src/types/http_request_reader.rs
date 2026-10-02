@@ -3,13 +3,13 @@ use rust_extensions::StrOrString;
 pub trait HttpRequestReader {
     fn get_cookie<'s>(&'s self, cookie_name: &str) -> Option<&'s str>;
 
-    fn get_query_string<'s>(&'s self) -> Option<&'s str>;
+    fn get_query_string(&self) -> Option<&str>;
 
-    fn get_host<'s>(&'s self) -> Option<&'s str>;
+    fn get_host(&self) -> Option<&str>;
 
-    fn get_path<'s>(&'s self) -> &'s str;
+    fn get_path(&self) -> &str;
 
-    fn get_path_and_query<'s>(&'s self) -> Option<&'s str>;
+    fn get_path_and_query(&self) -> Option<&str>;
 
     fn get_query_string_param<'s>(&'s self, param: &str) -> Option<StrOrString<'s>> {
         let query = self.get_query_string()?;

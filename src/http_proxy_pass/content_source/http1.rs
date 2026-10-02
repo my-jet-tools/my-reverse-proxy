@@ -108,7 +108,7 @@ impl Http1ContentSource {
                     );
                 }
                 Ok(HttpResponse::WebSocketUpgrade {
-                    stream: WebSocketUpgradeStream::TcpStream(stream),
+                    stream: Box::new(WebSocketUpgradeStream::TcpStream(stream)),
                     response,
                     disconnection,
                     leftover,

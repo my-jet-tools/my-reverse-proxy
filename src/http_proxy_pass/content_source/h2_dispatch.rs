@@ -283,7 +283,7 @@ pub async fn execute_h2(
             Arc::new(H2NoopDisconnect);
 
         return Ok(HttpResponse::WebSocketUpgrade {
-            stream: WebSocketUpgradeStream::H2Upgraded(upgraded),
+            stream: Box::new(WebSocketUpgradeStream::H2Upgraded(upgraded)),
             response,
             disconnection,
             // hyper hands us the `Upgraded` itself and keeps whatever it read

@@ -23,18 +23,31 @@ fn ws_message_payload_len(msg: &Message) -> u64 {
     }
 }
 
+/// What a websocket pump needs besides the two streams it links.
+pub struct WebSocketPumpContext {
+    pub log_scope: crate::app::ProxyLogScope,
+    pub disconnection: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
+    pub trace_payload: bool,
+    pub domain: Option<String>,
+    pub timeouts: HttpTimeouts,
+}
+
 pub async fn start_web_socket_loop<
     TStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 >(
     server_web_socket: HyperWebsocket,
     to_remote_stream: TStream,
     to_remote_leftover: Vec<u8>,
-    log_scope: crate::app::ProxyLogScope,
-    disconnect: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
-    trace_payload: bool,
-    domain: Option<String>,
-    timeouts: HttpTimeouts,
+    ctx: WebSocketPumpContext,
 ) {
+    let WebSocketPumpContext {
+        log_scope,
+        disconnection,
+        trace_payload,
+        domain,
+        timeouts,
+    } = ctx;
+
     let panic_log_scope = log_scope.clone();
     let result = AssertUnwindSafe(async move {
         web_socket_loop(
@@ -55,7 +68,7 @@ pub async fn start_web_socket_loop<
         panic_log_scope.write("ws_loop_main panicked".to_string());
     }
 
-    disconnect.web_socket_disconnect();
+    disconnection.web_socket_disconnect();
 }
 
 async fn web_socket_loop<
@@ -136,11 +149,9 @@ async fn web_socket_loop<
 
                 let message = message.unwrap();
 
-                if trace_payload {
-                    if !have_traced_message {
-                        //println!("WS Message from remote: {:?}", message);
-                        have_traced_message = true;
-                    }
+                if trace_payload && !have_traced_message {
+                    //println!("WS Message from remote: {:?}", message);
+                    have_traced_message = true;
                 }
 
                 if let Some(d) = domain.as_deref() {
@@ -207,11 +218,9 @@ async fn serve_from_server_to_client<
 
         let msg: Message = message?;
 
-        if trace_payload {
-            if !have_traced_message {
-                log_scope.write(format!("WS Message to remote: {:?}", msg));
-                have_traced_message = true;
-            }
+        if trace_payload && !have_traced_message {
+            log_scope.write(format!("WS Message to remote: {:?}", msg));
+            have_traced_message = true;
         }
 
         if let Some(d) = domain.as_deref() {

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use http::StatusCode;
-use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use http_body_util::combinators::BoxBody;
 
 use crate::{
     configurations::HttpListenPortConfiguration,
@@ -11,7 +11,10 @@ use crate::{
     types::ConnectionIp,
 };
 
-use super::LiveEndpointCache;
+use super::{
+    utils::{create_err_response, RejectedRequest},
+    LiveEndpointCache,
+};
 
 pub struct HttpsRequestsHandler {
     endpoints: LiveEndpointCache,
@@ -35,7 +38,7 @@ impl HttpsRequestsHandler {
     async fn get_http_proxy_pass(
         &self,
         req: &hyper::Request<hyper::body::Incoming>,
-    ) -> Result<Arc<HttpProxyPass>, hyper::Result<hyper::Response<BoxBody<Bytes, String>>>> {
+    ) -> Result<Arc<HttpProxyPass>, RejectedRequest> {
         // Picks up a `reload_settings` that happened while this connection was
         // open, and drops the cached per-Host proxy passes if it replaced this
         // port's configuration. Every mTLS / IP / auth check below therefore
@@ -203,7 +206,7 @@ impl HttpsRequestsHandler {
             Ok(proxy_pass) => {
                 super::handle_requests::handle_requests(req, &proxy_pass, self.connection_ip).await
             }
-            Err(err) => err,
+            Err(rejected) => Ok(*rejected),
         }
     }
 
@@ -217,20 +220,4 @@ pub async fn handle_request(
     req: hyper::Request<hyper::body::Incoming>,
 ) -> hyper::Result<hyper::Response<BoxBody<Bytes, String>>> {
     request_handler.handle_request(req).await
-}
-
-fn create_err_response(
-    status_code: StatusCode,
-    content: impl Into<Bytes>,
-) -> hyper::Result<hyper::Response<BoxBody<Bytes, String>>> {
-    let result = hyper::Response::builder()
-        .status(status_code)
-        .body(
-            Full::new(content.into())
-                .map_err(|e| crate::to_hyper_error(e))
-                .boxed(),
-        )
-        .unwrap();
-
-    Ok(result)
 }

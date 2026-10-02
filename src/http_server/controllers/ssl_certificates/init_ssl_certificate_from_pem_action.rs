@@ -44,7 +44,7 @@ async fn handle_request(
         validated_sni: result.validated_sni,
     };
 
-    HttpOutput::as_json(model).into_ok_result(true).into()
+    HttpOutput::as_json(model).into_ok_result(true)
 }
 
 #[derive(MyHttpInput)]

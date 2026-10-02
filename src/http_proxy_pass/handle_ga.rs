@@ -29,9 +29,7 @@ impl HttpProxyPass {
 
         match result {
             Ok(ok_result) => match ok_result {
-                GoogleAuthOkResult::Passed(email) => {
-                    return GoogleAuthResult::Passed(email.into());
-                }
+                GoogleAuthOkResult::Passed(email) => GoogleAuthResult::Passed(email.into()),
                 GoogleAuthOkResult::SetToken(email) => {
                     let body = Full::from(Bytes::from(
                         crate::google_auth::generate_authenticated_user(&req.parts, email.as_str())
@@ -40,7 +38,7 @@ impl HttpProxyPass {
 
                     let token = crate::google_auth::token::generate(email.as_str());
 
-                    return GoogleAuthResult::Content(Ok(hyper::Response::builder()
+                    GoogleAuthResult::Content(Ok(hyper::Response::builder()
                         .status(200)
                         .header(
                             "Set-Cookie",
@@ -50,8 +48,8 @@ impl HttpProxyPass {
                                 token
                             ),
                         )
-                        .body(body.map_err(|e| crate::to_hyper_error(e)).boxed())
-                        .unwrap()));
+                        .body(body.map_err(crate::to_hyper_error).boxed())
+                        .unwrap()))
                 }
                 GoogleAuthOkResult::ShowLoginPage(google_auth_credentials) => {
                     let body = crate::google_auth::generate_login_page(
@@ -61,10 +59,10 @@ impl HttpProxyPass {
 
                     let body = Full::from(Bytes::from(body.into_bytes()));
 
-                    return GoogleAuthResult::Content(Ok(hyper::Response::builder()
+                    GoogleAuthResult::Content(Ok(hyper::Response::builder()
                         .status(200)
-                        .body(body.map_err(|e| crate::to_hyper_error(e)).boxed())
-                        .unwrap()));
+                        .body(body.map_err(crate::to_hyper_error).boxed())
+                        .unwrap()))
                 }
             },
             Err(err_result) => match err_result {
@@ -77,15 +75,15 @@ impl HttpProxyPass {
                         .into_bytes(),
                     ));
 
-                    let body = body.map_err(|e| crate::to_hyper_error(e)).boxed();
+                    let body = body.map_err(crate::to_hyper_error).boxed();
 
-                    return GoogleAuthResult::Content(Ok(hyper::Response::builder()
+                    GoogleAuthResult::Content(Ok(hyper::Response::builder()
                         .status(200)
                         .body(body)
-                        .unwrap()));
+                        .unwrap()))
                 }
                 GoogleAuthError::EmailDomainIsNotAuthorized => {
-                    return GoogleAuthResult::DomainIsNotAuthorized;
+                    GoogleAuthResult::DomainIsNotAuthorized
                 }
                 GoogleAuthError::ShowEmailDomainIsNotAuthorizedPage => {
                     let body = Full::from(Bytes::from(
@@ -96,10 +94,10 @@ impl HttpProxyPass {
                         .into_bytes(),
                     ));
 
-                    return GoogleAuthResult::Content(Ok(hyper::Response::builder()
+                    GoogleAuthResult::Content(Ok(hyper::Response::builder()
                         .status(200)
-                        .body(body.map_err(|e| crate::to_hyper_error(e)).boxed())
-                        .unwrap()));
+                        .body(body.map_err(crate::to_hyper_error).boxed())
+                        .unwrap()))
                 }
                 GoogleAuthError::ShowUserAuthenticatedPage(email) => {
                     let body = Full::from(Bytes::from(
@@ -107,18 +105,18 @@ impl HttpProxyPass {
                             .into_bytes(),
                     ));
 
-                    return GoogleAuthResult::Content(Ok(hyper::Response::builder()
+                    GoogleAuthResult::Content(Ok(hyper::Response::builder()
                         .status(200)
-                        .body(body.map_err(|e| crate::to_hyper_error(e)).boxed())
-                        .unwrap()));
+                        .body(body.map_err(crate::to_hyper_error).boxed())
+                        .unwrap()))
                 }
                 GoogleAuthError::ShowError(err) => {
                     let body = Full::from(Bytes::from(err.into_bytes()));
 
-                    return GoogleAuthResult::Content(Ok(hyper::Response::builder()
+                    GoogleAuthResult::Content(Ok(hyper::Response::builder()
                         .status(400)
-                        .body(body.map_err(|e| crate::to_hyper_error(e)).boxed())
-                        .unwrap()));
+                        .body(body.map_err(crate::to_hyper_error).boxed())
+                        .unwrap()))
                 }
             },
         }

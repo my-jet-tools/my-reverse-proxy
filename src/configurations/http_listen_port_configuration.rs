@@ -13,13 +13,11 @@ pub struct HttpListenPortConfiguration {
 
 impl HttpListenPortConfiguration {
     pub fn new(endpoint_info: Arc<HttpEndpointInfo>, listen_host: ListenHost) -> Self {
-        let result = Self {
+        Self {
             listen_endpoint_type: endpoint_info.listen_endpoint_type,
             endpoints: vec![endpoint_info],
             listen_host,
-        };
-
-        result
+        }
     }
 
     pub fn insert_or_replace_configuration(&mut self, endpoint_info: HttpEndpointInfo) {

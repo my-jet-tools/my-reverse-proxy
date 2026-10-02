@@ -18,7 +18,7 @@ pub async fn send_connection_error(
 
     if send_force || removed {
         let connection_fail = TcpGatewayContract::ConnectionError {
-            connection_id: connection_id,
+            connection_id,
             error: err,
         };
 

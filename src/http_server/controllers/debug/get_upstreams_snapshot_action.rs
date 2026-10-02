@@ -17,5 +17,5 @@ async fn handle_request(
     _ctx: &HttpContext,
 ) -> Result<HttpOkResult, HttpFailResult> {
     let snapshot = crate::mcp::build_proxy_state_snapshot().await;
-    HttpOutput::as_json(snapshot).into_ok_result(true).into()
+    HttpOutput::as_json(snapshot).into_ok_result(true)
 }

@@ -2,7 +2,7 @@ pub fn generate_logout_page(
     req: &impl crate::types::HttpRequestReader,
     text: &str, //You have successfully logged out!
 ) -> String {
-    return super::html::generate_with_template(|| {
+    super::html::generate_with_template(|| {
         format!(
             r###"<h2>{}</h2><a class="btn btn-primary" href="https://{}">Ok</a>
             <script>
@@ -20,5 +20,5 @@ pub fn generate_logout_page(
             text,
             req.get_host().unwrap_or_default()
         )
-    });
+    })
 }

@@ -34,7 +34,7 @@ pub async fn update_host_configuration(
     };
 
     let configuration = crate::scripts::compile_host_configuration(
-        &settings_model,
+        settings_model,
         host_endpoint.clone(),
         host_settings,
         existing,

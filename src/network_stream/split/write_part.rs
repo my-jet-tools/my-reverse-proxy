@@ -22,7 +22,8 @@ pub trait NetworkStreamWritePart {
         let result = tokio::time::timeout(timeout, future).await;
 
         let Ok(result) = result else {
-            let _ = self.shutdown_socket();
+            // The socket is deliberately not shut down here: a peer which stopped reading
+            // would stall the shutdown as well. The caller tears the connection down.
             return Err(NetworkError::Timeout(timeout));
         };
 
@@ -40,24 +41,24 @@ pub trait NetworkStreamWritePart {
 pub enum MyOwnedWriteHalf {
     Tcp(tokio::net::tcp::OwnedWriteHalf),
     Unix(tokio::net::unix::OwnedWriteHalf),
-    Ssh(futures::io::WriteHalf<SshAsyncChannel>),
+    Ssh(tokio::io::WriteHalf<SshAsyncChannel>),
 }
 
-impl Into<MyOwnedWriteHalf> for tokio::net::tcp::OwnedWriteHalf {
-    fn into(self) -> MyOwnedWriteHalf {
-        MyOwnedWriteHalf::Tcp(self)
+impl From<tokio::net::tcp::OwnedWriteHalf> for MyOwnedWriteHalf {
+    fn from(val: tokio::net::tcp::OwnedWriteHalf) -> Self {
+        MyOwnedWriteHalf::Tcp(val)
     }
 }
 
-impl Into<MyOwnedWriteHalf> for tokio::net::unix::OwnedWriteHalf {
-    fn into(self) -> MyOwnedWriteHalf {
-        MyOwnedWriteHalf::Unix(self)
+impl From<tokio::net::unix::OwnedWriteHalf> for MyOwnedWriteHalf {
+    fn from(val: tokio::net::unix::OwnedWriteHalf) -> Self {
+        MyOwnedWriteHalf::Unix(val)
     }
 }
 
-impl Into<MyOwnedWriteHalf> for futures::io::WriteHalf<SshAsyncChannel> {
-    fn into(self) -> MyOwnedWriteHalf {
-        MyOwnedWriteHalf::Ssh(self)
+impl From<tokio::io::WriteHalf<SshAsyncChannel>> for MyOwnedWriteHalf {
+    fn from(val: tokio::io::WriteHalf<SshAsyncChannel>) -> Self {
+        MyOwnedWriteHalf::Ssh(val)
     }
 }
 
@@ -74,8 +75,8 @@ impl NetworkStreamWritePart for MyOwnedWriteHalf {
                 let _ = owned_write_half.shutdown().await;
             }
             MyOwnedWriteHalf::Ssh(ssh) => {
-                use futures::AsyncWriteExt;
-                let _ = ssh.close().await;
+                use tokio::io::AsyncWriteExt;
+                let _ = ssh.shutdown().await;
             }
         }
     }
@@ -91,7 +92,7 @@ impl NetworkStreamWritePart for MyOwnedWriteHalf {
                 owned_write_half.write_all(buffer).await
             }
             MyOwnedWriteHalf::Ssh(owned_write_half) => {
-                use futures::AsyncWriteExt;
+                use tokio::io::AsyncWriteExt;
                 owned_write_half.write_all(buffer).await
             }
         }
@@ -108,7 +109,7 @@ impl NetworkStreamWritePart for MyOwnedWriteHalf {
                 owned_write_half.flush().await?;
             }
             MyOwnedWriteHalf::Ssh(write_half) => {
-                use futures::AsyncWriteExt;
+                use tokio::io::AsyncWriteExt;
                 write_half.flush().await?;
             }
         }

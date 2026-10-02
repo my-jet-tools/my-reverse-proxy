@@ -58,7 +58,7 @@ fn modify_headers(
         headers.insert(
             HeaderName::from_bytes(header.as_bytes()).unwrap(),
             inner
-                .populate_value(&value, req_host_port)
+                .populate_value(value, req_host_port)
                 .as_str()
                 .parse()
                 .unwrap(),

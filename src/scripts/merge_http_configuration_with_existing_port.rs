@@ -50,11 +50,11 @@ fn check_endpoint_type(
         return Ok(());
     }
 
-    return Err(format!(
+    Err(format!(
             "Can not apply endpoint {} which has {:?} type to the endpoint {} already configured as {:?}.",
             http_endpoint.host_endpoint.as_str(),
             http_endpoint.listen_endpoint_type,
             http_endpoint.host_endpoint.as_str(),
             config.listen_endpoint_type
-        ));
+        ))
 }

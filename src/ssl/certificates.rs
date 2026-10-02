@@ -36,7 +36,7 @@ pub fn load_private_key(src: Vec<u8>) -> Result<PrivateKeyDer<'static>, String> 
     let private_key = private_key.unwrap();
 
     if private_key.is_none() {
-        return Err(format!("No private key found in file"));
+        return Err("No private key found in file".to_string());
     }
 
     Ok(private_key.unwrap())

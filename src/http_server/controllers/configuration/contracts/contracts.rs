@@ -72,7 +72,7 @@ impl CurrentConfigurationHttpModel {
             }
         }
 
-        ports.sort_by(|a, b| a.port.cmp(&b.port));
+        ports.sort_by_key(|a| a.port);
 
         let ssl_certs = collect_ssl_certs().await;
 
@@ -319,7 +319,7 @@ impl HttpEndpointInfoModel {
             locations: endpoint
                 .locations
                 .iter()
-                .map(|itm| HttpProxyPassLocationModel::new(itm))
+                .map(HttpProxyPassLocationModel::new)
                 .collect(),
         }
     }
@@ -402,7 +402,7 @@ impl HttpProxyPassLocationModel {
             None => (None, None, None),
         };
 
-        let result = Self {
+        Self {
             path: src.path.to_string(),
             to: src.get_proxy_pass_to_as_string(),
             r#type: src.proxy_pass_to.get_type_as_str().to_string(),
@@ -416,9 +416,7 @@ impl HttpProxyPassLocationModel {
             pool_alive,
             pool_total,
             last_status,
-        };
-
-        result
+        }
     }
 }
 

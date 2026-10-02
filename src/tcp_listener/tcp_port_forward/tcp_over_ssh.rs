@@ -30,7 +30,7 @@ pub async fn handle_connection(
 
     let ssh_channel = ssh_session_handler
         .ssh_session
-        .connect_to_remote_host(
+        .open_remote_tcp_stream(
             remote_endpoint.get_host(),
             remote_port.unwrap(),
             crate::app::APP_CTX

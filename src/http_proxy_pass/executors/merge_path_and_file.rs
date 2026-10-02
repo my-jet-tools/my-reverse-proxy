@@ -5,13 +5,7 @@ pub fn merge_path_and_file(
 ) -> String {
     let mut result = files_path.to_string();
 
-    let req_path = if req_path == "" {
-        if let Some(default_file) = default_file {
-            default_file
-        } else {
-            return result;
-        }
-    } else if req_path == "/" {
+    let req_path = if req_path.is_empty() || req_path == "/" {
         if let Some(default_file) = default_file {
             default_file
         } else {
@@ -22,11 +16,7 @@ pub fn merge_path_and_file(
     };
 
     if result.ends_with('/') {
-        if req_path.starts_with('/') {
-            result.push_str(&req_path[1..]);
-        } else {
-            result.push_str(req_path);
-        }
+        result.push_str(req_path.strip_prefix('/').unwrap_or(req_path));
     } else {
         if req_path.starts_with('/') {
             result.push_str(req_path);

@@ -33,7 +33,7 @@ impl VariablesCompiled {
 
     pub fn apply_variables(&self, value: String) -> Result<String, String> {
         if !value.contains("${") {
-            return Ok(value.into());
+            return Ok(value);
         }
 
         let mut result = String::new();

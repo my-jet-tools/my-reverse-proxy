@@ -4,7 +4,7 @@ use my_ssh::ssh_settings::OverSshConnectionSettings;
 
 use crate::{
     app::APP_CTX, http_content_source::local_path::LocalPathContentSrc, http_content_source::*,
-    http_proxy_pass::content_source::*, settings::ModifyHttpHeadersSettings,
+    http_proxy_pass::content_source::*, settings::LocationSettings,
 };
 
 use super::*;
@@ -53,18 +53,14 @@ fn trim_ascii_blanks(input: &[u8]) -> &[u8] {
 impl ProxyPassLocationConfig {
     pub fn new(
         path: String,
-        modify_headers: Option<ModifyHttpHeadersSettings>,
-        ip_white_list_id: Option<String>,
+        location_settings: &LocationSettings,
         proxy_pass_to: ProxyPassToConfig,
-        domain_name: Option<String>,
-        compress: bool,
-        auth_header: Option<String>,
         listen_host: &str,
     ) -> Self {
         let mut modify_request_headers = ModifyHeadersConfig::default();
         let mut modify_response_headers = ModifyHeadersConfig::default();
 
-        if let Some(mut modify_headers) = modify_headers {
+        if let Some(mut modify_headers) = location_settings.modify_http_headers.clone() {
             modify_request_headers.populate_request(&mut modify_headers);
             modify_response_headers.populate_response(&mut modify_headers);
         }
@@ -79,11 +75,11 @@ impl ProxyPassLocationConfig {
             id_string,
             modify_request_headers,
             modify_response_headers,
-            ip_white_list_id,
+            ip_white_list_id: location_settings.whitelisted_ip.clone(),
             proxy_pass_to,
-            domain_name,
-            compress,
-            auth_header,
+            domain_name: location_settings.domain_name.clone(),
+            compress: location_settings.get_compress(),
+            auth_header: location_settings.auth_header.clone(),
         }
     }
     pub fn get_proxy_pass_to_as_string(&self) -> String {
@@ -121,7 +117,7 @@ impl ProxyPassLocationConfig {
                         ssh_credentials,
                         remote_host,
                     } => {
-                        let ssh_session = crate::scripts::ssh::get_ssh_session(&ssh_credentials)
+                        let ssh_session = crate::scripts::ssh::get_ssh_session(ssh_credentials)
                             .await
                             .unwrap();
 
@@ -153,8 +149,7 @@ impl ProxyPassLocationConfig {
                                 let (pool_desc, pool_params, factory) = make_tcp_h1_pool_factory(
                                     remote_host,
                                     debug,
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                     is_mcp,
@@ -172,8 +167,7 @@ impl ProxyPassLocationConfig {
                                     remote_host,
                                     debug,
                                     self.domain_name.clone(),
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                     is_mcp,
@@ -189,8 +183,7 @@ impl ProxyPassLocationConfig {
                                 let (pool_desc, pool_params, factory) = make_tcp_h1_pool_factory(
                                     remote_host,
                                     debug,
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                     is_mcp,
@@ -208,8 +201,7 @@ impl ProxyPassLocationConfig {
                                     remote_host,
                                     debug,
                                     self.domain_name.clone(),
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                     is_mcp,
@@ -225,8 +217,7 @@ impl ProxyPassLocationConfig {
                                 let (pool_desc, pool_params, factory) = make_uds_h1_pool_factory(
                                     remote_host,
                                     debug,
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                     is_mcp,
@@ -286,8 +277,7 @@ impl ProxyPassLocationConfig {
                                 let (pool_desc, pool_params, factory) = make_tcp_h2_pool_factory(
                                     remote_host,
                                     debug,
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                 );
@@ -303,8 +293,7 @@ impl ProxyPassLocationConfig {
                                     remote_host,
                                     debug,
                                     self.domain_name.clone(),
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                 );
@@ -319,8 +308,7 @@ impl ProxyPassLocationConfig {
                                 let (pool_desc, pool_params, factory) = make_tcp_h1_pool_factory(
                                     remote_host,
                                     debug,
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                     is_mcp,
@@ -338,8 +326,7 @@ impl ProxyPassLocationConfig {
                                     remote_host,
                                     debug,
                                     self.domain_name.clone(),
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                     is_mcp,
@@ -355,8 +342,7 @@ impl ProxyPassLocationConfig {
                                 let (pool_desc, pool_params, factory) = make_uds_h2_pool_factory(
                                     remote_host,
                                     debug,
-                                    proxy_pass.connect_timeout,
-                                    proxy_pass.pool_tuning,
+                                    proxy_pass,
                                     self.id,
                                     self.id_string.clone(),
                                 );
@@ -429,8 +415,7 @@ impl ProxyPassLocationConfig {
                     let (pool_desc, pool_params, factory) = make_uds_h1_pool_factory(
                         remote_host,
                         debug,
-                        proxy_pass.connect_timeout,
-                        proxy_pass.pool_tuning,
+                        proxy_pass,
                         self.id,
                         self.id_string.clone(),
                         is_mcp,
@@ -465,8 +450,7 @@ impl ProxyPassLocationConfig {
                     let (pool_desc, pool_params, factory) = make_uds_h2_pool_factory(
                         remote_host,
                         debug,
-                        proxy_pass.connect_timeout,
-                        proxy_pass.pool_tuning,
+                        proxy_pass,
                         self.id,
                         self.id_string.clone(),
                     );
@@ -516,7 +500,7 @@ fn build_location_id_string(
         listen_host,
         path,
         proxy_pass_to.get_type_as_str(),
-        proxy_pass_to.to_string(),
+        proxy_pass_to,
     )
 }
 
@@ -545,18 +529,19 @@ fn h2_uds_pool_name(socket_path: &str, location_id: i64) -> String {
 }
 
 fn h1_pool_params(
-    connect_timeout: Duration,
-    pool_tuning: PoolTuning,
+    proxy_pass: &ProxyPassToModel,
     is_mcp: bool,
 ) -> crate::upstream_h1_pool::PoolParams {
-    let mut params = crate::upstream_h1_pool::PoolParams::default();
-    params.connect_timeout = connect_timeout;
-    params.pool_size = pool_tuning.pool_size;
-    params.ping_timeout = pool_tuning.ping_timeout;
-    params.hot_window = pool_tuning.hot_window;
-    // Same global liveness path as the h2 pools; without it, a dead idle h1
-    // connection is only discovered by the first real request after the idle.
-    params.health_check_path = APP_CTX.default_h2_livness_url.clone();
+    let mut params = crate::upstream_h1_pool::PoolParams {
+        connect_timeout: proxy_pass.connect_timeout,
+        pool_size: proxy_pass.pool_tuning.pool_size,
+        ping_timeout: proxy_pass.pool_tuning.ping_timeout,
+        hot_window: proxy_pass.pool_tuning.hot_window,
+        // Same global liveness path as the h2 pools; without it, a dead idle h1
+        // connection is only discovered by the first real request after the idle.
+        health_check_path: APP_CTX.default_h2_livness_url.clone(),
+        ..Default::default()
+    };
     if is_mcp {
         // MCP SSE bodies can idle far longer than the default read timeout
         // without any keepalive — don't tear down a healthy idle stream.
@@ -565,11 +550,21 @@ fn h1_pool_params(
     params
 }
 
+fn h2_pool_params(proxy_pass: &ProxyPassToModel) -> crate::upstream_h2_pool::PoolParams {
+    crate::upstream_h2_pool::PoolParams {
+        connect_timeout: proxy_pass.connect_timeout,
+        pool_size: proxy_pass.pool_tuning.pool_size,
+        ping_timeout: proxy_pass.pool_tuning.ping_timeout,
+        hot_window: proxy_pass.pool_tuning.hot_window,
+        health_check_path: APP_CTX.default_h2_livness_url.clone(),
+        ..Default::default()
+    }
+}
+
 pub(crate) fn make_tcp_h1_pool_factory(
     remote_host: &std::sync::Arc<rust_extensions::remote_endpoint::RemoteEndpointOwned>,
     debug: bool,
-    connect_timeout: Duration,
-    pool_tuning: PoolTuning,
+    proxy_pass: &ProxyPassToModel,
     location_id: i64,
     id_string: String,
     is_mcp: bool,
@@ -586,7 +581,7 @@ pub(crate) fn make_tcp_h1_pool_factory(
         id_string,
     };
     let endpoint_arc = remote_host.clone();
-    let params = h1_pool_params(connect_timeout, pool_tuning, is_mcp);
+    let params = h1_pool_params(proxy_pass, is_mcp);
     let factory: crate::upstream_h1_pool::ConnectorFactory<
         crate::http_client_connectors::HttpConnector,
     > = std::sync::Arc::new(move || {
@@ -608,8 +603,7 @@ pub(crate) fn make_tls_h1_pool_factory(
     remote_host: &std::sync::Arc<rust_extensions::remote_endpoint::RemoteEndpointOwned>,
     debug: bool,
     domain_name: Option<String>,
-    connect_timeout: Duration,
-    pool_tuning: PoolTuning,
+    proxy_pass: &ProxyPassToModel,
     location_id: i64,
     id_string: String,
     is_mcp: bool,
@@ -626,7 +620,7 @@ pub(crate) fn make_tls_h1_pool_factory(
         id_string,
     };
     let endpoint_arc = remote_host.clone();
-    let params = h1_pool_params(connect_timeout, pool_tuning, is_mcp);
+    let params = h1_pool_params(proxy_pass, is_mcp);
     let factory: crate::upstream_h1_pool::ConnectorFactory<
         crate::http_client_connectors::HttpTlsConnector,
     > = std::sync::Arc::new(move || {
@@ -648,8 +642,7 @@ pub(crate) fn make_tls_h1_pool_factory(
 pub(crate) fn make_uds_h1_pool_factory(
     remote_host: &std::sync::Arc<rust_extensions::remote_endpoint::RemoteEndpointOwned>,
     debug: bool,
-    connect_timeout: Duration,
-    pool_tuning: PoolTuning,
+    proxy_pass: &ProxyPassToModel,
     location_id: i64,
     id_string: String,
     is_mcp: bool,
@@ -669,7 +662,7 @@ pub(crate) fn make_uds_h1_pool_factory(
         id_string,
     };
     let endpoint_arc = remote_host.clone();
-    let params = h1_pool_params(connect_timeout, pool_tuning, is_mcp);
+    let params = h1_pool_params(proxy_pass, is_mcp);
     let factory: crate::upstream_h1_pool::ConnectorFactory<
         crate::http_client_connectors::UnixSocketHttpConnector,
     > = std::sync::Arc::new(move || {
@@ -690,8 +683,7 @@ pub(crate) fn make_uds_h1_pool_factory(
 pub(crate) fn make_tcp_h2_pool_factory(
     remote_host: &std::sync::Arc<rust_extensions::remote_endpoint::RemoteEndpointOwned>,
     debug: bool,
-    connect_timeout: Duration,
-    pool_tuning: PoolTuning,
+    proxy_pass: &ProxyPassToModel,
     location_id: i64,
     id_string: String,
 ) -> (
@@ -708,12 +700,7 @@ pub(crate) fn make_tcp_h2_pool_factory(
         id_string,
     };
     let endpoint_arc = remote_host.clone();
-    let mut params = crate::upstream_h2_pool::PoolParams::default();
-    params.connect_timeout = connect_timeout;
-    params.pool_size = pool_tuning.pool_size;
-    params.ping_timeout = pool_tuning.ping_timeout;
-    params.hot_window = pool_tuning.hot_window;
-    params.health_check_path = APP_CTX.default_h2_livness_url.clone();
+    let params = h2_pool_params(proxy_pass);
     let factory: crate::upstream_h2_pool::ConnectorFactory<
         crate::http_client_connectors::HttpConnector,
     > = std::sync::Arc::new(move || {
@@ -735,8 +722,7 @@ pub(crate) fn make_tls_h2_pool_factory(
     remote_host: &std::sync::Arc<rust_extensions::remote_endpoint::RemoteEndpointOwned>,
     debug: bool,
     domain_name: Option<String>,
-    connect_timeout: Duration,
-    pool_tuning: PoolTuning,
+    proxy_pass: &ProxyPassToModel,
     location_id: i64,
     id_string: String,
 ) -> (
@@ -753,12 +739,7 @@ pub(crate) fn make_tls_h2_pool_factory(
         id_string,
     };
     let endpoint_arc = remote_host.clone();
-    let mut params = crate::upstream_h2_pool::PoolParams::default();
-    params.connect_timeout = connect_timeout;
-    params.pool_size = pool_tuning.pool_size;
-    params.ping_timeout = pool_tuning.ping_timeout;
-    params.hot_window = pool_tuning.hot_window;
-    params.health_check_path = APP_CTX.default_h2_livness_url.clone();
+    let params = h2_pool_params(proxy_pass);
     let factory: crate::upstream_h2_pool::ConnectorFactory<
         crate::http_client_connectors::HttpTlsConnector,
     > = std::sync::Arc::new(move || {
@@ -780,8 +761,7 @@ pub(crate) fn make_tls_h2_pool_factory(
 pub(crate) fn make_uds_h2_pool_factory(
     remote_host: &std::sync::Arc<rust_extensions::remote_endpoint::RemoteEndpointOwned>,
     debug: bool,
-    connect_timeout: Duration,
-    pool_tuning: PoolTuning,
+    proxy_pass: &ProxyPassToModel,
     location_id: i64,
     id_string: String,
 ) -> (
@@ -798,12 +778,7 @@ pub(crate) fn make_uds_h2_pool_factory(
         id_string,
     };
     let endpoint_arc = remote_host.clone();
-    let mut params = crate::upstream_h2_pool::PoolParams::default();
-    params.connect_timeout = connect_timeout;
-    params.pool_size = pool_tuning.pool_size;
-    params.ping_timeout = pool_tuning.ping_timeout;
-    params.hot_window = pool_tuning.hot_window;
-    params.health_check_path = APP_CTX.default_h2_livness_url.clone();
+    let params = h2_pool_params(proxy_pass);
     let factory: crate::upstream_h2_pool::ConnectorFactory<
         crate::http_client_connectors::UnixSocketHttpConnector,
     > = std::sync::Arc::new(move || {

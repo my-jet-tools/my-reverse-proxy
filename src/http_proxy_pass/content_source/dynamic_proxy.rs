@@ -94,7 +94,7 @@ impl DynamicProxyContentSource {
                         disconnection,
                         leftover,
                     } => Ok(HttpResponse::WebSocketUpgrade {
-                        stream: WebSocketUpgradeStream::TcpStream(stream),
+                        stream: Box::new(WebSocketUpgradeStream::TcpStream(stream)),
                         response,
                         disconnection,
                         leftover,
@@ -125,7 +125,7 @@ impl DynamicProxyContentSource {
                         disconnection,
                         leftover,
                     } => Ok(HttpResponse::WebSocketUpgrade {
-                        stream: WebSocketUpgradeStream::TlsStream(stream),
+                        stream: Box::new(WebSocketUpgradeStream::TlsStream(Box::new(stream))),
                         response,
                         disconnection,
                         leftover,

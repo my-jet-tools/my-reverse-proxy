@@ -8,7 +8,9 @@ use my_ssh::SshAsyncChannel;
 pub enum HttpResponse {
     Response(my_http_client::HyperResponse),
     WebSocketUpgrade {
-        stream: WebSocketUpgradeStream,
+        /// Boxed: an upgrade is rare, while `HttpResponse` is returned for every proxied
+        /// request and should not carry the size of the biggest upstream stream.
+        stream: Box<WebSocketUpgradeStream>,
         response: hyper::Response<BoxBody<Bytes, String>>,
         disconnection: Arc<dyn MyHttpClientDisconnect + Send + Sync + 'static>,
         /// Bytes the upstream client already pulled off the socket together with
@@ -23,7 +25,7 @@ pub enum HttpResponse {
 pub enum WebSocketUpgradeStream {
     TcpStream(tokio::net::TcpStream),
     UnixStream(tokio::net::UnixStream),
-    TlsStream(my_tls::tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
+    TlsStream(Box<my_tls::tokio_rustls::client::TlsStream<tokio::net::TcpStream>>),
     SshChannel(SshAsyncChannel),
     H2Upgraded(hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>),
     //HttpOverGatewayStream(TcpGatewayProxyForwardStream),

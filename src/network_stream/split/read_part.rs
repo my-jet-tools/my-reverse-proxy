@@ -49,7 +49,7 @@ impl NetworkStreamReadPart for Box<dyn NetworkStreamReadPart + Send + Sync> {
 pub enum MyOwnedReadHalf {
     Tcp(tokio::net::tcp::OwnedReadHalf),
     Unix(tokio::net::unix::OwnedReadHalf),
-    Ssh(futures::io::ReadHalf<SshAsyncChannel>),
+    Ssh(tokio::io::ReadHalf<SshAsyncChannel>),
 }
 
 impl MyOwnedReadHalf {
@@ -64,28 +64,40 @@ impl MyOwnedReadHalf {
                 owned_read_half.read(buf).await
             }
             MyOwnedReadHalf::Ssh(owned_read_half) => {
-                use futures::AsyncReadExt;
+                use tokio::io::AsyncReadExt;
                 owned_read_half.read(buf).await
             }
         }
     }
-}
 
-impl Into<MyOwnedReadHalf> for tokio::net::tcp::OwnedReadHalf {
-    fn into(self) -> MyOwnedReadHalf {
-        MyOwnedReadHalf::Tcp(self)
+    /// Reads into the spare capacity of `buf` and appends what was read - the buffer
+    /// does not have to be initialized up front.
+    pub async fn read_buf(&mut self, buf: &mut Vec<u8>) -> Result<usize, std::io::Error> {
+        use tokio::io::AsyncReadExt;
+
+        match self {
+            MyOwnedReadHalf::Tcp(owned_read_half) => owned_read_half.read_buf(buf).await,
+            MyOwnedReadHalf::Unix(owned_read_half) => owned_read_half.read_buf(buf).await,
+            MyOwnedReadHalf::Ssh(owned_read_half) => owned_read_half.read_buf(buf).await,
+        }
     }
 }
 
-impl Into<MyOwnedReadHalf> for tokio::net::unix::OwnedReadHalf {
-    fn into(self) -> MyOwnedReadHalf {
-        MyOwnedReadHalf::Unix(self)
+impl From<tokio::net::tcp::OwnedReadHalf> for MyOwnedReadHalf {
+    fn from(val: tokio::net::tcp::OwnedReadHalf) -> Self {
+        MyOwnedReadHalf::Tcp(val)
     }
 }
 
-impl Into<MyOwnedReadHalf> for futures::io::ReadHalf<SshAsyncChannel> {
-    fn into(self) -> MyOwnedReadHalf {
-        MyOwnedReadHalf::Ssh(self)
+impl From<tokio::net::unix::OwnedReadHalf> for MyOwnedReadHalf {
+    fn from(val: tokio::net::unix::OwnedReadHalf) -> Self {
+        MyOwnedReadHalf::Unix(val)
+    }
+}
+
+impl From<tokio::io::ReadHalf<SshAsyncChannel>> for MyOwnedReadHalf {
+    fn from(val: tokio::io::ReadHalf<SshAsyncChannel>) -> Self {
+        MyOwnedReadHalf::Ssh(val)
     }
 }
 

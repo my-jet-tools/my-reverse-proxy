@@ -91,7 +91,7 @@ impl EndpointHttpHostString {
                 let socket_addr =
                     SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
 
-                return ListenHost::Tcp(socket_addr);
+                ListenHost::Tcp(socket_addr)
             }
             EndpointPort::UnixSocket(host) => ListenHost::Unix(host),
         }

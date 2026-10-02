@@ -8,12 +8,7 @@ pub async fn compile_location_proxy_pass_to(
     listen_host: &str,
     resolved: &ResolvedTimeouts,
 ) -> Result<ProxyPassLocationConfig, String> {
-    let path = location_settings
-        .path
-        .as_ref()
-        .map(|itm| itm.as_str())
-        .unwrap_or("/")
-        .to_string();
+    let path = location_settings.path.as_deref().unwrap_or("/").to_string();
 
     let location_type = match location_settings.get_location_type()? {
         Some(location_type) => location_type,
@@ -100,16 +95,7 @@ pub async fn compile_location_proxy_pass_to(
         ),
     };
 
-    let result = ProxyPassLocationConfig::new(
-        path,
-        location_settings.modify_http_headers.clone(),
-        location_settings.whitelisted_ip.clone(),
-        proxy_pass_to,
-        location_settings.domain_name.clone(),
-        location_settings.get_compress(),
-        location_settings.auth_header.clone(),
-        listen_host,
-    );
+    let result = ProxyPassLocationConfig::new(path, location_settings, proxy_pass_to, listen_host);
 
     Ok(result)
 }
@@ -160,14 +146,10 @@ async fn get_static_content_body(body: String) -> Result<Vec<u8>, String> {
                     super::load_file(&data_source, crate::consts::DEFAULT_HTTP_CONNECT_TIMEOUT)
                         .await
                 }
-                None => {
-                    return Ok(body.into_bytes());
-                }
+                None => Ok(body.into_bytes()),
             }
         }
-        None => {
-            return Ok(body.into_bytes());
-        }
+        None => Ok(body.into_bytes()),
     }
 }
 

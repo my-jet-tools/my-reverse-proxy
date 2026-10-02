@@ -26,7 +26,7 @@ async fn handle_request(
         .ssh_cert_pass_keys
         .add(input_data.id, input_data.pass_key);
 
-    HttpOutput::Empty.into_ok_result(true).into()
+    HttpOutput::Empty.into_ok_result(true)
 }
 
 #[derive(Debug, Serialize, MyHttpInput)]

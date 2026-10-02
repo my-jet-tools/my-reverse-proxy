@@ -29,10 +29,8 @@ pub async fn serve_file(
                 result = result.add_content_type(content_type.as_str());
             }
 
-            return result.build_with_body(&content).into();
+            result.build_with_body(&content).into()
         }
-        Err(_) => {
-            return crate::error_templates::NOT_FOUND.as_slice().into();
-        }
+        Err(_) => crate::error_templates::NOT_FOUND.as_slice().into(),
     }
 }

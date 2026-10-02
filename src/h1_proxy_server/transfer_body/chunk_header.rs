@@ -21,7 +21,7 @@ fn get_chunk_size(chunk: &[u8], len: usize) -> Result<usize, ProxyServerError> {
             return Err(ProxyServerError::ChunkHeaderParseError);
         };
 
-        result = result + digit * multiplier;
+        result += digit * multiplier;
         multiplier *= 16;
     }
 
@@ -40,19 +40,19 @@ fn parse_hex_digit(c: u8) -> Option<usize> {
 
     let c = c as usize;
 
-    if c >= C_ZERO && c <= C_NINE {
+    if (C_ZERO..=C_NINE).contains(&c) {
         return Some(c - C_ZERO);
     }
 
-    if c >= C_A_LC && c <= C_F_LC {
+    if (C_A_LC..=C_F_LC).contains(&c) {
         return Some(c - C_A_LC + 10);
     }
 
-    if c >= C_A_UC && c <= C_F_UC {
+    if (C_A_UC..=C_F_UC).contains(&c) {
         return Some(c - C_A_UC + 10);
     }
 
-    return None;
+    None
 }
 
 #[cfg(test)]

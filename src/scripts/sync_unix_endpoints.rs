@@ -7,7 +7,7 @@ pub async fn sync_unix_endpoints() {
             let result: Vec<_> = config
                 .listen_unix_socket_endpoints
                 .keys()
-                .map(|host| host.clone())
+                .cloned()
                 .collect();
             result
         })

@@ -111,27 +111,27 @@ impl<'s> TcpGatewayContract<'s> {
 
                 let remote_host = convert_to_string(&payload[5..], "CONNECT")?;
 
-                return Ok(Self::Connect {
+                Ok(Self::Connect {
                     connection_id,
                     remote_host,
                     timeout: Duration::from_secs(timeout as u64),
-                });
+                })
             }
             CONNECT_OK_PACKET_ID => {
                 let connection_id =
                     u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
 
-                return Ok(Self::Connected { connection_id });
+                Ok(Self::Connected { connection_id })
             }
             CONNECTION_ERROR_PACKET_ID => {
                 let connection_id =
                     u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
 
                 let error = convert_to_string(&payload[4..], "CONNECTION")?;
-                return Ok(Self::ConnectionError {
+                Ok(Self::ConnectionError {
                     connection_id,
                     error,
-                });
+                })
             }
 
             SEND_PAYLOAD_PACKET_ID => {
@@ -140,10 +140,10 @@ impl<'s> TcpGatewayContract<'s> {
 
                 let payload_bytes: SliceOrVec<'_, u8> = (&payload[4..]).into();
 
-                return Ok(Self::ForwardPayload {
+                Ok(Self::ForwardPayload {
                     connection_id,
                     payload: payload_bytes,
-                });
+                })
             }
 
             RECEIVE_PAYLOAD_PACKET_ID => {
@@ -152,10 +152,10 @@ impl<'s> TcpGatewayContract<'s> {
 
                 let payload_bytes: SliceOrVec<'_, u8> = (&payload[4..]).into();
 
-                return Ok(Self::BackwardPayload {
+                Ok(Self::BackwardPayload {
                     connection_id,
                     payload: payload_bytes,
-                });
+                })
             }
 
             UPDATE_PING_TIME_PACKET_ID => {
@@ -166,7 +166,7 @@ impl<'s> TcpGatewayContract<'s> {
 
                 let duration = Duration::from_micros(micros);
 
-                return Ok(Self::UpdatePingTime { duration });
+                Ok(Self::UpdatePingTime { duration })
             }
 
             GET_FILE_REQUEST_PACKET_ID => {
@@ -175,7 +175,7 @@ impl<'s> TcpGatewayContract<'s> {
 
                 let path = convert_to_string(&payload[4..], "GET_FILE_REQUEST")?;
 
-                return Ok(Self::GetFileRequest { path, request_id });
+                Ok(Self::GetFileRequest { path, request_id })
             }
 
             GET_FILE_RESPONSE_PACKET_ID => {
@@ -186,11 +186,11 @@ impl<'s> TcpGatewayContract<'s> {
 
                 let content: SliceOrVec<'_, u8> = (&payload[5..]).into();
 
-                return Ok(Self::GetFileResponse {
+                Ok(Self::GetFileResponse {
                     request_id,
                     status,
                     content,
-                });
+                })
             }
 
             SYNC_SSL_CERTIFICATE_NOT_FOUND_PACKET_ID => {
@@ -205,7 +205,7 @@ impl<'s> TcpGatewayContract<'s> {
                     "SYNC_SSL_CERTIFICATE_NOT_FOUND: invalid UTF-8 in cert_id".to_string()
                 })?;
 
-                return Ok(Self::SyncSslCertificateNotFound { cert_id });
+                Ok(Self::SyncSslCertificateNotFound { cert_id })
             }
 
             SYNC_SSL_CERTIFICATES_REQUEST_PACKET_ID => {
@@ -228,7 +228,7 @@ impl<'s> TcpGatewayContract<'s> {
                     cert_ids.push(id);
                 }
 
-                return Ok(Self::SyncSslCertificatesRequest { cert_ids });
+                Ok(Self::SyncSslCertificatesRequest { cert_ids })
             }
 
             SYNC_SSL_CERTIFICATES_PACKET_ID => {
@@ -261,30 +261,21 @@ impl<'s> TcpGatewayContract<'s> {
                 }
                 let private_key_pem = &payload[offset..pk_pem_end];
 
-                return Ok(Self::SyncSslCertificates {
+                Ok(Self::SyncSslCertificates {
                     cert_id,
                     cert_pem: SliceOrVec::AsSlice(cert_pem),
                     private_key_pem: SliceOrVec::AsSlice(private_key_pem),
-                });
+                })
             }
 
-            PING => {
-                return Ok(Self::Ping);
-            }
-            PONG => {
-                return Ok(Self::Pong);
-            }
+            PING => Ok(Self::Ping),
+            PONG => Ok(Self::Pong),
 
-            COMPRESSED_BATCH_PACKET_ID => {
-                return Err(
-                    "COMPRESSED_BATCH must be unwrapped by the read loop, not by parse()"
-                        .to_string(),
-                );
-            }
+            COMPRESSED_BATCH_PACKET_ID => Err(
+                "COMPRESSED_BATCH must be unwrapped by the read loop, not by parse()".to_string(),
+            ),
 
-            _ => {
-                return Err(format!("Unknown packet type: {}", packet_type));
-            }
+            _ => Err(format!("Unknown packet type: {}", packet_type)),
         }
     }
 

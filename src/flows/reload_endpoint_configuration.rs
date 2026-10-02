@@ -29,16 +29,14 @@ pub async fn reload_endpoint_configuration(host_id_to_refresh: &str) -> Result<S
     {
         Ok(_) => {
             crate::scripts::sync_endpoints().await;
-            return Ok(format!(
+            Ok(format!(
                 "Host configuration {} has been reloaded",
                 host_id_to_refresh
-            ));
+            ))
         }
-        Err(_) => {
-            return Err(format!(
-                "Host configuration {} not found",
-                host_id_to_refresh
-            ));
-        }
+        Err(_) => Err(format!(
+            "Host configuration {} not found",
+            host_id_to_refresh
+        )),
     }
 }

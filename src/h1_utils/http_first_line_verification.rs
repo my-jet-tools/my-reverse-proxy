@@ -101,7 +101,7 @@ fn is_valid_status_code(status: &str) -> bool {
 
     // Check if status code is in valid range (100-599)
     if let Ok(code) = status.parse::<u16>() {
-        return code >= 100 && code <= 599;
+        return (100..=599).contains(&code);
     }
 
     false

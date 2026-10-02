@@ -98,5 +98,5 @@ pub async fn connect_tls(
         }
     };
 
-    return Ok(tls_stream);
+    Ok(tls_stream)
 }

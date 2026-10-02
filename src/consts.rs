@@ -64,8 +64,8 @@ pub const AUTHORIZED_COOKIE_NAME: &str = "x-authorized";
 
 pub mod location_type {
 
-    pub const MCP: &'static str = "mcp";
-    pub const MCP_H2: &'static str = "mcp-h2";
-    pub const STATIC: &'static str = "static";
-    pub const DYNAMIC: &'static str = "dynamic";
+    pub const MCP: &str = "mcp";
+    pub const MCP_H2: &str = "mcp-h2";
+    pub const STATIC: &str = "static";
+    pub const DYNAMIC: &str = "dynamic";
 }

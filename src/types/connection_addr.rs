@@ -19,20 +19,11 @@ impl ConnectionIp {
     pub fn get_ip_log(&self) -> Option<String> {
         self.get_ip_addr().map(|ip| ip.to_string())
     }
-
-    /// Convenience for log call sites: the source IP string and its ISO-3
-    /// country, resolved together.
-    pub fn get_ip_country_log(&self) -> (Option<String>, Option<String>) {
-        match self.get_ip_addr() {
-            Some(ip) => (Some(ip.to_string()), crate::ip_db::lookup_country_iso3(ip)),
-            None => (None, None),
-        }
-    }
 }
 
-impl Into<ConnectionIp> for SocketAddr {
-    fn into(self) -> ConnectionIp {
-        ConnectionIp::Tcp(self)
+impl From<SocketAddr> for ConnectionIp {
+    fn from(val: SocketAddr) -> Self {
+        ConnectionIp::Tcp(val)
     }
 }
 

@@ -14,12 +14,12 @@ pub async fn run_mcp_connection(
         println!("Accepted mcp connection",);
     }
 
-    let location = http_endpoint_info.locations.get(0).unwrap();
+    let location = http_endpoint_info.locations.first().unwrap();
     let route_path = location.path.clone();
     let remote_host = location.proxy_pass_to.to_string();
 
-    let remote_host = if remote_host.starts_with("http://") {
-        &remote_host[7..]
+    let remote_host = if let Some(remote_host) = remote_host.strip_prefix("http://") {
+        remote_host
     } else if remote_host.starts_with("https://") {
         println!("Https does not support as remote host for mcp");
         let _ = tls_stream.shutdown().await;
@@ -99,10 +99,7 @@ async fn link_tcp_streams(
     connection_id: u64,
     mcp_settings: McpEndpointSettings,
 ) {
-    let mut read_buffer = Vec::with_capacity(mcp_settings.buffer_size);
-    unsafe {
-        read_buffer.set_len(mcp_settings.buffer_size);
-    }
+    let mut read_buffer = vec![0u8; mcp_settings.buffer_size];
 
     // Total bytes forwarded in this direction — tells us whether the drop hit
     // mid-stream or on a connection that had been idle.

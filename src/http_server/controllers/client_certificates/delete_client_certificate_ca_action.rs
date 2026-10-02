@@ -59,7 +59,7 @@ async fn handle_request(
         endpoints,
     };
 
-    HttpOutput::as_json(model).into_ok_result(true).into()
+    HttpOutput::as_json(model).into_ok_result(true)
 }
 
 #[derive(MyHttpInput)]

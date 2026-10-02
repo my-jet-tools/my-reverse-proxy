@@ -18,13 +18,12 @@ impl ProxyPassLocation {
         let content_source = config
             .create_data_source(debug, crate::consts::DEFAULT_HTTP_CONNECT_TIMEOUT)
             .await;
-        let result = Self {
+
+        Self {
             content_source: Arc::new(content_source),
             config,
             compress,
-        };
-
-        result
+        }
     }
 
     pub fn is_my_uri(&self, uri: &Uri) -> bool {

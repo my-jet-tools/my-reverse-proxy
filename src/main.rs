@@ -62,70 +62,57 @@ async fn main() {
         .await
         .expect("Failed to load initial settings");
 
-    let mut my_timer = MyTimer::new(Duration::from_secs(3600));
+    let mut my_timer = MyTimer::new(Duration::from_secs(3600), my_logger::LOGGER.clone());
 
     my_timer.register_timer("CRL Refresh", Arc::new(CrlRefresherTimer));
 
     my_timer.register_timer("SSL Certs Refresh", Arc::new(SslCertsRefreshTimer));
 
-    my_timer.start(
-        crate::app::APP_CTX.states.clone(),
-        my_logger::LOGGER.clone(),
-    );
+    my_timer.start();
 
-    let mut metrics_timer = MyTimer::new(Duration::from_secs(1));
+    let mut metrics_timer = MyTimer::new(Duration::from_secs(1), my_logger::LOGGER.clone());
 
     metrics_timer.register_timer("Metrics", Arc::new(MetricsTimer));
     metrics_timer.register_timer("EndpointRps", Arc::new(EndpointRpsTimer));
     metrics_timer.register_timer("Traffic", Arc::new(TrafficTimer));
 
-    metrics_timer.start(
-        crate::app::APP_CTX.states.clone(),
-        my_logger::LOGGER.clone(),
-    );
+    metrics_timer.start();
 
-    let mut gc_connections_time = rust_extensions::MyTimer::new(Duration::from_secs(60));
+    let mut gc_connections_time =
+        rust_extensions::MyTimer::new(Duration::from_secs(60), my_logger::LOGGER.clone());
 
     gc_connections_time.register_timer("GcConnections", Arc::new(GcConnectionsTimer));
     gc_connections_time.register_timer("GatewaySyncCerts", Arc::new(GatewaySyncCertsTimer));
     gc_connections_time.register_timer("IpBlocklistGc", Arc::new(IpBlocklistGcTimer));
 
-    gc_connections_time.start(
-        crate::app::APP_CTX.states.clone(),
+    gc_connections_time.start();
+
+    let mut pool_supervisor_timer = rust_extensions::MyTimer::new(
+        crate::app::APP_CTX.pool_supervisor_interval,
         my_logger::LOGGER.clone(),
     );
-
-    let mut pool_supervisor_timer =
-        rust_extensions::MyTimer::new(crate::app::APP_CTX.pool_supervisor_interval);
 
     pool_supervisor_timer.register_timer("PoolSupervisor", Arc::new(PoolSupervisorTimer));
 
-    pool_supervisor_timer.start(
-        crate::app::APP_CTX.states.clone(),
-        my_logger::LOGGER.clone(),
-    );
+    pool_supervisor_timer.start();
 
-    let mut gc_pools_timer = rust_extensions::MyTimer::new(Duration::from_secs(60));
+    let mut gc_pools_timer =
+        rust_extensions::MyTimer::new(Duration::from_secs(60), my_logger::LOGGER.clone());
 
     gc_pools_timer.register_timer("GcPools", Arc::new(GcPoolsTimer));
 
-    gc_pools_timer.start(
-        crate::app::APP_CTX.states.clone(),
-        my_logger::LOGGER.clone(),
-    );
+    gc_pools_timer.start();
 
     // Resolve endpoint domains once at startup so the IP shows up immediately,
     // then keep it fresh on a timer.
     tokio::spawn(crate::timers::resolve_endpoint_domains());
 
-    let mut domains_resolve_timer = rust_extensions::MyTimer::new(Duration::from_secs(60));
+    let mut domains_resolve_timer =
+        rust_extensions::MyTimer::new(Duration::from_secs(60), my_logger::LOGGER.clone());
 
     domains_resolve_timer.register_timer("ResolveDomainsIp", Arc::new(ResolveDomainsIpTimer));
 
-    domains_resolve_timer.start(
-        crate::app::APP_CTX.states.clone(),
-        my_logger::LOGGER.clone(),
-    );
+    domains_resolve_timer.start();
 
     crate::app::APP_CTX.states.wait_until_shutdown().await;
 
@@ -149,7 +136,7 @@ fn format_mem(size: usize) -> String {
         return format!("{:.2}KB", size);
     }
 
-    let size = size as f64 / 1024.0;
+    let size = size / 1024.0;
 
-    return format!("{:.2}Mb", size);
+    format!("{:.2}Mb", size)
 }

@@ -34,9 +34,7 @@ impl Http1OverSshContentSource {
         let req = MyHttpRequest::from_hyper_request(req).await;
 
         match http_client.do_request(&req, self.request_timeout).await? {
-            MyHttpResponse::Response(response) => {
-                return Ok(HttpResponse::Response(response));
-            }
+            MyHttpResponse::Response(response) => Ok(HttpResponse::Response(response)),
             MyHttpResponse::WebSocketUpgrade {
                 stream,
                 response,
@@ -44,12 +42,12 @@ impl Http1OverSshContentSource {
                 leftover,
             } => {
                 http_client.upgraded_to_websocket();
-                return Ok(HttpResponse::WebSocketUpgrade {
-                    stream: WebSocketUpgradeStream::SshChannel(stream),
+                Ok(HttpResponse::WebSocketUpgrade {
+                    stream: Box::new(WebSocketUpgradeStream::SshChannel(stream)),
                     response,
                     disconnection,
                     leftover,
-                });
+                })
             }
         }
     }

@@ -40,6 +40,31 @@ fn mcp_key(protocol: &str, model: &ProxyPassToModel) -> String {
     )
 }
 
+fn remote_host_key(protocol: &str, model: &ProxyPassToModel) -> String {
+    match &model.remote_host {
+        MyReverseProxyRemoteEndpoint::Direct { remote_host } => format!(
+            "{protocol}|{:?}|{}",
+            remote_host.get_scheme(),
+            remote_host.get_host_port().as_str()
+        ),
+        MyReverseProxyRemoteEndpoint::OverSsh {
+            ssh_credentials,
+            remote_host,
+        } => format!(
+            "{protocol}|ssh:{}|{}",
+            ssh_credentials.to_string().as_str(),
+            remote_host.get_host_port().as_str()
+        ),
+        MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
+            format!(
+                "{protocol}|gw:{}|{}",
+                id,
+                remote_host.get_host_port().as_str()
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -97,30 +122,5 @@ mod tests {
 
         assert_ne!(h1, mcp_h1);
         assert_ne!(mcp_h1, mcp_h2);
-    }
-}
-
-fn remote_host_key(protocol: &str, model: &ProxyPassToModel) -> String {
-    match &model.remote_host {
-        MyReverseProxyRemoteEndpoint::Direct { remote_host } => format!(
-            "{protocol}|{:?}|{}",
-            remote_host.get_scheme(),
-            remote_host.get_host_port().as_str()
-        ),
-        MyReverseProxyRemoteEndpoint::OverSsh {
-            ssh_credentials,
-            remote_host,
-        } => format!(
-            "{protocol}|ssh:{}|{}",
-            ssh_credentials.to_string().as_str(),
-            remote_host.get_host_port().as_str()
-        ),
-        MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
-            format!(
-                "{protocol}|gw:{}|{}",
-                id,
-                remote_host.get_host_port().as_str()
-            )
-        }
     }
 }

@@ -51,7 +51,7 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
             {
                 let buf = self.loop_buffer.get_data();
 
-                if buf.len() > 0 {
+                if !buf.is_empty() {
                     let headers = Http1Headers::parse(buf);
 
                     if let Some(headers) = headers {

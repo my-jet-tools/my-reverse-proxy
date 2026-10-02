@@ -12,38 +12,31 @@ impl ListenHttpEndpointType {
         match self {
             Self::Http1 => match other {
                 Self::Http1 => true,
-                _ => false,
+                Self::Http2 | Self::Https1 | Self::Https2 | Self::Mcp => false,
             },
             Self::Http2 => match other {
                 Self::Http2 => true,
-                _ => false,
+                Self::Http1 | Self::Https1 | Self::Https2 | Self::Mcp => false,
             },
             Self::Https1 => match other {
-                Self::Https1 => true,
-                Self::Https2 => true,
-                Self::Mcp => true,
-                _ => false,
+                Self::Https1 | Self::Https2 | Self::Mcp => true,
+                Self::Http1 | Self::Http2 => false,
             },
             Self::Https2 => match other {
-                Self::Https1 => true,
-                Self::Https2 => true,
-                _ => false,
+                Self::Https1 | Self::Https2 => true,
+                Self::Http1 | Self::Http2 | Self::Mcp => false,
             },
             Self::Mcp => match other {
-                Self::Mcp => true,
-                Self::Https1 => true,
-                Self::Https2 => true,
-                _ => false,
+                Self::Mcp | Self::Https1 | Self::Https2 => true,
+                Self::Http1 | Self::Http2 => false,
             },
         }
     }
 
     pub fn is_http1_or_mcp(&self) -> bool {
         match self {
-            Self::Http1 => true,
-            Self::Https1 => true,
-            Self::Mcp => true,
-            _ => false,
+            Self::Http1 | Self::Https1 | Self::Mcp => true,
+            Self::Http2 | Self::Https2 => false,
         }
     }
 
@@ -58,18 +51,15 @@ impl ListenHttpEndpointType {
     */
     pub fn is_https(&self) -> bool {
         match self {
-            Self::Https1 => true,
-            Self::Https2 => true,
-            _ => false,
+            Self::Https1 | Self::Https2 => true,
+            Self::Http1 | Self::Http2 | Self::Mcp => false,
         }
     }
 
     pub fn is_https_or_mcp(&self) -> bool {
         match self {
-            Self::Https1 => true,
-            Self::Https2 => true,
-            Self::Mcp => true,
-            _ => false,
+            Self::Https1 | Self::Https2 | Self::Mcp => true,
+            Self::Http1 | Self::Http2 => false,
         }
     }
 

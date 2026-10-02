@@ -1,4 +1,4 @@
-pub mod contracts;
+mod contracts;
 mod get_current_config_action;
 pub use get_current_config_action::*;
 mod reload_endpoint_configuration;

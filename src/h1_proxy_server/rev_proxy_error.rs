@@ -1,5 +1,4 @@
 #![allow(warnings)]
-use my_ssh::ssh2::DisconnectCode::ProtocolError;
 
 use crate::{google_auth::GoogleAuthError, network_stream::NetworkError};
 

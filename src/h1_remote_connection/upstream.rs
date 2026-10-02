@@ -173,11 +173,9 @@ impl Upstream {
             // the worker task down with it).
             ProxyPassToConfig::Http2(_)
             | ProxyPassToConfig::McpHttp2(_)
-            | ProxyPassToConfig::UnixHttp2(_) => {
-                return Err(NetworkError::OtherStr(
-                    "an http2 upstream requires an http2/https2 endpoint — this endpoint is http/1",
-                ));
-            }
+            | ProxyPassToConfig::UnixHttp2(_) => Err(NetworkError::OtherStr(
+                "an http2 upstream requires an http2/https2 endpoint — this endpoint is http/1",
+            )),
             ProxyPassToConfig::FilesPath(_)
             | ProxyPassToConfig::Static(_)
             | ProxyPassToConfig::Drop

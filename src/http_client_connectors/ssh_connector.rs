@@ -36,7 +36,7 @@ impl MyHttpClientConnector<SshAsyncChannel> for HttpOverSshConnector {
 
         let tcp_stream = self
             .ssh_session
-            .connect_to_remote_host(remote_host, remote_port, self.connect_timeout)
+            .open_remote_tcp_stream(remote_host, remote_port, self.connect_timeout)
             .await;
 
         let tcp_stream = match tcp_stream {

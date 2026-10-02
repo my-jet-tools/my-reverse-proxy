@@ -186,10 +186,7 @@ pub async fn build_proxy_state_snapshot() -> GetProxyStateSnapshotResponse {
         pools.extend(snapshot_h2_pools(&APP_CTX.h2_tls_pools, "h2_tls", now));
         pools.extend(snapshot_h2_pools(&APP_CTX.h2_uds_pools, "h2_uds", now));
 
-        let mut locations = APP_CTX
-            .current_configuration
-            .get(|cfg| collect_locations(cfg))
-            .await;
+        let mut locations = APP_CTX.current_configuration.get(collect_locations).await;
 
         let location_id_set: AHashSet<i64> = locations.iter().map(|l| l.location_id).collect();
         let pool_id_set: AHashSet<i64> = pools.iter().map(|p| p.location_id).collect();

@@ -56,7 +56,7 @@ impl ProxyPassLocations {
             }
         }
 
-        return Err(ProxyPassError::NoLocationFound);
+        Err(ProxyPassError::NoLocationFound)
     }
 
     pub fn find(&self, location_index: &LocationIndex) -> &ProxyPassLocation {

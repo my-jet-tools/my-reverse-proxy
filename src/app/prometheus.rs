@@ -183,7 +183,7 @@ impl Prometheus {
             "WebSocket bytes per second from upstream to client, per inbound domain",
         );
 
-        let result = Self {
+        Self {
             http1_client_tcp_connects,
             http1_client_tcp_read_threads,
             http1_client_tcp_write_threads,
@@ -210,9 +210,7 @@ impl Prometheus {
             ws_server_to_client_events,
             ws_server_to_client_bytes,
             registry,
-        };
-
-        result
+        }
     }
 
     pub fn set_h2_pool_size(&self, endpoint: &str, n: i64) {
@@ -313,42 +311,31 @@ impl Prometheus {
         self.ip_blocklist_size.set(n);
     }
 
-    pub fn set_traffic(
-        &self,
-        domain: &str,
-        c2s_events: i64,
-        c2s_bytes: i64,
-        s2c_events: i64,
-        s2c_bytes: i64,
-        ws_c2s_events: i64,
-        ws_c2s_bytes: i64,
-        ws_s2c_events: i64,
-        ws_s2c_bytes: i64,
-    ) {
+    pub fn set_traffic(&self, domain: &str, stats: &super::TrafficStats) {
         self.client_to_server_events
             .with_label_values(&[domain])
-            .set(c2s_events);
+            .set(stats.c2s_events as i64);
         self.client_to_server_bytes
             .with_label_values(&[domain])
-            .set(c2s_bytes);
+            .set(stats.c2s_bytes as i64);
         self.server_to_client_events
             .with_label_values(&[domain])
-            .set(s2c_events);
+            .set(stats.s2c_events as i64);
         self.server_to_client_bytes
             .with_label_values(&[domain])
-            .set(s2c_bytes);
+            .set(stats.s2c_bytes as i64);
         self.ws_client_to_server_events
             .with_label_values(&[domain])
-            .set(ws_c2s_events);
+            .set(stats.ws_c2s_events as i64);
         self.ws_client_to_server_bytes
             .with_label_values(&[domain])
-            .set(ws_c2s_bytes);
+            .set(stats.ws_c2s_bytes as i64);
         self.ws_server_to_client_events
             .with_label_values(&[domain])
-            .set(ws_s2c_events);
+            .set(stats.ws_s2c_events as i64);
         self.ws_server_to_client_bytes
             .with_label_values(&[domain])
-            .set(ws_s2c_bytes);
+            .set(stats.ws_s2c_bytes as i64);
     }
 
     pub fn build(&self) -> Vec<u8> {

@@ -24,7 +24,7 @@ impl TcpGatewayProxyForwardedConnectionStatus {
     pub fn is_awaiting_connection(&self) -> bool {
         match self {
             Self::AcknowledgingConnection => true,
-            _ => false,
+            Self::Connected | Self::Disconnected(_) => false,
         }
     }
 }

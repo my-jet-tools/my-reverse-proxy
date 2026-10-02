@@ -103,24 +103,27 @@ impl MyReverseProxyRemoteEndpoint {
             remote_host: remote_host.into(),
         })
     }
+}
 
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for MyReverseProxyRemoteEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
-                format!("{GATEWAY_PREFIX}{}->{}", id, remote_host.as_str())
+                write!(f, "{GATEWAY_PREFIX}{}->{}", id, remote_host.as_str())
             }
             MyReverseProxyRemoteEndpoint::OverSsh {
                 ssh_credentials,
                 remote_host,
             } => {
-                format!(
+                write!(
+                    f,
                     "ssh:{}->{}",
                     ssh_credentials.to_string().as_str(),
                     remote_host.as_str()
                 )
             }
             MyReverseProxyRemoteEndpoint::Direct { remote_host } => {
-                remote_host.as_str().to_string()
+                f.write_str(remote_host.as_str())
             }
         }
     }

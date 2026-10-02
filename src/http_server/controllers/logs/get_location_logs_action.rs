@@ -26,9 +26,7 @@ async fn handle_request(
     let entries = crate::app::APP_CTX
         .proxy_logs
         .get_by_location(input_data.id);
-    HttpOutput::as_json(ProxyLogsHttpModel::from_entries(entries))
-        .into_ok_result(true)
-        .into()
+    HttpOutput::as_json(ProxyLogsHttpModel::from_entries(entries)).into_ok_result(true)
 }
 
 #[derive(MyHttpInput)]

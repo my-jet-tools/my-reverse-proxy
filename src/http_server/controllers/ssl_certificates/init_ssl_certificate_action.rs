@@ -30,7 +30,7 @@ async fn handle_request(
     .await
     .map_err(HttpFailResult::as_validation_error)?;
 
-    HttpOutput::Empty.into_ok_result(true).into()
+    HttpOutput::Empty.into_ok_result(true)
 }
 
 // PEM is text, so the parts are read as `String`. `FileContent` (an actual multipart *file*

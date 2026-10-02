@@ -56,7 +56,7 @@ impl Https1ContentSource {
                 disconnection,
                 leftover,
             } => Ok(HttpResponse::WebSocketUpgrade {
-                stream: WebSocketUpgradeStream::TlsStream(stream),
+                stream: Box::new(WebSocketUpgradeStream::TlsStream(Box::new(stream))),
                 response,
                 disconnection,
                 leftover,

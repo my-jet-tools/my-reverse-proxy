@@ -69,7 +69,9 @@ enum ReaderStep {
     Close,
     /// A websocket/CONNECT upgrade was requested — terminal for the connection;
     /// the connection entry reclaims the write half and runs the tunnel.
-    Upgrade(UpgradeContext),
+    /// Boxed: it happens at most once per connection, while the step itself is
+    /// returned for every request.
+    Upgrade(Box<UpgradeContext>),
 }
 
 /// Connection entry for the task-decomposed H1 path. Spawns the client-writer
@@ -145,7 +147,7 @@ pub async fn serve_reverse_proxy_pipelined<
                     _ => return,
                 };
                 let (client_read, client_leftover) = h1_reader.into_read_part();
-                run_ws_tunnel(ctx, client_read, client_leftover, client_write).await;
+                run_ws_tunnel(*ctx, client_read, client_leftover, client_write).await;
                 return;
             }
         }
@@ -529,14 +531,14 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         // Upgrade is terminal for the connection — hand a context back to the
         // connection entry, which reclaims the client write half and tunnels.
         // (No request body on a websocket handshake.)
-        return ReaderStep::Upgrade(UpgradeContext {
+        return ReaderStep::Upgrade(Box::new(UpgradeContext {
             proxy_pass_to: proxy_pass_to_owned,
             end_point_info,
             http_connection_info: conn_info,
             location_id,
             head,
             write_timeout,
-        });
+        }));
     }
 
     // Reserve this request's ordered output slot, then spawn its worker.
@@ -647,10 +649,9 @@ async fn respond_error(
             })
             .await
             .is_ok()
+            && tx.send(ResponseEvent::Chunk(page.to_vec())).await.is_ok()
         {
-            if tx.send(ResponseEvent::Chunk(page.to_vec())).await.is_ok() {
-                let _ = tx.send(ResponseEvent::Done).await;
-            }
+            let _ = tx.send(ResponseEvent::Done).await;
         }
     }
 

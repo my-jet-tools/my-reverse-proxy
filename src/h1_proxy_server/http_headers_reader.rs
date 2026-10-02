@@ -19,7 +19,7 @@ impl<'l> crate::types::HttpRequestReader for HttpHeadersReader<'l> {
         crate::utils::get_cookie(cookie_string, cookie_name)
     }
 
-    fn get_query_string<'s>(&'s self) -> Option<&'s str> {
+    fn get_query_string(&self) -> Option<&str> {
         let index_start = self.payload.find_byte_pos(b' ', 0).unwrap() + 1;
         let index_end = self.payload.find_byte_pos(b' ', index_start).unwrap();
 
@@ -32,7 +32,7 @@ impl<'l> crate::types::HttpRequestReader for HttpHeadersReader<'l> {
         }
     }
 
-    fn get_host<'s>(&'s self) -> Option<&'s str> {
+    fn get_host(&self) -> Option<&str> {
         let host_value = self.http_headers.host_value.as_ref()?;
 
         let host = &self.payload[host_value.start..host_value.end];
@@ -42,7 +42,7 @@ impl<'l> crate::types::HttpRequestReader for HttpHeadersReader<'l> {
         Some(host)
     }
 
-    fn get_path_and_query<'s>(&'s self) -> Option<&'s str> {
+    fn get_path_and_query(&self) -> Option<&str> {
         let index_start = self.payload.find_byte_pos(b' ', 0).unwrap() + 1;
         let index_end = self.payload.find_byte_pos(b' ', index_start).unwrap();
 
@@ -52,7 +52,7 @@ impl<'l> crate::types::HttpRequestReader for HttpHeadersReader<'l> {
         Some(path_and_query)
     }
 
-    fn get_path<'s>(&'s self) -> &'s str {
+    fn get_path(&self) -> &str {
         let Some(path_and_query) = self.get_path_and_query() else {
             return "/";
         };

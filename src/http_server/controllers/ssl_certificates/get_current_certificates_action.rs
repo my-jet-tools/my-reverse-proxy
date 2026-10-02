@@ -37,7 +37,7 @@ async fn handle_request(
         result.push(cert);
     }
 
-    HttpOutput::as_json(result).into_ok_result(true).into()
+    HttpOutput::as_json(result).into_ok_result(true)
 }
 
 #[derive(Debug, Serialize, MyHttpObjectStructure)]

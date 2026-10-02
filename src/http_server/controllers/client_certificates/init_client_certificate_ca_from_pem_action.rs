@@ -42,9 +42,7 @@ async fn handle_request(
     .await
     .map_err(HttpFailResult::as_validation_error)?;
 
-    HttpOutput::as_json(InitClientCertificateCaResultHttpModel::new(result))
-        .into_ok_result(true)
-        .into()
+    HttpOutput::as_json(InitClientCertificateCaResultHttpModel::new(result)).into_ok_result(true)
 }
 
 #[derive(MyHttpInput)]

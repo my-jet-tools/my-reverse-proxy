@@ -4,12 +4,10 @@ pub fn get_endpoint_modify_headers(
     settings_model: &SettingsCompiled,
     host_settings: &HostSettings,
 ) -> HttpEndpointModifyHeadersSettings {
-    let result = HttpEndpointModifyHeadersSettings {
+    HttpEndpointModifyHeadersSettings {
         global_modify_headers_settings: get_global_modify_headers(settings_model),
         endpoint_modify_headers_settings: host_settings.endpoint.modify_http_headers.clone(),
-    };
-
-    result
+    }
 }
 
 fn get_global_modify_headers(

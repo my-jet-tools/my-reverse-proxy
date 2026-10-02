@@ -13,10 +13,8 @@ pub fn get_from_host_or_templates<'s, TResult>(
     match super::get_endpoint_template(settings_model, host_settings)? {
         Some(endpoint_template_settings) => {
             let ssl_cert = get_from_templates(endpoint_template_settings);
-            return Ok(ssl_cert);
+            Ok(ssl_cert)
         }
-        None => {
-            return Ok(None);
-        }
+        None => Ok(None),
     }
 }
