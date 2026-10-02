@@ -1937,6 +1937,8 @@ Behavior:
 - It is **allowed to be missing**. Unlike a regular `include:`, a non-existent
   dynamic settings file is silently skipped (it may not have been written yet),
   so the proxy starts fine before the file exists.
+- It is **allowed to be blank**. A file that is empty or holds nothing but
+  spaces and line breaks is not parsed at all and contributes no settings.
 - Leading `~/` is expanded to `$HOME/…`.
 
 ### Editing over MCP
@@ -1948,6 +1950,7 @@ main config:
   exists, and its raw YAML content (empty if it does not exist yet).
 - **`set_dynamic_settings`** — full-file replace. The YAML is validated against
   the settings schema before writing; on a parse error nothing is written.
+  Empty or whitespace-only content is accepted as-is (no data).
 - **`reload_settings`** — applies the written file to the running proxy.
 
 The intended workflow is always: `get_dynamic_settings` → edit the returned

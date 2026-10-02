@@ -411,12 +411,14 @@ async fn load_includes(
     }
 
     // The dynamic settings file is merged like an include, but it is allowed to be
-    // missing (it may not have been written yet via MCP).
+    // missing (it may not have been written yet via MCP) or blank — then it adds nothing.
     if let Some(dynamic_file) = settings_model.dynamic_configurations_file.as_ref() {
         if dynamic_configurations_file_exists(dynamic_file) {
-            let settings =
-                crate::settings::SettingsModel::load_async(Some(dynamic_file.as_str())).await?;
-            result.push(settings);
+            if let Some(settings) =
+                crate::settings::SettingsModel::load_dynamic_async(dynamic_file.as_str()).await?
+            {
+                result.push(settings);
+            }
         }
     }
 
@@ -436,11 +438,14 @@ fn load_includes_block(
     }
 
     // The dynamic settings file is merged like an include, but it is allowed to be
-    // missing (it may not have been written yet via MCP).
+    // missing (it may not have been written yet via MCP) or blank — then it adds nothing.
     if let Some(dynamic_file) = settings_model.dynamic_configurations_file.as_ref() {
         if dynamic_configurations_file_exists(dynamic_file) {
-            let settings = crate::settings::SettingsModel::load(Some(dynamic_file.as_str()))?;
-            result.push(settings);
+            if let Some(settings) =
+                crate::settings::SettingsModel::load_dynamic(dynamic_file.as_str())?
+            {
+                result.push(settings);
+            }
         }
     }
 

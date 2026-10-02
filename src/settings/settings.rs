@@ -24,43 +24,46 @@ pub struct SettingsModel {
 
 impl SettingsModel {
     pub async fn load_async(file_name: Option<&str>) -> Result<Self, String> {
-        let file_name = if let Some(file_name) = file_name {
-            rust_extensions::file_utils::format_path(file_name).to_string()
-        } else {
-            format!("{}/{}", std::env::var("HOME").unwrap(), ".my-reverse-proxy")
-        };
-
-        let file_result = tokio::fs::read(file_name.as_str()).await;
-        if file_result.is_err() {
-            return Err(format!("Can not read settings from file: {}", file_name));
-        }
-
-        let file_content = file_result.unwrap();
-
-        match my_settings_reader::serde_yaml::from_slice(&file_content) {
-            Ok(result) => Ok(result),
-            Err(err) => Err(format!(
-                "Invalid yaml format of file: {}. Err: {}",
-                file_name, err
-            )),
-        }
+        let file_name = resolve_file_name(file_name);
+        let file_content = read_file_async(file_name.as_str()).await?;
+        Self::from_yaml(file_name.as_str(), &file_content)
     }
 
     pub fn load(file_name: Option<&str>) -> Result<Self, String> {
-        let file_name = if let Some(file_name) = file_name {
-            rust_extensions::file_utils::format_path(file_name).to_string()
-        } else {
-            format!("{}/{}", std::env::var("HOME").unwrap(), ".my-reverse-proxy")
-        };
+        let file_name = resolve_file_name(file_name);
+        let file_content = read_file(file_name.as_str())?;
+        Self::from_yaml(file_name.as_str(), &file_content)
+    }
 
-        let file_result = std::fs::read(file_name.as_str());
-        if file_result.is_err() {
-            return Err(format!("Can not read settings from file: {}", file_name));
+    /// Loads the dynamic settings file. A blank file (empty, or nothing but spaces
+    /// and line breaks) is not parsed at all and yields `None` — it holds no data.
+    pub async fn load_dynamic_async(file_name: &str) -> Result<Option<Self>, String> {
+        let file_name = resolve_file_name(Some(file_name));
+        let file_content = read_file_async(file_name.as_str()).await?;
+        Self::from_dynamic_yaml(file_name.as_str(), &file_content)
+    }
+
+    pub fn load_dynamic(file_name: &str) -> Result<Option<Self>, String> {
+        let file_name = resolve_file_name(Some(file_name));
+        let file_content = read_file(file_name.as_str())?;
+        Self::from_dynamic_yaml(file_name.as_str(), &file_content)
+    }
+
+    /// True if the content is empty or consists only of whitespace (spaces, tabs, line breaks).
+    pub fn is_blank_content(content: &[u8]) -> bool {
+        content.iter().all(|b| b.is_ascii_whitespace())
+    }
+
+    fn from_dynamic_yaml(file_name: &str, content: &[u8]) -> Result<Option<Self>, String> {
+        if Self::is_blank_content(content) {
+            return Ok(None);
         }
 
-        let file_content = file_result.unwrap();
+        Self::from_yaml(file_name, content).map(Some)
+    }
 
-        match my_settings_reader::serde_yaml::from_slice(&file_content) {
+    fn from_yaml(file_name: &str, content: &[u8]) -> Result<Self, String> {
+        match my_settings_reader::serde_yaml::from_slice(content) {
             Ok(result) => Ok(result),
             Err(err) => Err(format!(
                 "Invalid yaml format of file: {}. Err: {}",
@@ -68,6 +71,24 @@ impl SettingsModel {
             )),
         }
     }
+}
+
+fn resolve_file_name(file_name: Option<&str>) -> String {
+    if let Some(file_name) = file_name {
+        rust_extensions::file_utils::format_path(file_name).to_string()
+    } else {
+        format!("{}/{}", std::env::var("HOME").unwrap(), ".my-reverse-proxy")
+    }
+}
+
+async fn read_file_async(file_name: &str) -> Result<Vec<u8>, String> {
+    tokio::fs::read(file_name)
+        .await
+        .map_err(|_| format!("Can not read settings from file: {}", file_name))
+}
+
+fn read_file(file_name: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(file_name).map_err(|_| format!("Can not read settings from file: {}", file_name))
 }
 
 #[cfg(test)]
@@ -179,5 +200,36 @@ mod tests {
         let json = serde_yaml::to_string(&model).unwrap();
 
         println!("{}", json);
+    }
+
+    #[test]
+    fn blank_dynamic_content_is_not_parsed() {
+        for content in ["", " ", "\n", "\r\n", "  \n\t\r\n \n"] {
+            let result = SettingsModel::from_dynamic_yaml("dynamic", content.as_bytes());
+            assert!(result.unwrap().is_none(), "content: {:?}", content);
+        }
+    }
+
+    #[test]
+    fn non_blank_dynamic_content_is_parsed() {
+        let result = SettingsModel::from_dynamic_yaml("dynamic", b"\n\nhosts: {}\n\n");
+        assert!(result.unwrap().unwrap().hosts.is_empty());
+
+        let result = SettingsModel::from_dynamic_yaml("dynamic", b"\n  not a settings file\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn blank_dynamic_file_is_loaded_as_no_data() {
+        let file_name = std::env::temp_dir().join(format!(
+            "my-reverse-proxy-blank-dynamic-{}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(&file_name, " \n\n  \r\n").unwrap();
+
+        let result = SettingsModel::load_dynamic(file_name.to_str().unwrap());
+
+        std::fs::remove_file(&file_name).unwrap();
+        assert!(result.unwrap().is_none());
     }
 }
