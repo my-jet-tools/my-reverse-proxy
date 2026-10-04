@@ -1,10 +1,13 @@
 use std::{
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
 use my_ssh::SshCredentials;
-use rust_extensions::{remote_endpoint::RemoteEndpointOwned, UnsafeValue};
+use rust_extensions::remote_endpoint::RemoteEndpointOwned;
 
 use crate::{app::SshSessionHandler, network_stream::*};
 
@@ -19,13 +22,13 @@ impl NextConnectionId {
     }
 
     pub fn get_next(&self) -> u64 {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        self.0.fetch_add(1, Ordering::Relaxed)
     }
 }
 
 pub struct Http1ConnectionInner<TNetworkWritePart: NetworkStreamWritePart + Send + Sync + 'static> {
     pub remote_write_part: TNetworkWritePart,
-    disconnected: Arc<UnsafeValue<bool>>,
+    disconnected: Arc<AtomicBool>,
 }
 
 impl<TNetworkWritePart: NetworkStreamWritePart + Send + Sync + 'static>
@@ -66,18 +69,18 @@ impl<TNetworkWritePart: NetworkStreamWritePart + Send + Sync + 'static>
 
         let result = Self {
             remote_write_part: write_part,
-            disconnected: Arc::new(false.into()),
+            disconnected: Arc::new(AtomicBool::new(false)),
         };
 
         Ok((result, read_part, ssh_session_handler))
     }
 
-    pub fn get_remote_disconnect_trigger(&self) -> Arc<UnsafeValue<bool>> {
+    pub fn get_remote_disconnect_trigger(&self) -> Arc<AtomicBool> {
         self.disconnected.clone()
     }
 
     pub fn is_disconnected(&self) -> bool {
-        self.disconnected.get_value()
+        self.disconnected.load(Ordering::Relaxed)
     }
 
     pub async fn send_with_timeout(

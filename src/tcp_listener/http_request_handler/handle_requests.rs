@@ -132,7 +132,9 @@ pub async fn handle_requests(
             let err_desc = format!("{:?}", err);
             let response = super::utils::generate_tech_page(
                 err,
-                crate::app::APP_CTX.show_error_description.get_value(),
+                crate::app::APP_CTX
+                    .show_error_description
+                    .load(std::sync::atomic::Ordering::Relaxed),
             );
             // Every proxy-generated 5xx (upstream unreachable / timeout /
             // internal) is always recorded — visible in /api/logs + MCP

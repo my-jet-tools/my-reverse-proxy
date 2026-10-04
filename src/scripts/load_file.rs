@@ -70,9 +70,8 @@ async fn load_from_http_or_https<'s>(
             .await;
     }
 
-    // try_new, not new: a malformed `https://domain@ip:port/...` source must fail the load, not panic
-    let response = FlUrl::try_new(remote_endpoint.as_str())
-        .map_err(|err| format!("Invalid url {}. Error: {:?}", remote_endpoint.as_str(), err))?
+    // FlUrl::new never panics: a malformed `https://domain@ip:port/...` source fails the request
+    let response = FlUrl::new(remote_endpoint.as_str())
         .get()
         .await
         .map_err(|err| format!("Error loading file from HTTP. Error: {:?}", err))?;
@@ -132,7 +131,9 @@ async fn load_content_from_http_via_ssh<'s>(
     let http_client: MyHttpClient<SshAsyncChannel, HttpOverSshConnector> =
         MyHttpClient::new(connector);
 
-    let http_request = MyHttpRequestBuilder::new(Method::GET, remote_endpoint.as_str()).build();
+    let http_request = MyHttpRequestBuilder::new(Method::GET, remote_endpoint.as_str())
+        .build()
+        .map_err(|err| format!("{:?}", err))?;
 
     let response = http_client
         .do_request(&http_request, Duration::from_secs(5))

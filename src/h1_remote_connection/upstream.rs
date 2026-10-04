@@ -34,7 +34,7 @@ pub struct OwnedUpstream {
     pub upstream: Upstream,
     pub response_read: Box<dyn NetworkStreamReadPart + Send + Sync>,
     /// Shared flag the worker flips on EOF/read error so the pool can evict it.
-    pub disconnect_trigger: std::sync::Arc<rust_extensions::UnsafeValue<bool>>,
+    pub disconnect_trigger: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Kept alive for the lifetime of the read (ssh transports only).
     pub ssh_handler: Option<crate::app::SshSessionHandler>,
 }

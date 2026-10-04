@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         Arc,
     },
 };
@@ -11,7 +11,7 @@ use encryption::aes::AesKey;
 use my_ssh::SshAsyncChannel;
 use my_tls::tokio_rustls::client::TlsStream;
 use my_tls::tokio_rustls::rustls::sign::CertifiedKey;
-use rust_extensions::{AppStates, UnsafeValue};
+use rust_extensions::AppStates;
 use tokio::{net::TcpStream, sync::Mutex};
 
 use crate::{
@@ -73,7 +73,7 @@ pub struct AppContext {
     pub current_configuration: AppConfiguration,
     pub states: Arc<AppStates>,
 
-    pub show_error_description: UnsafeValue<bool>,
+    pub show_error_description: AtomicBool,
     pub prometheus: Arc<Prometheus>,
     pub metrics: Metrics,
     pub proxy_logs: ProxyLogs,
@@ -170,7 +170,7 @@ impl AppContext {
             ssl_certificates_cache: CertificatesCache::new(),
             //local_port_allocator: LocalPortAllocator::new(),
             //ssh_to_http_port_forward_pool: SshToHttpPortForwardPool::new(),
-            show_error_description: UnsafeValue::new(
+            show_error_description: AtomicBool::new(
                 settings_model.get_show_error_description_on_error_page(),
             ),
             metrics: Metrics::new(),

@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -338,7 +339,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
             let headers = match resp_reader.read_headers().await {
                 Ok(h) => h,
                 Err(err) => {
-                    disconnect_trigger.set_value(true);
+                    disconnect_trigger.store(true, Ordering::Relaxed);
                     if reused
                         && retries_left
                         && body.is_replayable()
@@ -398,7 +399,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
         ) {
             Ok(ws) => ws,
             Err(err) => {
-                disconnect_trigger.set_value(true);
+                disconnect_trigger.store(true, Ordering::Relaxed);
                 let (page, label) = classify_upstream_failure(&err);
                 crate::app::APP_CTX.proxy_logs.write_returned_5xx(
                     endpoint,
@@ -477,7 +478,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
         HttpContentLength::Known(_) | HttpContentLength::Chunked
     );
     let (response_read, leftover) = resp_reader.into_read_part();
-    if reusable_framing && leftover.get_data().is_empty() && !disconnect_trigger.get_value() {
+    if reusable_framing && leftover.get_data().is_empty() && !disconnect_trigger.load(Ordering::Relaxed) {
         let owned = OwnedUpstream {
             upstream,
             response_read,

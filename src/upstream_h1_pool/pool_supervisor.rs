@@ -203,9 +203,13 @@ where
 
     // HTTP/1.1 REQUIRES a Host header — a compliant upstream answers 400
     // without it, which would read as "dead" and churn a healthy connection.
-    let mut builder = my_http_client::http1::MyHttpRequestBuilder::new(hyper::Method::GET, &path);
-    builder.append_header("Host", authority);
-    let req = builder.build();
+    // A path or authority that can not go on the wire can not be pinged — treat as dead.
+    let Ok(req) = my_http_client::http1::MyHttpRequestBuilder::new(hyper::Method::GET, &path)
+        .append_header("Host", authority)
+        .build()
+    else {
+        return false;
+    };
     let client = entry.client.load_full();
     match tokio::time::timeout(ping_timeout, do_ping(&client, &req, ping_timeout)).await {
         Ok(Ok(status)) => (200..=205).contains(&status),

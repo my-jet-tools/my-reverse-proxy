@@ -1,7 +1,9 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use encryption::aes::AesKey;
-use rust_extensions::UnsafeValue;
 use tokio::sync::mpsc;
 
 use crate::network_stream::{MyOwnedWriteHalf, NetworkError};
@@ -21,7 +23,7 @@ const WRITE_CHANNEL_CAPACITY: usize = 1024;
 /// forwarded TCP stream toward the downstream service.
 pub struct TcpConnectionInner {
     sender: parking_lot::Mutex<Option<mpsc::Sender<Vec<u8>>>>,
-    is_connected: Box<UnsafeValue<bool>>,
+    is_connected: AtomicBool,
     aes_key_opt: Option<Arc<AesKey>>,
 }
 
@@ -34,7 +36,7 @@ impl TcpConnectionInner {
         let (sender, receiver) = mpsc::channel::<Vec<u8>>(WRITE_CHANNEL_CAPACITY);
         let result = Arc::new(Self {
             sender: parking_lot::Mutex::new(Some(sender)),
-            is_connected: Box::new(true.into()),
+            is_connected: AtomicBool::new(true),
             aes_key_opt: Some(aes_key.clone()),
         });
 
@@ -55,7 +57,7 @@ impl TcpConnectionInner {
         let (sender, receiver) = mpsc::channel::<Vec<u8>>(WRITE_CHANNEL_CAPACITY);
         let result = Arc::new(Self {
             sender: parking_lot::Mutex::new(Some(sender)),
-            is_connected: Box::new(true.into()),
+            is_connected: AtomicBool::new(true),
             aes_key_opt: None,
         });
 
@@ -77,7 +79,7 @@ impl TcpConnectionInner {
     }
 
     pub fn send_payload(&self, payload: Vec<u8>) -> bool {
-        if !self.is_connected.get_value() {
+        if !self.is_connected.load(Ordering::Relaxed) {
             return false;
         }
         let guard = self.sender.lock();
@@ -88,12 +90,11 @@ impl TcpConnectionInner {
     }
 
     pub fn is_connected(&self) -> bool {
-        self.is_connected.get_value()
+        self.is_connected.load(Ordering::Relaxed)
     }
 
     pub async fn disconnect(&self) -> bool {
-        let was_connected = self.is_connected.get_value();
-        self.is_connected.set_value(false);
+        let was_connected = self.is_connected.swap(false, Ordering::Relaxed);
         self.sender.lock().take();
         was_connected
     }
