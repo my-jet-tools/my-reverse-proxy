@@ -1,5 +1,7 @@
+use std::net::IpAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
@@ -7,7 +9,12 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::super::*;
 use super::*;
-use crate::tcp_gateway::handshake::perform_server_handshake;
+use crate::tcp_gateway::handshake::{perform_server_handshake, HANDSHAKE_TIMEOUT};
+use crate::types::WhiteListedIpList;
+
+/// Pause after a failed `accept`. It fails when the process is out of file descriptors, and
+/// retrying at once would only spin on the same error.
+const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(100);
 
 pub struct TcpGatewayServer {
     inner: Arc<TcpGatewayInner>,
@@ -18,7 +25,9 @@ impl TcpGatewayServer {
     pub fn new(
         listen: String,
         authorized_keys: Vec<VerifyingKey>,
+        allowed_ip: Option<WhiteListedIpList>,
         compress_outbound: bool,
+        protocol_extensions: bool,
         debug: bool,
     ) -> Self {
         println!("Starting TCP Gateway Server at address: {}", listen);
@@ -27,6 +36,11 @@ impl TcpGatewayServer {
             listen,
             authorized_keys,
             compress_outbound,
+            if protocol_extensions {
+                OWN_CAPABILITIES
+            } else {
+                0
+            },
         ));
         let result = Self {
             inner: inner.clone(),
@@ -40,14 +54,19 @@ impl TcpGatewayServer {
         // initializer. spawn_named touches APP_CTX (prometheus counter), and
         // that re-entrant deref of the still-initializing APP_CTX would prevent
         // the accept loop from ever being scheduled.
-        tokio::spawn(connection_loop(inner, debug));
+        tokio::spawn(connection_loop(inner, allowed_ip, debug));
 
         result
     }
 
+    /// Ids of the connections the server opens carry [`SERVER_CONNECTION_ID_FLAG`], so they
+    /// never collide with the ids a client gives the connections it opens.
     pub fn get_next_connection_id(&self) -> u32 {
-        self.next_connection_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        let id = self
+            .next_connection_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        SERVER_CONNECTION_ID_FLAG | (id & !SERVER_CONNECTION_ID_FLAG)
     }
 
     pub fn get_gateway_connection(&self, gateway_id: &str) -> Option<Arc<TcpGatewayConnection>> {
@@ -75,7 +94,11 @@ impl Drop for TcpGatewayServer {
     }
 }
 
-async fn connection_loop(tcp_gateway: Arc<TcpGatewayInner>, debug: bool) {
+async fn connection_loop(
+    tcp_gateway: Arc<TcpGatewayInner>,
+    allowed_ip: Option<WhiteListedIpList>,
+    debug: bool,
+) {
     println!("GATEWAY binding to {}", tcp_gateway.gateway_host.as_str(),);
 
     let listener = TcpListener::bind(tcp_gateway.gateway_host.as_str()).await;
@@ -106,9 +129,22 @@ async fn connection_loop(tcp_gateway: Arc<TcpGatewayInner>, debug: bool) {
                     tcp_gateway.gateway_host.as_str(),
                     err
                 );
+                tokio::time::sleep(ACCEPT_ERROR_DELAY).await;
                 continue;
             }
         };
+
+        if let Some(allowed_ip) = allowed_ip.as_ref() {
+            if !is_ip_allowed(allowed_ip, socket_addr.ip()) {
+                println!(
+                    "Rejected GATEWAY connection from host: {} on {}: the IP is not in allowed_ip",
+                    socket_addr,
+                    tcp_gateway.get_gateway_id()
+                );
+                // Dropping the stream closes it.
+                continue;
+            }
+        }
 
         // Always log accepted inbound connections (not gated by debug) so the
         // operator can confirm the gateway is reachable.
@@ -126,6 +162,20 @@ async fn connection_loop(tcp_gateway: Arc<TcpGatewayInner>, debug: bool) {
     }
 }
 
+/// `allowed_ip` holds IPv4 addresses and ranges; an IPv6 peer passes only as an IPv4-mapped
+/// address.
+pub fn is_ip_allowed(allowed_ip: &WhiteListedIpList, ip: IpAddr) -> bool {
+    let ip = match ip {
+        IpAddr::V4(ip) => ip,
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+            Some(ip) => ip,
+            None => return false,
+        },
+    };
+
+    allowed_ip.is_whitelisted(&ip)
+}
+
 async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream, debug: bool) {
     let authorized_keys = match tcp_gateway.authorized_keys.as_ref() {
         Some(keys) => keys.clone(),
@@ -135,12 +185,26 @@ async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream
         }
     };
 
-    let outcome = match perform_server_handshake(&mut stream, authorized_keys.as_slice()).await {
-        Ok(outcome) => outcome,
-        Err(err) => {
+    let handshake = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        perform_server_handshake(&mut stream, authorized_keys.as_slice()),
+    )
+    .await;
+
+    let outcome = match handshake {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(err)) => {
             eprintln!(
                 "Gateway server handshake failed at {}: {err}",
                 tcp_gateway.gateway_host.as_str()
+            );
+            return;
+        }
+        Err(_) => {
+            eprintln!(
+                "Gateway server handshake at {} timed out after {:?}",
+                tcp_gateway.gateway_host.as_str(),
+                HANDSHAKE_TIMEOUT
             );
             return;
         }
@@ -161,16 +225,36 @@ async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream
         outcome.session_key.clone(),
         tcp_gateway.compress_outbound,
         true,
+        tcp_gateway.capabilities,
     );
 
     let gateway_connection = Arc::new(gateway_connection);
     let timestamp = DateTimeAsMicroseconds::new(outcome.timestamp_us);
     gateway_connection.set_connection_timestamp(timestamp);
     gateway_connection.set_gateway_id(outcome.gateway_name.as_str());
-    tcp_gateway.set_gateway_connection(
-        outcome.gateway_name.as_str(),
-        Some(gateway_connection.clone()),
-    );
+
+    // The first frame on the connection, ahead of anything this side could open: the client
+    // knows this side's capabilities before it opens anything. A client which predates
+    // capabilities ignores PINGs.
+    if let Some(capabilities) = advertised(tcp_gateway.capabilities) {
+        gateway_connection.send_payload(&TcpGatewayContract::Ping {
+            capabilities: Some(capabilities),
+        });
+    }
+
+    let displaced = tcp_gateway
+        .register_gateway_connection(outcome.gateway_name.as_str(), gateway_connection.clone());
+
+    // The client reconnected while its previous connection is still around - typically one the
+    // client already gave up on, which this side has not noticed yet. Nothing routes to it any
+    // more, so it goes, together with whatever was tunnelled through it.
+    if let Some(displaced) = displaced {
+        println!(
+            "Gateway server: client '{}' reconnected - closing its previous connection",
+            outcome.gateway_name
+        );
+        displaced.disconnect_gateway();
+    }
 
     crate::app::spawn_named(
         "tcp_gateway_server_read_loop",

@@ -110,8 +110,15 @@ impl ProxyPassLocationConfig {
             ),
             ProxyPassToConfig::Http1(proxy_pass) | ProxyPassToConfig::McpHttp1(proxy_pass) => {
                 match &proxy_pass.remote_host {
-                    MyReverseProxyRemoteEndpoint::Gateway { .. } => {
-                        todo!("Should not be here. Remove it");
+                    MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
+                        HttpProxyPassContentSource::Http1OverGateway(
+                            Http1OverGatewayContentSource {
+                                gateway_id: id.clone(),
+                                remote_endpoint: remote_host.clone(),
+                                request_timeout: proxy_pass.request_timeout,
+                                connect_timeout: proxy_pass.connect_timeout,
+                            },
+                        )
                     }
                     MyReverseProxyRemoteEndpoint::OverSsh {
                         ssh_credentials,
@@ -238,8 +245,15 @@ impl ProxyPassLocationConfig {
 
             ProxyPassToConfig::Http2(proxy_pass) | ProxyPassToConfig::McpHttp2(proxy_pass) => {
                 match &proxy_pass.remote_host {
-                    MyReverseProxyRemoteEndpoint::Gateway { .. } => {
-                        todo!("Should not be here. Remote it at the end of the day");
+                    MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
+                        HttpProxyPassContentSource::Http2OverGateway(
+                            Http2OverGatewayContentSource {
+                                gateway_id: id.clone(),
+                                remote_endpoint: remote_host.clone(),
+                                request_timeout: proxy_pass.request_timeout,
+                                connect_timeout: proxy_pass.connect_timeout,
+                            },
+                        )
                     }
                     MyReverseProxyRemoteEndpoint::OverSsh {
                         ssh_credentials,
@@ -393,12 +407,15 @@ impl ProxyPassLocationConfig {
                 }
             },
             ProxyPassToConfig::UnixHttp1(proxy_pass) => match &proxy_pass.remote_host {
+                // The gateway peer connects to a socket path itself: through a gateway a unix
+                // socket upstream is an ordinary one.
                 MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
-                    panic!(
-                        "Unix+Http is not supported  over gateway. Id: {}. RemoteHost: {}",
-                        id.as_str(),
-                        remote_host.as_str()
-                    );
+                    HttpProxyPassContentSource::Http1OverGateway(Http1OverGatewayContentSource {
+                        gateway_id: id.clone(),
+                        remote_endpoint: remote_host.clone(),
+                        request_timeout: proxy_pass.request_timeout,
+                        connect_timeout: proxy_pass.connect_timeout,
+                    })
                 }
                 MyReverseProxyRemoteEndpoint::OverSsh {
                     ssh_credentials,
@@ -429,12 +446,14 @@ impl ProxyPassLocationConfig {
                 }
             },
             ProxyPassToConfig::UnixHttp2(proxy_pass) => match &proxy_pass.remote_host {
+                // As for unix+http: the gateway peer connects to the socket path itself.
                 MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
-                    panic!(
-                        "Unix+Http2 is not supported  over gateway. Id:{}. RemoteHost: {}",
-                        id.as_str(),
-                        remote_host.as_str()
-                    );
+                    HttpProxyPassContentSource::Http2OverGateway(Http2OverGatewayContentSource {
+                        gateway_id: id.clone(),
+                        remote_endpoint: remote_host.clone(),
+                        request_timeout: proxy_pass.request_timeout,
+                        connect_timeout: proxy_pass.connect_timeout,
+                    })
                 }
                 MyReverseProxyRemoteEndpoint::OverSsh {
                     ssh_credentials,

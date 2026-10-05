@@ -1,19 +1,66 @@
-use std::sync::Arc;
+use std::{io::Read, sync::Arc, time::Duration};
 
-use encryption::{aes::AesKey, AesEncryptedDataRef};
+use encryption::AesEncryptedDataRef;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 use tokio::{io::AsyncReadExt, net::tcp::OwnedReadHalf};
 
 use super::*;
 
-const MAX_PAYLOAD_SIZE: usize = 1024 * 1024 * 5;
-const MAX_DECOMPRESSED_BATCH_SIZE: usize = 16 * 1024 * 1024;
+/// A live peer is never silent this long: the client pings every 3 seconds and the server
+/// answers every ping. Bytes trickling in through a big frame count as activity, so a slow link
+/// is not mistaken for a dead one. This is what finds a peer which vanished without closing
+/// the socket - nothing else on the server side would.
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn gateway_read_loop(
     tcp_gateway: Arc<TcpGatewayInner>,
     mut read: OwnedReadHalf,
     gateway_connection: Arc<TcpGatewayConnection>,
     packet_handler: impl TcpGatewayPacketHandler,
+    debug: bool,
+) {
+    // Tears the connection down however the loop ends - a closed socket, a bad frame, a
+    // disconnect requested from outside, or a panic in a packet handler.
+    let _teardown = ReadLoopTeardown {
+        tcp_gateway: tcp_gateway.clone(),
+        gateway_connection: gateway_connection.clone(),
+    };
+
+    let disconnected = gateway_connection.disconnected_token();
+
+    tokio::select! {
+        _ = disconnected.cancelled() => {
+            if debug {
+                println!(
+                    "TCP Gateway connection [{}] at {} is disconnected",
+                    gateway_connection.get_gateway_id(),
+                    tcp_gateway.gateway_host.as_str()
+                );
+            }
+        }
+        _ = read_frames(&tcp_gateway, &mut read, &gateway_connection, &packet_handler, debug) => {}
+    }
+}
+
+struct ReadLoopTeardown {
+    tcp_gateway: Arc<TcpGatewayInner>,
+    gateway_connection: Arc<TcpGatewayConnection>,
+}
+
+impl Drop for ReadLoopTeardown {
+    fn drop(&mut self) {
+        let gateway_id = self.gateway_connection.get_gateway_id();
+        self.tcp_gateway
+            .remove_gateway_connection(gateway_id.as_str(), &self.gateway_connection);
+        self.gateway_connection.disconnect_gateway();
+    }
+}
+
+async fn read_frames(
+    tcp_gateway: &Arc<TcpGatewayInner>,
+    read: &mut OwnedReadHalf,
+    gateway_connection: &Arc<TcpGatewayConnection>,
+    packet_handler: &impl TcpGatewayPacketHandler,
     debug: bool,
 ) {
     let mut buf = crate::tcp_utils::allocated_read_buffer(None);
@@ -23,83 +70,68 @@ pub async fn gateway_read_loop(
     loop {
         payload_no += 1;
         let mut payload_size = [0u8; 4];
-        let read_result = read.read_exact(&mut payload_size).await;
 
-        match read_result {
-            Ok(result) => {
-                if result != payload_size.len() {
-                    println!("[1] TCP Gateway is disconnected");
-                    break;
-                }
+        if let Err(err) = read_exact(read, &mut payload_size, gateway_connection).await {
+            if debug {
+                println!(
+                    "[1] Failed to read payload size from TCP Gateway at {}. Err: {}",
+                    tcp_gateway.gateway_host.as_str(),
+                    err
+                );
             }
-            Err(err) => {
-                if debug {
-                    println!(
-                        "[1] Failed to read payload size from TCP Gateway at {}. Err: {:?}",
-                        tcp_gateway.gateway_host.as_str(),
-                        err
-                    );
-                }
-                break;
-            }
+            return;
         }
 
-        let decrypted = {
-            let payload_size = u32::from_le_bytes(payload_size) as usize;
+        let payload_size = u32::from_le_bytes(payload_size) as usize;
 
-            if payload_size > MAX_PAYLOAD_SIZE {
+        if payload_size > MAX_PAYLOAD_SIZE {
+            println!(
+                "[1] Failed to read payload size from TCP Gateway at {}. Payload no: {payload_no}. Max payload size is overflown, PayloadSize: {payload_size}",
+                tcp_gateway.gateway_host.as_str(),
+            );
+            return;
+        }
+
+        let mut dynamic_buffer: Vec<u8>;
+        let frame: &mut [u8] = if payload_size > buf.len() {
+            dynamic_buffer = crate::tcp_utils::allocated_read_buffer(Some(payload_size));
+            &mut dynamic_buffer[..]
+        } else {
+            &mut buf[..payload_size]
+        };
+
+        if let Err(err) = read_exact(read, frame, gateway_connection).await {
+            if debug {
                 println!(
-                    "[1] Failed to read payload size from TCP Gateway at {}. Payload no: {payload_no}. Max payload size is overflown, PayloadSize: {payload_size}",
+                    "[2] Failed to read payload from TCP Gateway at {}. Err: {}",
                     tcp_gateway.gateway_host.as_str(),
+                    err
                 );
-                break;
             }
-            if payload_size > buf.len() {
-                let mut dynamic_buffer =
-                    crate::tcp_utils::allocated_read_buffer(Some(payload_size));
+            return;
+        }
 
-                let read_amount = read_buffer(&mut read, &mut dynamic_buffer, debug).await;
-                if read_amount == 0 {
-                    break;
-                } else {
-                    gateway_connection.in_per_second.add(read_amount);
-                }
-
-                let aes_encrypted_data = AesEncryptedDataRef::new(&dynamic_buffer);
-                aes_key.decrypt(&aes_encrypted_data)
-            } else {
-                let read_amount = read_buffer(&mut read, &mut buf[0..payload_size], debug).await;
-
-                if read_amount == 0 {
-                    break;
-                } else {
-                    gateway_connection.in_per_second.add(read_amount);
-                }
-
-                let aes_encrypted_data = AesEncryptedDataRef::new(&buf[0..payload_size]);
-                aes_key.decrypt(&aes_encrypted_data)
+        let decrypted = match aes_key.decrypt(&AesEncryptedDataRef::new(frame)) {
+            Ok(decrypted) => decrypted,
+            Err(_) => {
+                println!("TcpGateway is closing connection: decryption failed");
+                return;
             }
         };
 
-        if decrypted.is_err() {
-            println!("TcpGateway is closing connection: decryption failed");
-            break;
-        }
-
-        let decrypted = decrypted.unwrap();
         let decrypted_bytes = decrypted.as_slice();
 
         if decrypted_bytes.is_empty() {
             println!("TcpGateway received empty frame body");
-            break;
+            return;
         }
 
         if decrypted_bytes[0] == COMPRESSED_BATCH_PACKET_ID {
             if let Err(err) = handle_compressed_batch(
                 decrypted_bytes,
-                &tcp_gateway,
-                &gateway_connection,
-                &packet_handler,
+                tcp_gateway,
+                gateway_connection,
+                packet_handler,
             )
             .await
             {
@@ -107,17 +139,18 @@ pub async fn gateway_read_loop(
                     "TcpGateway compressed batch from {} failed: {err}",
                     tcp_gateway.gateway_host.as_str()
                 );
-                break;
+                return;
             }
-            gateway_connection.set_last_incoming_payload_time(DateTimeAsMicroseconds::now());
             continue;
         }
 
-        match TcpGatewayContract::parse(decrypted_bytes) {
+        match TcpGatewayContract::parse_with_capabilities(
+            decrypted_bytes,
+            gateway_connection.own_capabilities(),
+        ) {
             Ok(packet) => {
-                gateway_connection.set_last_incoming_payload_time(DateTimeAsMicroseconds::now());
                 if let Err(err) = packet_handler
-                    .handle_packet(packet, &tcp_gateway, &gateway_connection)
+                    .handle_packet(packet, tcp_gateway, gateway_connection)
                     .await
                 {
                     println!(
@@ -125,7 +158,7 @@ pub async fn gateway_read_loop(
                         tcp_gateway.gateway_host.as_str(),
                         err
                     );
-                    break;
+                    return;
                 }
             }
             Err(err) => {
@@ -134,14 +167,36 @@ pub async fn gateway_read_loop(
                     tcp_gateway.gateway_host.as_str(),
                     err
                 );
-                break;
+                return;
             }
         }
     }
+}
 
-    let gateway_id = gateway_connection.get_gateway_id();
-    tcp_gateway.set_gateway_connection(gateway_id.as_str(), None);
-    gateway_connection.disconnect_gateway().await;
+/// `read_exact` which gives up on a peer silent for [`READ_IDLE_TIMEOUT`] and records every
+/// chunk as incoming activity - the client's dead-peer check is based on it.
+async fn read_exact(
+    read: &mut OwnedReadHalf,
+    buf: &mut [u8],
+    gateway_connection: &TcpGatewayConnection,
+) -> Result<(), String> {
+    let mut filled = 0;
+
+    while filled < buf.len() {
+        let read_size =
+            match tokio::time::timeout(READ_IDLE_TIMEOUT, read.read(&mut buf[filled..])).await {
+                Ok(Ok(0)) => return Err("Disconnected".to_string()),
+                Ok(Ok(read_size)) => read_size,
+                Ok(Err(err)) => return Err(format!("{:?}", err)),
+                Err(_) => return Err(format!("No incoming data for {:?}", READ_IDLE_TIMEOUT)),
+            };
+
+        filled += read_size;
+        gateway_connection.in_per_second.add(read_size);
+        gateway_connection.set_last_incoming_payload_time(DateTimeAsMicroseconds::now());
+    }
+
+    Ok(())
 }
 
 async fn handle_compressed_batch(
@@ -158,17 +213,7 @@ async fn handle_compressed_batch(
         return Err(format!("COMPRESSED_BATCH: unknown algo byte {algo}"));
     }
 
-    let compressed = &decrypted[2..];
-    let decompressed = zstd::stream::decode_all(compressed)
-        .map_err(|err| format!("COMPRESSED_BATCH: zstd decompress failed: {err}"))?;
-
-    if decompressed.len() > MAX_DECOMPRESSED_BATCH_SIZE {
-        return Err(format!(
-            "COMPRESSED_BATCH: decompressed size {} exceeds {} limit",
-            decompressed.len(),
-            MAX_DECOMPRESSED_BATCH_SIZE
-        ));
-    }
+    let decompressed = decompress_batch(&decrypted[2..])?;
 
     let mut offset = 0usize;
     while offset + 4 <= decompressed.len() {
@@ -192,8 +237,11 @@ async fn handle_compressed_batch(
             return Err("COMPRESSED_BATCH: nested batch is not allowed".to_string());
         }
 
-        let packet = TcpGatewayContract::parse(body)
-            .map_err(|err| format!("COMPRESSED_BATCH: failed to parse inner frame: {err}"))?;
+        let packet = TcpGatewayContract::parse_with_capabilities(
+            body,
+            gateway_connection.own_capabilities(),
+        )
+        .map_err(|err| format!("COMPRESSED_BATCH: failed to parse inner frame: {err}"))?;
         packet_handler
             .handle_packet(packet, tcp_gateway, gateway_connection)
             .await
@@ -207,33 +255,24 @@ async fn handle_compressed_batch(
     Ok(())
 }
 
-#[allow(dead_code)]
-fn _aes_unused(_key: &AesKey) {}
+/// Decompresses no further than one byte past [`MAX_DECOMPRESSED_BATCH_SIZE`]: checking the
+/// size of a fully decompressed batch would come after the memory is already spent.
+pub(crate) fn decompress_batch(compressed: &[u8]) -> Result<Vec<u8>, String> {
+    let decoder = zstd::stream::read::Decoder::new(compressed)
+        .map_err(|err| format!("COMPRESSED_BATCH: zstd decompress failed: {err}"))?;
 
-async fn read_buffer(read: &mut OwnedReadHalf, buffer: &mut [u8], debug: bool) -> usize {
-    let read_result = read.read_exact(buffer).await;
+    let mut decompressed = Vec::new();
+    decoder
+        .take(MAX_DECOMPRESSED_BATCH_SIZE as u64 + 1)
+        .read_to_end(&mut decompressed)
+        .map_err(|err| format!("COMPRESSED_BATCH: zstd decompress failed: {err}"))?;
 
-    match read_result {
-        Ok(result) => {
-            if result != buffer.len() {
-                if debug {
-                    println!("[2] TCP Gateway is disconnected");
-                }
-
-                return 0;
-            }
-
-            result
-        }
-        Err(err) => {
-            if debug {
-                println!(
-                    "[2] Failed to read payload size from TCP Gateway. Err: {:?}",
-                    err
-                );
-            }
-
-            0
-        }
+    if decompressed.len() > MAX_DECOMPRESSED_BATCH_SIZE {
+        return Err(format!(
+            "COMPRESSED_BATCH: decompressed size exceeds {} limit",
+            MAX_DECOMPRESSED_BATCH_SIZE
+        ));
     }
+
+    Ok(decompressed)
 }

@@ -103,6 +103,18 @@ pub async fn compile_http_configuration(
         )
         .await?;
 
+        // MCP never goes through a gateway - not as an mcp location, not as a 'type: mcp'
+        // endpoint: such a configuration is refused rather than half supported.
+        let is_mcp = proxy_pass_to.proxy_pass_to.is_mcp()
+            || matches!(http_type, ListenHttpEndpointType::Mcp);
+        if is_mcp && proxy_pass_to.proxy_pass_to.remote_endpoint_kind() == Some("gateway") {
+            return Err(format!(
+                "Endpoint '{}', location '{}': MCP through a gateway is not supported. Point \
+                 proxy_pass_to at the MCP server directly",
+                listen_host, proxy_pass_to.path
+            ));
+        }
+
         // `mcp-h2` talks h2 to the upstream, and the h2 upstream pools are only
         // reachable from the hyper request path — which runs for `http2` /
         // `https2` endpoints. Under an http/1 endpoint the request goes through
@@ -173,4 +185,51 @@ pub async fn compile_http_configuration(
     });
 
     Ok(http_endpoint_info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn compile(endpoint_type: &str, location_type: &str) -> Result<(), String> {
+        let host_settings: HostSettings = my_settings_reader::serde_yaml::from_str(&format!(
+            "endpoint:\n  type: {endpoint_type}\nlocations:\n- path: /mcp\n  type: {location_type}\n  proxy_pass_to: 'gateway:gw->http://127.0.0.1:8000/mcp'\n"
+        ))
+        .unwrap();
+
+        let listen_type = match endpoint_type {
+            "http" => ListenHttpEndpointType::Http1,
+            "http2" => ListenHttpEndpointType::Http2,
+            "mcp" => ListenHttpEndpointType::Mcp,
+            other => panic!("no endpoint type {other} in these tests"),
+        };
+
+        compile_http_configuration(
+            &SettingsCompiled::default(),
+            EndpointHttpHostString::new("localhost:8000".to_string()).unwrap(),
+            &host_settings,
+            listen_type,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn mcp_through_a_gateway_is_refused() {
+        for (endpoint_type, location_type) in
+            [("http", "mcp"), ("http2", "mcp-h2"), ("mcp", "http")]
+        {
+            let err = compile(endpoint_type, location_type)
+                .await
+                .expect_err("MCP through a gateway is accepted");
+            assert!(
+                err.contains("MCP through a gateway is not supported"),
+                "{endpoint_type}/{location_type}: {err}"
+            );
+        }
+
+        // Anything else still goes through a gateway.
+        compile("http", "http").await.unwrap();
+        compile("http2", "http2").await.unwrap();
+    }
 }

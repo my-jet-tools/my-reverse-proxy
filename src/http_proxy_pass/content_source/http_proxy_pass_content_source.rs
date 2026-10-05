@@ -15,8 +15,8 @@ pub enum HttpProxyPassContentSource {
     Http2(Http2ContentSource),
     UnixHttp2(UnixHttp2ContentSource),
     Https2(Https2ContentSource),
-    //Http1OverGateway(Http1OverGatewayContentSource),
-    //Http2OverGateway(Http2OverGatewayContentSource),
+    Http1OverGateway(Http1OverGatewayContentSource),
+    Http2OverGateway(Http2OverGatewayContentSource),
     Http1OverSsh(Http1OverSshContentSource),
     Http2OverSsh(Http2OverSshContentSource),
     LocalPath(LocalPathContentSrc),
@@ -35,7 +35,11 @@ impl HttpProxyPassContentSource {
     pub fn can_stream_request_body(&self) -> bool {
         matches!(
             self,
-            Self::Http2(_) | Self::Https2(_) | Self::UnixHttp2(_) | Self::Http2OverSsh(_)
+            Self::Http2(_)
+                | Self::Https2(_)
+                | Self::UnixHttp2(_)
+                | Self::Http2OverSsh(_)
+                | Self::Http2OverGateway(_)
         )
     }
 
@@ -52,6 +56,7 @@ impl HttpProxyPassContentSource {
             Self::Https2(model) => model.execute_streamed(req, content_size).await,
             Self::UnixHttp2(model) => model.execute_streamed(req, content_size).await,
             Self::Http2OverSsh(model) => model.execute_streamed(req, content_size).await,
+            Self::Http2OverGateway(model) => model.execute_streamed(req, content_size).await,
             _ => Err(ProxyPassError::UpstreamUnavailable),
         }
     }
@@ -71,8 +76,8 @@ impl HttpProxyPassContentSource {
             Self::Http2OverSsh(model) => model.execute(req).await,
             Self::LocalPath(model) => model.execute(req).await,
             Self::PathOverSsh(model) => model.execute(req).await,
-            //Self::Http1OverGateway(model) => model.execute(req).await,
-            //Self::Http2OverGateway(model) => model.execute(req).await,
+            Self::Http1OverGateway(model) => model.execute(req).await,
+            Self::Http2OverGateway(model) => model.execute(req).await,
             Self::PathOverGateway(model) => model.execute(req).await,
             Self::Static(model) => model.execute(req).await,
             Self::Drop => {

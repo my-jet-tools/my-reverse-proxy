@@ -3,6 +3,8 @@ use std::time::Duration;
 use encryption::aes::AesKey;
 use rust_extensions::SliceOrVec;
 
+use super::{CAP_FIN_RST, CAP_FLOW_CONTROL};
+
 const PING: u8 = 0;
 const PONG: u8 = 1;
 const CONNECT_PACKET_ID: u8 = 3;
@@ -16,9 +18,109 @@ const GET_FILE_RESPONSE_PACKET_ID: u8 = 10;
 const SYNC_SSL_CERTIFICATES_PACKET_ID: u8 = 11;
 const SYNC_SSL_CERTIFICATES_REQUEST_PACKET_ID: u8 = 12;
 const SYNC_SSL_CERTIFICATE_NOT_FOUND_PACKET_ID: u8 = 13;
+/// Flow control: sent only to a peer which advertised [`CAP_FLOW_CONTROL`] - one which predates
+/// them takes these for unknown types and closes the gateway connection.
+const CONNECT_FC_PACKET_ID: u8 = 14;
+const WINDOW_UPDATE_PACKET_ID: u8 = 15;
+/// Explicit ends of a tunnelled connection: sent only to a peer which advertised [`CAP_FIN_RST`].
+const FIN_PACKET_ID: u8 = 16;
+const RST_PACKET_ID: u8 = 17;
 pub const COMPRESSED_BATCH_PACKET_ID: u8 = 20;
 
 pub const COMPRESSION_ALGO_ZSTD: u8 = 0;
+
+/// Largest encrypted frame body a peer accepts - a bigger one closes the gateway connection.
+pub const MAX_PAYLOAD_SIZE: usize = 5 * 1024 * 1024;
+
+/// Largest `COMPRESSED_BATCH` a peer decompresses.
+pub const MAX_DECOMPRESSED_BATCH_SIZE: usize = 16 * 1024 * 1024;
+
+/// Largest payload a sender puts into one `SEND_PAYLOAD` / `RECEIVE_PAYLOAD` frame. A bigger
+/// write goes out as several frames, so one connection's bulk transfer never holds the link
+/// for long between other connections' frames.
+pub const MAX_PAYLOAD_CHUNK: usize = 256 * 1024;
+
+/// Largest file a `GET_FILE_RESPONSE` carries. The response is a single frame, so it has to fit
+/// [`MAX_PAYLOAD_SIZE`] with room left for the frame header, the AES padding and zstd's
+/// worst-case expansion of an incompressible file.
+pub const MAX_FILE_RESPONSE_SIZE: usize = MAX_PAYLOAD_SIZE - 64 * 1024;
+
+/// Bit set in every connection id the gateway server allocates and in none a client allocates.
+/// Both ends open connections over one gateway connection, each numbering its own, and
+/// `CONNECTION_ERROR` names a connection by id alone - with overlapping numbering, closing a
+/// connection opened from one end would also close the one with the same id from the other.
+pub const SERVER_CONNECTION_ID_FLAG: u32 = 0x8000_0000;
+
+/// The `CONNECTION_ERROR` text an acceptor sends a peer without `FIN` when the target closed the
+/// connection cleanly - the text earlier versions send too. With it, or with an empty text (the
+/// initiator closing the connection itself), the connection ends as with `FIN`. Any other text ends
+/// it as with `RST`; see [`ConnectionEnd`].
+pub fn target_closed_message(remote_host: &str, connection_id: u32) -> String {
+    format!("ReadLoop. Connection to {remote_host} with id:{connection_id} is disconnected")
+}
+
+/// Whether a `CONNECTION_ERROR` text reports a clean close; see [`target_closed_message`].
+pub fn is_clean_close(error: &str) -> bool {
+    error.is_empty()
+        || (error.starts_with("ReadLoop. Connection to ") && error.ends_with(" is disconnected"))
+}
+
+/// How one end of a tunnelled connection tells the other that the connection ended. Either way
+/// the receiving end first delivers what arrived before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionEnd<'s> {
+    /// Closed cleanly: what was sent before is the whole stream. A proxy stream's reader gets EOF,
+    /// a target gets the end of the stream.
+    Closed,
+    /// Broken: the stream may be cut short, for the reason given. A proxy stream's reader gets an
+    /// error, a target connection is reset.
+    Reset(&'s str),
+}
+
+impl<'s> ConnectionEnd<'s> {
+    /// How a `CONNECTION_ERROR` with `error` ends a connection - from a peer without `FIN` and
+    /// `RST`, or one refusing a connect or naming a connection it does not know.
+    pub fn from_connection_error(error: &'s str) -> Self {
+        if is_clean_close(error) {
+            Self::Closed
+        } else {
+            Self::Reset(error)
+        }
+    }
+
+    /// The frame which tells the peer: `FIN` or `RST` when it takes them (`fin_rst`), otherwise
+    /// `CONNECTION_ERROR` - with `closed_text`, a clean-close text, for a clean close, and with the
+    /// reason for a reset. An older peer ends the connection on any of them.
+    pub fn to_contract(
+        self,
+        connection_id: u32,
+        fin_rst: bool,
+        closed_text: &'s str,
+    ) -> TcpGatewayContract<'s> {
+        debug_assert!(is_clean_close(closed_text));
+
+        match (self, fin_rst) {
+            (Self::Closed, true) => TcpGatewayContract::Fin { connection_id },
+            (Self::Reset(reason), true) => TcpGatewayContract::Rst {
+                connection_id,
+                reason,
+            },
+            (Self::Closed, false) => TcpGatewayContract::ConnectionError {
+                connection_id,
+                error: closed_text,
+            },
+            // A reason which read as a clean close would end the connection as one.
+            (Self::Reset(reason), false) => TcpGatewayContract::ConnectionError {
+                connection_id,
+                error: if is_clean_close(reason) {
+                    "Connection is reset"
+                } else {
+                    reason
+                },
+            },
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum GetFileStatus {
@@ -48,6 +150,15 @@ pub enum TcpGatewayContract<'s> {
         connection_id: u32,
         timeout: Duration,
         remote_host: &'s str,
+        /// The initiator's receive window: `Some` opens a flow-controlled connection with
+        /// `CONNECT_FC`, `None` a plain one with `CONNECT`.
+        receive_window: Option<u32>,
+    },
+    /// The sender of this frame lets the other end send `credit` more payload bytes of
+    /// `connection_id` towards it.
+    WindowUpdate {
+        connection_id: u32,
+        credit: u32,
     },
     Connected {
         connection_id: u32,
@@ -55,6 +166,15 @@ pub enum TcpGatewayContract<'s> {
     ConnectionError {
         connection_id: u32,
         error: &'s str,
+    },
+    /// The sender closed `connection_id` cleanly: what it sent before is the whole stream.
+    Fin {
+        connection_id: u32,
+    },
+    /// `connection_id` broke on the sender's side: what it sent may be cut short.
+    Rst {
+        connection_id: u32,
+        reason: &'s str,
     },
     ForwardPayload {
         connection_id: u32,
@@ -64,7 +184,11 @@ pub enum TcpGatewayContract<'s> {
         connection_id: u32,
         payload: SliceOrVec<'s, u8>,
     },
-    Ping,
+    /// `capabilities`: the sender's capability bits, `None` for the bare frame of a peer which
+    /// predates them.
+    Ping {
+        capabilities: Option<u8>,
+    },
     Pong,
     UpdatePingTime {
         duration: Duration,
@@ -103,29 +227,42 @@ impl<'s> TcpGatewayContract<'s> {
         let packet_type = payload[0];
         let payload = &payload[1..];
         match packet_type {
-            CONNECT_PACKET_ID => {
-                let connection_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+            // Every fixed-size field is read through `read_u8` / `read_u32` / `read_u64`, which
+            // turn a short frame into an error. Slicing past the fields afterwards is in bounds.
+            CONNECT_PACKET_ID | CONNECT_FC_PACKET_ID => {
+                let connection_id = read_u32(payload, 0)?;
 
-                let timeout = payload[4];
+                // An older peer encodes a sub-second timeout as 0 - give the connect a second
+                // instead of failing it on the spot.
+                let timeout = read_u8(payload, 4)?.max(1);
 
-                let remote_host = convert_to_string(&payload[5..], "CONNECT")?;
+                // CONNECT_FC is CONNECT with the initiator's receive window before the host.
+                let (receive_window, host_at) = if packet_type == CONNECT_FC_PACKET_ID {
+                    (Some(read_u32(payload, 5)?), 9)
+                } else {
+                    (None, 5)
+                };
+
+                let remote_host = convert_to_string(&payload[host_at..], "CONNECT")?;
 
                 Ok(Self::Connect {
                     connection_id,
                     remote_host,
                     timeout: Duration::from_secs(timeout as u64),
+                    receive_window,
                 })
             }
+            WINDOW_UPDATE_PACKET_ID => Ok(Self::WindowUpdate {
+                connection_id: read_u32(payload, 0)?,
+                credit: read_u32(payload, 4)?,
+            }),
             CONNECT_OK_PACKET_ID => {
-                let connection_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let connection_id = read_u32(payload, 0)?;
 
                 Ok(Self::Connected { connection_id })
             }
             CONNECTION_ERROR_PACKET_ID => {
-                let connection_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let connection_id = read_u32(payload, 0)?;
 
                 let error = convert_to_string(&payload[4..], "CONNECTION")?;
                 Ok(Self::ConnectionError {
@@ -133,10 +270,21 @@ impl<'s> TcpGatewayContract<'s> {
                     error,
                 })
             }
+            FIN_PACKET_ID => Ok(Self::Fin {
+                connection_id: read_u32(payload, 0)?,
+            }),
+            RST_PACKET_ID => {
+                let connection_id = read_u32(payload, 0)?;
+
+                let reason = convert_to_string(&payload[4..], "RST")?;
+                Ok(Self::Rst {
+                    connection_id,
+                    reason,
+                })
+            }
 
             SEND_PAYLOAD_PACKET_ID => {
-                let connection_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let connection_id = read_u32(payload, 0)?;
 
                 let payload_bytes: SliceOrVec<'_, u8> = (&payload[4..]).into();
 
@@ -147,8 +295,7 @@ impl<'s> TcpGatewayContract<'s> {
             }
 
             RECEIVE_PAYLOAD_PACKET_ID => {
-                let connection_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let connection_id = read_u32(payload, 0)?;
 
                 let payload_bytes: SliceOrVec<'_, u8> = (&payload[4..]).into();
 
@@ -159,10 +306,7 @@ impl<'s> TcpGatewayContract<'s> {
             }
 
             UPDATE_PING_TIME_PACKET_ID => {
-                let micros = u64::from_le_bytes([
-                    payload[0], payload[1], payload[2], payload[3], payload[4], payload[5],
-                    payload[6], payload[7],
-                ]);
+                let micros = read_u64(payload, 0)?;
 
                 let duration = Duration::from_micros(micros);
 
@@ -170,8 +314,7 @@ impl<'s> TcpGatewayContract<'s> {
             }
 
             GET_FILE_REQUEST_PACKET_ID => {
-                let request_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let request_id = read_u32(payload, 0)?;
 
                 let path = convert_to_string(&payload[4..], "GET_FILE_REQUEST")?;
 
@@ -179,10 +322,9 @@ impl<'s> TcpGatewayContract<'s> {
             }
 
             GET_FILE_RESPONSE_PACKET_ID => {
-                let request_id =
-                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                let request_id = read_u32(payload, 0)?;
 
-                let status = GetFileStatus::from_u8(payload[4]);
+                let status = GetFileStatus::from_u8(read_u8(payload, 4)?);
 
                 let content: SliceOrVec<'_, u8> = (&payload[5..]).into();
 
@@ -213,7 +355,9 @@ impl<'s> TcpGatewayContract<'s> {
                 let count = read_u32(payload, offset)? as usize;
                 offset += 4;
 
-                let mut cert_ids = Vec::with_capacity(count);
+                // `count` comes off the wire: every id takes at least its 4-byte length, so the
+                // payload bounds how many there can really be.
+                let mut cert_ids = Vec::with_capacity(count.min(payload.len() / 4));
                 for _ in 0..count {
                     let id_len = read_u32(payload, offset)? as usize;
                     offset += 4;
@@ -268,7 +412,11 @@ impl<'s> TcpGatewayContract<'s> {
                 })
             }
 
-            PING => Ok(Self::Ping),
+            // Every byte after the type is optional: a peer which predates capabilities sends
+            // none, and reads its PINGs and PONGs by the type alone.
+            PING => Ok(Self::Ping {
+                capabilities: payload.first().copied(),
+            }),
             PONG => Ok(Self::Pong),
 
             COMPRESSED_BATCH_PACKET_ID => Err(
@@ -277,6 +425,28 @@ impl<'s> TcpGatewayContract<'s> {
 
             _ => Err(format!("Unknown packet type: {}", packet_type)),
         }
+    }
+
+    /// [`Self::parse`], except that a side built without an extension takes its frame types for
+    /// unknown ones - as a peer which predates the extension does. With capabilities 0 a side
+    /// behaves on the wire like a peer which predates them all.
+    pub fn parse_with_capabilities(
+        payload: &'s [u8],
+        own_capabilities: u8,
+    ) -> Result<Self, String> {
+        if let Some(&packet_type) = payload.first() {
+            let extension = match packet_type {
+                CONNECT_FC_PACKET_ID | WINDOW_UPDATE_PACKET_ID => CAP_FLOW_CONTROL,
+                FIN_PACKET_ID | RST_PACKET_ID => CAP_FIN_RST,
+                _ => 0,
+            };
+
+            if own_capabilities & extension != extension {
+                return Err(format!("Unknown packet type: {}", packet_type));
+            }
+        }
+
+        Self::parse(payload)
     }
 
     /// Serialize the contract into its plaintext inner-frame form:
@@ -291,11 +461,26 @@ impl<'s> TcpGatewayContract<'s> {
                 connection_id,
                 timeout,
                 remote_host,
+                receive_window,
             } => {
-                body.push(CONNECT_PACKET_ID);
+                body.push(match receive_window {
+                    Some(_) => CONNECT_FC_PACKET_ID,
+                    None => CONNECT_PACKET_ID,
+                });
                 push_u32(&mut body, *connection_id);
-                body.push(timeout.as_secs() as u8);
+                body.push(connect_timeout_to_wire(*timeout));
+                if let Some(receive_window) = receive_window {
+                    push_u32(&mut body, *receive_window);
+                }
                 body.extend_from_slice(remote_host.as_bytes());
+            }
+            Self::WindowUpdate {
+                connection_id,
+                credit,
+            } => {
+                body.push(WINDOW_UPDATE_PACKET_ID);
+                push_u32(&mut body, *connection_id);
+                push_u32(&mut body, *credit);
             }
 
             Self::Connected { connection_id } => {
@@ -309,6 +494,18 @@ impl<'s> TcpGatewayContract<'s> {
                 body.push(CONNECTION_ERROR_PACKET_ID);
                 push_u32(&mut body, *connection_id);
                 body.extend_from_slice(error.as_bytes());
+            }
+            Self::Fin { connection_id } => {
+                body.push(FIN_PACKET_ID);
+                push_u32(&mut body, *connection_id);
+            }
+            Self::Rst {
+                connection_id,
+                reason,
+            } => {
+                body.push(RST_PACKET_ID);
+                push_u32(&mut body, *connection_id);
+                body.extend_from_slice(reason.as_bytes());
             }
 
             Self::ForwardPayload {
@@ -382,8 +579,11 @@ impl<'s> TcpGatewayContract<'s> {
                 push_u32(&mut body, bytes.len() as u32);
                 body.extend_from_slice(bytes);
             }
-            Self::Ping => {
+            Self::Ping { capabilities } => {
                 body.push(PING);
+                if let Some(capabilities) = capabilities {
+                    body.push(*capabilities);
+                }
             }
             Self::Pong => {
                 body.push(PONG);
@@ -414,6 +614,24 @@ fn push_u32(result: &mut Vec<u8>, value: u32) {
     result.extend_from_slice(value.to_le_bytes().as_slice());
 }
 
+/// The connect timeout travels as whole seconds in one byte. A sub-second remainder is rounded
+/// up - a 500ms timeout must not become 0, an instant failure on the peer - and the value is
+/// clamped to what the byte holds.
+fn connect_timeout_to_wire(timeout: Duration) -> u8 {
+    let mut secs = timeout.as_secs();
+    if timeout.subsec_nanos() > 0 {
+        secs += 1;
+    }
+    secs.clamp(1, u8::MAX as u64) as u8
+}
+
+fn read_u8(payload: &[u8], offset: usize) -> Result<u8, String> {
+    payload
+        .get(offset)
+        .copied()
+        .ok_or_else(|| "truncated u8".to_string())
+}
+
 fn read_u32(payload: &[u8], offset: usize) -> Result<u32, String> {
     if payload.len() < offset + 4 {
         return Err("truncated u32".to_string());
@@ -424,6 +642,13 @@ fn read_u32(payload: &[u8], offset: usize) -> Result<u32, String> {
         payload[offset + 2],
         payload[offset + 3],
     ]))
+}
+
+fn read_u64(payload: &[u8], offset: usize) -> Result<u64, String> {
+    let Some(bytes) = payload.get(offset..offset + 8) else {
+        return Err("truncated u64".to_string());
+    };
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 fn convert_to_string<'s>(payload: &'s [u8], packet_type: &str) -> Result<&'s str, String> {

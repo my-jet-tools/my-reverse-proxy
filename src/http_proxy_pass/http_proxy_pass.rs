@@ -10,6 +10,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use crate::{
     configurations::*,
     http_proxy_pass::GoogleAuthResult,
+    tcp_gateway::forwarded_connection::ProxyConnectionAbort,
     tcp_listener::https::ClientCertificateData,
     types::{ConnectionIp, HttpTimeouts},
 };
@@ -258,6 +259,7 @@ impl HttpProxyPass {
                     trace_payload: location_debug,
                     domain,
                     timeouts: self.endpoint_info.timeouts,
+                    upstream_abort: None,
                 };
                 match *stream {
                     super::content_source::WebSocketUpgradeStream::TcpStream(tcp_stream) => {
@@ -293,6 +295,21 @@ impl HttpProxyPass {
                         spawn_websocket_pump(
                             request.web_socket_upgrade,
                             async_channel,
+                            leftover,
+                            response,
+                            pump_context,
+                        )
+                    }
+                    super::content_source::WebSocketUpgradeStream::GatewayStream(
+                        gateway_stream,
+                    ) => {
+                        let pump_context = WebSocketPumpContext {
+                            upstream_abort: Some(gateway_stream.abort_handle()),
+                            ..pump_context
+                        };
+                        spawn_websocket_pump(
+                            request.web_socket_upgrade,
+                            gateway_stream,
                             leftover,
                             response,
                             pump_context,
@@ -407,7 +424,7 @@ where
 }
 
 /// A raw byte pump: it decodes no websocket frames, so `trace_payload` has nothing to trace.
-async fn pump_h2_extended_connect<S>(
+pub(crate) async fn pump_h2_extended_connect<S>(
     on_upgrade: hyper::upgrade::OnUpgrade,
     upstream: S,
     upstream_leftover: Vec<u8>,
@@ -420,6 +437,7 @@ async fn pump_h2_extended_connect<S>(
         disconnection,
         domain,
         timeouts,
+        upstream_abort,
         ..
     } = ctx;
 
@@ -427,6 +445,7 @@ async fn pump_h2_extended_connect<S>(
         Ok(upgraded) => upgraded,
         Err(err) => {
             log_scope.write(format!("h2 extended-CONNECT upgrade failed: {:?}", err));
+            super::reset_upstream(upstream_abort.as_ref());
             disconnection.web_socket_disconnect();
             return;
         }
@@ -449,6 +468,7 @@ async fn pump_h2_extended_connect<S>(
                 "h2 extended-CONNECT leftover write failed: {:?}",
                 err
             ));
+            super::reset_upstream(upstream_abort.as_ref());
             disconnection.web_socket_disconnect();
             return;
         }
@@ -457,8 +477,8 @@ async fn pump_h2_extended_connect<S>(
     // Reads on `client_side` are bytes coming FROM the client → upstream (c2s).
     // Reads on `upstream_side` are bytes coming FROM the upstream → client (s2c).
     // `tokio::io::copy_bidirectional` offers no idle hook, so we run a
-    // per-direction copy with read/write timeouts (defaults 180s/30s) and tear
-    // the pair down as soon as either direction ends — half-open H2 WS now reap.
+    // per-direction copy with a write timeout (default 30s) and a session idle
+    // timeout (read_timeout, default 180s, with neither direction moving bytes).
     match domain {
         Some(domain) => {
             let client_side = crate::tcp_utils::MeteredStream::new(
@@ -475,24 +495,54 @@ async fn pump_h2_extended_connect<S>(
                     direction: crate::tcp_utils::WsDirection::ServerToClient,
                 },
             );
-            pump_bidirectional_with_timeouts(client_side, upstream_side, timeouts, log_scope).await;
+            pump_bidirectional_with_timeouts(
+                client_side,
+                upstream_side,
+                timeouts,
+                log_scope,
+                upstream_abort.as_ref(),
+            )
+            .await;
         }
         None => {
-            pump_bidirectional_with_timeouts(upgraded, upstream, timeouts, log_scope).await;
+            pump_bidirectional_with_timeouts(
+                upgraded,
+                upstream,
+                timeouts,
+                log_scope,
+                upstream_abort.as_ref(),
+            )
+            .await;
         }
     };
 
     disconnection.web_socket_disconnect();
 }
 
-/// Bidirectional copy over raw tokio streams with per-direction idle read and
-/// write timeouts. Returns once either direction finishes (EOF, error, or
-/// timeout), dropping the other half so the whole tunnel is torn down.
+/// How one direction of [`pump_bidirectional_with_timeouts`] ended.
+enum DirectionEnd {
+    /// Its reader ended, or the peer of its writer is gone: the other direction goes on with
+    /// what its own peer still sends.
+    Finished,
+    /// The session went idle: it ends.
+    Idle,
+    /// A write timed out or a read failed: the session ends, and the upstream connection is
+    /// reset.
+    Failed,
+}
+
+/// Bidirectional copy over raw tokio streams with a per-direction write timeout
+/// and a session idle timeout: `read_timeout` with neither direction moving
+/// bytes. A write timeout, a read error or the idle timeout end the session at
+/// once - the first two reset the upstream connection. A direction which just
+/// ends - its reader closed, or its writer's peer gone - leaves the other one to
+/// deliver what its own peer still sends, until that ends too.
 async fn pump_bidirectional_with_timeouts<A, B>(
     client_side: A,
     upstream_side: B,
     timeouts: HttpTimeouts,
     log_scope: crate::app::ProxyLogScope,
+    upstream_abort: Option<&ProxyConnectionAbort>,
 ) where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
@@ -500,24 +550,41 @@ async fn pump_bidirectional_with_timeouts<A, B>(
     let (client_read, client_write) = tokio::io::split(client_side);
     let (upstream_read, upstream_write) = tokio::io::split(upstream_side);
 
+    let pumps = crate::tcp_utils::ConnectionPumps::new(timeouts);
+
     let c2s = copy_one_direction(
         client_read,
         upstream_write,
-        timeouts,
+        &pumps,
         "c2s",
         log_scope.clone(),
+        upstream_abort,
     );
     let s2c = copy_one_direction(
         upstream_read,
         client_write,
-        timeouts,
+        &pumps,
         "s2c",
         log_scope.clone(),
+        upstream_abort,
     );
 
+    tokio::pin!(c2s, s2c);
+
+    // An upstream which answered and closed refuses the client's next frame while its last
+    // frames, the Close among them, are still on their way to the client: c2s ends then, and s2c
+    // still delivers them.
     tokio::select! {
-        _ = c2s => {}
-        _ = s2c => {}
+        end = &mut c2s => {
+            if let DirectionEnd::Finished = end {
+                s2c.await;
+            }
+        }
+        end = &mut s2c => {
+            if let DirectionEnd::Finished = end {
+                c2s.await;
+            }
+        }
     }
 
     log_scope.write("h2 ext-CONNECT WS pump finished".to_string());
@@ -526,48 +593,85 @@ async fn pump_bidirectional_with_timeouts<A, B>(
 async fn copy_one_direction<R, W>(
     mut reader: R,
     mut writer: W,
-    timeouts: HttpTimeouts,
+    pumps: &crate::tcp_utils::ConnectionPumps,
     dir: &'static str,
     log_scope: crate::app::ProxyLogScope,
-) where
+    upstream_abort: Option<&ProxyConnectionAbort>,
+) -> DirectionEnd
+where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut buf = vec![0u8; 16 * 1024];
-    loop {
-        let n = match tokio::time::timeout(timeouts.read_timeout, reader.read(&mut buf)).await {
-            Err(_) => {
-                log_scope.write(format!("h2 ext-CONNECT WS pump [{dir}] idle read timeout"));
-                break;
-            }
-            Ok(Ok(0)) => break,
+    let end = loop {
+        // Idle is a property of the session, not of this direction: while the other direction
+        // moves bytes, a silent reader here is a one-way stream, not a dead peer.
+        let Some(time_left) = pumps.read_time_left() else {
+            log_scope.write(format!(
+                "h2 ext-CONNECT WS pump [{dir}] session idle for {:?}",
+                pumps.read_timeout()
+            ));
+            break DirectionEnd::Idle;
+        };
+
+        let read_result = tokio::time::timeout(time_left, reader.read(&mut buf)).await;
+
+        let n = match read_result {
+            Err(_) => continue,
+            Ok(Ok(0)) => break DirectionEnd::Finished,
             Ok(Ok(n)) => n,
             Ok(Err(err)) => {
                 log_scope.write(format!(
                     "h2 ext-CONNECT WS pump [{dir}] read error: {:?}",
                     err
                 ));
-                break;
+                break DirectionEnd::Failed;
             }
         };
+        pumps.bytes_moved();
 
-        match tokio::time::timeout(timeouts.write_timeout, writer.write_all(&buf[..n])).await {
+        match tokio::time::timeout(pumps.write_timeout(), writer.write_all(&buf[..n])).await {
             Err(_) => {
                 log_scope.write(format!("h2 ext-CONNECT WS pump [{dir}] write timeout"));
-                break;
+                break DirectionEnd::Failed;
             }
-            Ok(Ok(())) => {}
+            // A write which took its time still moved bytes.
+            Ok(Ok(())) => pumps.bytes_moved(),
+            // The peer of the writer is gone; the other direction still delivers what its own
+            // peer sent before.
             Ok(Err(err)) => {
                 log_scope.write(format!(
                     "h2 ext-CONNECT WS pump [{dir}] write error: {:?}",
                     err
                 ));
-                break;
+                break DirectionEnd::Finished;
             }
         }
+    };
+
+    // A direction which just ended passes the end on to its writer's peer - within the write
+    // timeout: a peer which does not read may never let a shutdown through, and that is a write
+    // timeout like any other. One which failed ends the session, which drops both halves.
+    let end = match end {
+        DirectionEnd::Finished => {
+            match tokio::time::timeout(pumps.write_timeout(), writer.shutdown()).await {
+                Ok(_) => DirectionEnd::Finished,
+                Err(_) => {
+                    log_scope.write(format!("h2 ext-CONNECT WS pump [{dir}] shutdown timeout"));
+                    DirectionEnd::Failed
+                }
+            }
+        }
+        end => end,
+    };
+
+    // While this direction still holds its half of the upstream: once both halves are dropped
+    // the upstream connection is closed, cleanly.
+    if let DirectionEnd::Failed = end {
+        super::reset_upstream(upstream_abort);
     }
 
-    let _ = writer.shutdown().await;
+    end
 }

@@ -24,6 +24,7 @@ use crate::{
     ssl::CertificatesCache,
     tcp_gateway::{
         client::{TcpGatewayClient, TcpGatewayClientParams},
+        forwarded_connection::TcpGatewayProxyForwardStream,
         server::TcpGatewayServer,
         TcpGatewayConnection,
     },
@@ -50,6 +51,12 @@ pub struct AppContext {
     pub http_over_ssh_clients_pool: HttpClientPool<SshAsyncChannel, HttpOverSshConnector>,
 
     pub http2_over_ssh_clients_pool: Http2ClientPool<SshAsyncChannel, HttpOverSshConnector>,
+
+    pub http_over_gateway_clients_pool:
+        HttpClientPool<TcpGatewayProxyForwardStream, HttpOverGatewayConnector>,
+
+    pub http2_over_gateway_clients_pool:
+        Http2ClientPool<TcpGatewayProxyForwardStream, HttpOverGatewayConnector>,
 
     pub h2_tcp_pools: H2PoolRegistry<TcpStream, HttpConnector>,
     pub h2_tls_pools: H2PoolRegistry<TlsStream<TcpStream>, HttpTlsConnector>,
@@ -121,10 +128,13 @@ impl AppContext {
         let gateway_server =
             if let Some(gateway_server_settings) = settings_model.get_gateway_server() {
                 let authorized_keys = gateway_server_settings.load_authorized_keys().unwrap();
+                let allowed_ip = gateway_server_settings.get_allowed_ip_list().unwrap();
                 Some(TcpGatewayServer::new(
                     format!("0.0.0.0:{}", gateway_server_settings.port,),
                     authorized_keys,
+                    allowed_ip,
                     false,
+                    true,
                     gateway_server_settings.is_debug(),
                 ))
             } else {
@@ -148,6 +158,7 @@ impl AppContext {
                 connect_timeout: client_settings.get_connect_timeout(),
                 debug: client_settings.is_debug(),
                 sync_ssl_certificates: client_settings.get_sync_ssl_certificates(),
+                protocol_extensions: true,
             });
 
             gateway_clients.insert(id.clone(), client);
@@ -183,6 +194,8 @@ impl AppContext {
             http_over_ssh_clients_pool: HttpClientPool::new(),
 
             http2_over_ssh_clients_pool: Http2ClientPool::new(),
+            http_over_gateway_clients_pool: HttpClientPool::new(),
+            http2_over_gateway_clients_pool: Http2ClientPool::new(),
             h2_tcp_pools: H2PoolRegistry::new(),
             h2_tls_pools: H2PoolRegistry::new(),
             h2_uds_pools: H2PoolRegistry::new(),

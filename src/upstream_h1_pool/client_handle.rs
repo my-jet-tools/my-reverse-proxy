@@ -75,6 +75,16 @@ where
         }
     }
 
+    /// The response body was dropped before its end: the connection is still in the middle of
+    /// that response and can take no other request - it would queue behind a body which may never
+    /// end. A pooled entry goes dead, so the next rent, or the supervisor, connects it anew; the
+    /// other clients are never reused anyway.
+    pub fn abandon(&self) {
+        if let Self::Reusable { entry, .. } = self {
+            entry.dead.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub async fn do_request(
         &self,
         req: &MyHttpRequest,

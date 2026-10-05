@@ -1,6 +1,10 @@
 mod gateway_contracts;
 
 pub use gateway_contracts::*;
+mod capabilities;
+pub use capabilities::*;
+mod flow_control;
+pub use flow_control::*;
 mod tcp_connection_inner;
 pub use tcp_connection_inner::*;
 
@@ -20,3 +24,6 @@ pub use packet_handler::*;
 pub mod session;
 
 pub mod handshake;
+
+#[cfg(test)]
+mod tests;

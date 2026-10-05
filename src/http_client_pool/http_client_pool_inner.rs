@@ -30,33 +30,33 @@ impl<
         &self,
         remote_endpoint: &str,
         connect_timeout: Duration,
+        read_timeout: Option<Duration>,
         create_connector: impl FnOnce() -> TConnector,
     ) -> MyHttpClient<TStream, TConnector> {
         let mut items_access = self.items.lock();
 
-        match items_access.get_mut(remote_endpoint) {
-            Some(pool) => {
-                if pool.is_empty() {
-                    let mut client = MyHttpClient::new(create_connector());
-                    client.set_connect_timeout(connect_timeout);
-                    return client;
-                }
-
-                pool.pop().unwrap().1
-            }
-            None => {
-                let mut client = MyHttpClient::new(create_connector());
-                client.set_connect_timeout(connect_timeout);
-                client
-            }
+        if let Some(client) = items_access
+            .get_mut(remote_endpoint)
+            .and_then(|pool| pool.pop())
+        {
+            return client.1;
         }
+
+        let mut client = MyHttpClient::new(create_connector());
+        client.set_connect_timeout(connect_timeout);
+        if let Some(read_timeout) = read_timeout {
+            client.set_read_from_stream_timeout(read_timeout);
+        }
+        client
     }
 
+    /// Adds this pool's idle clients to `dest`, summing with what other pools put under the
+    /// same key.
     pub fn fill_connections_amount(&self, dest: &mut HashMap<String, usize>) {
         let items = self.items.lock();
         for (key, value) in items.iter() {
             if !value.is_empty() {
-                dest.insert(key.clone(), value.len());
+                *dest.entry(key.clone()).or_insert(0) += value.len();
             }
         }
     }

@@ -19,6 +19,7 @@ impl TcpGatewayPacketHandler for TcpGatewayServerPacketHandler {
                 connection_id,
                 timeout,
                 remote_host,
+                receive_window,
             } => {
                 let remote_addr = remote_host.to_string();
                 let gateway_connection = gateway_connection.clone();
@@ -29,40 +30,40 @@ impl TcpGatewayPacketHandler for TcpGatewayServerPacketHandler {
                         connection_id,
                         remote_addr,
                         timeout,
+                        receive_window,
                         gateway_connection,
                     ),
                 );
             }
+            TcpGatewayContract::WindowUpdate {
+                connection_id,
+                credit,
+            } => gateway_connection.incoming_window_update(connection_id, credit),
 
             TcpGatewayContract::ForwardPayload {
                 connection_id,
 
                 payload,
-            } => {
-                crate::tcp_gateway::scripts::forward_payload(
-                    gateway_connection,
-                    connection_id,
-                    payload.as_slice(),
-                )
-                .await
-            }
+            } => crate::tcp_gateway::scripts::forward_payload(
+                gateway_connection,
+                connection_id,
+                payload.as_slice(),
+            ),
 
             TcpGatewayContract::BackwardPayload {
                 connection_id,
                 payload,
             } => {
                 gateway_connection
-                    .incoming_payload_for_proxy_connection(connection_id, payload.as_slice())
-                    .await;
+                    .incoming_payload_for_proxy_connection(connection_id, payload.as_slice());
             }
-            TcpGatewayContract::Ping => {
+            TcpGatewayContract::Ping { capabilities } => {
+                gateway_connection.set_peer_capabilities(capabilities);
                 gateway_connection.send_payload(&TcpGatewayContract::Pong);
             }
             TcpGatewayContract::Pong => {}
             TcpGatewayContract::Connected { connection_id } => {
-                gateway_connection
-                    .notify_forward_proxy_connection_accepted(connection_id)
-                    .await;
+                gateway_connection.notify_forward_proxy_connection_accepted(connection_id);
             }
             TcpGatewayContract::ConnectionError {
                 connection_id,
@@ -75,9 +76,27 @@ impl TcpGatewayPacketHandler for TcpGatewayServerPacketHandler {
                     error
                 );
 
+                gateway_connection.end_tunnelled_connection(
+                    connection_id,
+                    ConnectionEnd::from_connection_error(error),
+                );
+            }
+            TcpGatewayContract::Fin { connection_id } => {
+                gateway_connection.end_tunnelled_connection(connection_id, ConnectionEnd::Closed);
+            }
+            TcpGatewayContract::Rst {
+                connection_id,
+                reason,
+            } => {
+                println!(
+                    "Gateway: [{}]. Connection with id {} is reset. Reason: {}",
+                    gateway_connection.get_gateway_id(),
+                    connection_id,
+                    reason
+                );
+
                 gateway_connection
-                    .disconnect_forward_proxy_connection(connection_id, error)
-                    .await;
+                    .end_tunnelled_connection(connection_id, ConnectionEnd::Reset(reason));
             }
             TcpGatewayContract::UpdatePingTime { duration } => {
                 gateway_connection.last_ping_duration.update(duration);

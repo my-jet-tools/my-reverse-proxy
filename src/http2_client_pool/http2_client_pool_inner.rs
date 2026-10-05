@@ -28,11 +28,13 @@ impl<
         }
     }
 
+    /// Adds this pool's idle clients to `dest`, summing with what other pools put under the
+    /// same key.
     pub fn fill_connections_amount(&self, dest: &mut HashMap<String, usize>) {
         let items = self.items.lock();
         for (key, value) in items.iter() {
             if !value.is_empty() {
-                dest.insert(key.clone(), value.len());
+                *dest.entry(key.clone()).or_insert(0) += value.len();
             }
         }
     }

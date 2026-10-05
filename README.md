@@ -647,8 +647,10 @@ Notes:
   `write_timeout` (defaults 180000 ms / 30000 ms, resolved global → endpoint;
   see [Timeouts & connection tuning](#timeouts--connection-tuning--overview)).
   An idle connection — no traffic in either direction — is torn down after
-  `read_timeout`, so `read_timeout` **must exceed the client heartbeat
-  interval** or live connections will be dropped falsely.
+  `read_timeout`. Traffic in one direction keeps it open: a server pushing to
+  a client which sends nothing is not cut. `read_timeout` **must exceed the
+  heartbeat interval** (of either side) or quiet connections will be dropped
+  falsely.
 
 ### Tcp
 ```yaml
@@ -918,6 +920,9 @@ Everything else — connecting, pooling, liveness, retries — is the ordinary
 `host:port` under different paths never share a connection.
 
 Notes:
+
+- MCP does not go through a gateway: a location of `type: mcp` / `type: mcp-h2`
+  whose `proxy_pass_to` is `gateway:...` is refused at load time.
 
 - `mcp-h2` is served by the HTTP/2 request path, so it needs an endpoint of
   `type: http2` / `type: https2`. Under an `http` / `https` endpoint the config
@@ -1495,11 +1500,12 @@ gateway_server:
     - ~/gateway_keys/another_client.pub
   allowed_ip:        # optional, restricts which source IPs may connect
     - 10.0.0.5
+    - 10.0.1.10-10.0.1.20
   debug: false       # optional, default false
 ```
 
 - `authorized_keys` - mandatory. List of paths to OpenSSH public key files (one per allowed client). Must be Ed25519.
-- `allowed_ip` - optional. If present, only connections from the listed IPs are accepted.
+- `allowed_ip` - optional. If present, only connections from the listed IPs are accepted; any other connection is closed right after `accept`, before the handshake. Entries are IPv4 addresses or `from-to` ranges, the same as in `ip_white_lists`. An invalid entry fails the startup.
 
 ## Client side
 
@@ -1541,7 +1547,24 @@ hosts:
     locations:
     - proxy_pass_to: gateway:gateway_name->http://localhost:8000
       allow_incoming_forward_connections: true
+
+  5204:
+    endpoint:
+      type: http2
+    locations:
+    - proxy_pass_to: gateway:gateway_name->http://localhost:8000   # http/1.1 upstream
+    - path: /grpc
+      type: http2
+      proxy_pass_to: gateway:gateway_name->http://localhost:9000   # cleartext http2 (h2c) upstream
 ```
+
+Gateway locations work on `http` and `http2` endpoints, for http/1.1 upstreams and, on
+`http2` endpoints, for cleartext http2 (h2c) upstreams (`type: http2`). A unix socket
+upstream works the same way - `gateway:gateway_name->unix+http:///var/run/app.sock` - since
+the far side connects to the socket path itself. The gateway only carries the connection:
+TLS to the upstream through a gateway is not supported. Neither is MCP: a location of
+`type: mcp` / `type: mcp-h2`, or an endpoint of `type: mcp`, whose `proxy_pass_to` is a
+gateway is refused at load time.
 
 
 
@@ -1635,11 +1658,56 @@ removed ssl_certificate 'my_ssl_cert' — not present on gateway [gateway_name]
 ## Gateway reliability
 
 The gateway TCP transport uses a race-free single-channel writer internally —
-outgoing payloads travel through a bounded `mpsc` channel that carries the bytes
+outgoing payloads travel through an `mpsc` channel that carries the bytes
 themselves rather than separate "wake the writer" signal events. This eliminates
 a class of lost-wakeup bugs that could cause a long-running gateway to silently
-stall after extended uptime under heavy traffic. From a configuration standpoint
-nothing changes; the improvement is purely internal.
+stall after extended uptime under heavy traffic. A frame is never dropped for
+want of room in the channel; data frames instead wait for a share of a 2 MiB
+write budget per gateway connection, so a fast upstream is read at the speed of
+the gateway link rather than buffered in memory.
+
+What else holds under failures, without any configuration:
+
+- A connection closed by either end delivers everything sent before the close.
+- A failure reaches the other end as a failure, not as a clean end: when the
+  client of a tunnelled connection resets, a byte pump fails or a write times
+  out, the target's connection is reset, and when the target resets, so is the
+  client's; a gateway connection going down resets the targets behind it. A
+  clean close still arrives as the end of the stream. Between peers of this
+  version the gateway says which it was (`FIN` / `RST`); an end reported by a
+  peer of an older version reaches the target as a clean close, as before. A
+  unix-socket target can not be reset - it sees the end of the stream.
+- If any part of a tunnelled connection fails - either direction of its byte
+  pumps, the write to the target, the peer - the whole connection is closed on
+  both ends, and every loop working for it stops as soon as it has delivered
+  what was sent before the close.
+- A tunnelled connection lives as long as bytes move either way: a one-way
+  stream is not cut by the silence of its other direction, a connection silent
+  both ways for `read_timeout` is closed.
+- A reader or target slower than the gateway link slows down only its own
+  connection: between peers of this version each tunnelled connection holds
+  at most 8 MiB per direction in memory, a connection waiting for its reader
+  takes nothing from the others, and the credit which lets it go on never
+  waits behind other connections' data. A peer of an older version keeps
+  working as before, without the bound.
+- A client which leaves in the middle of a streaming response (SSE) takes the
+  upstream connection with it - through a gateway or directly - instead of
+  handing it back to the pool while it is still busy with that response.
+- An upload the target does not take within 30 seconds of the close is given
+  up on, and the target's TCP connection is reset rather than closed, so the
+  target does not take a stream cut short for a complete one.
+- When a gateway connection goes down, every connection tunnelled through it is
+  closed at once - nothing waits for a timeout - and its target is reset.
+- A gateway link too slow for its traffic is torn down rather than kept alive:
+  pings get no priority, so a client whose uplink stays saturated for over 9
+  seconds with nothing coming back reconnects.
+- A client which vanished without closing its socket is dropped by the server
+  after 30 seconds of silence; the client itself detects a dead server in 10-13
+  seconds and reconnects. A handshake must complete within 10 seconds.
+- After a reconnect the new connection stays registered, whenever the old one is
+  finally torn down.
+
+The exact rules are in [docs/gateway-protocol.md](docs/gateway-protocol.md).
 
 
 
@@ -1684,7 +1752,7 @@ same unit. The **Levels** column says how far down the cascade each key is read:
 | `pool_size` | int | 5 | global→endpoint→location | Connections held in the h1/h2 upstream pool. |
 | `pool_ping_timeout` | ms | 1000 | global→endpoint→location | Per-probe timeout of the h2 liveness check. **h2 + liveness URL only.** |
 | `pool_hot_window` | ms | 3000 | global→endpoint→location | Idle window after a success during which the h2 probe is skipped. **h2 + liveness URL only.** |
-| `read_timeout` | ms | 180000 (3m) | global→endpoint | Idle read timeout on every byte pump — H1 request/response body transfer, MCP tunnel, TCP port-forward, WebSocket. Doubles as dead-peer detection. |
+| `read_timeout` | ms | 180000 (3m) | global→endpoint | Idle read timeout on every byte pump — H1 request/response body transfer, MCP tunnel, TCP port-forward, WebSocket. A TCP port-forward or WebSocket session is torn down only when neither direction has moved bytes for this long; a one-way stream keeps it open. Doubles as dead-peer detection. |
 | `write_timeout` | ms | 30000 (30s) | global→endpoint | Idle write timeout on every byte pump (same paths as `read_timeout`). |
 
 Keys that don't apply to a given endpoint type (e.g. `pool_size` on a `type: tcp`
@@ -1729,7 +1797,7 @@ hosts:
 - **Too few / too many upstream connections** → `pool_size`.
 - **Dead h2 upstream detected too slowly** → set `default_h2_livness_url`, then tune `pool_supervisor_interval` (sweep rate) and `pool_hot_window`.
 - **MCP tunnel / body transfer dropped on a long-idle peer** → raise `read_timeout` (on the endpoint or globally).
-- **WebSocket drops while idle (no app traffic)** → raise `read_timeout`, or make the client send a heartbeat shorter than `read_timeout`.
+- **WebSocket drops while idle (no app traffic)** → raise `read_timeout`, or make either side send a heartbeat shorter than `read_timeout`.
 - **`type: tcp` forward hangs connecting** → lower `connect_to_remote_timeout`.
 - **Gateway link slow to fail** → `connect_timeout` on the gateway client.
 

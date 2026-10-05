@@ -164,7 +164,30 @@ impl Upstream {
                         ssh_handler
                     );
                 }
-                _ => todo!("UnixHttp1 over gateway/ssh not implemented"),
+                // The gateway peer connects to a socket path itself: through a gateway a unix
+                // socket upstream is an ordinary one.
+                MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
+                    let (result, read_part, ssh_handler) = Http1ConnectionInner::connect::<
+                        TcpGatewayProxyForwardStream,
+                        TcpGatewayProxyForwardStream,
+                    >(
+                        Some(id),
+                        None,
+                        None,
+                        remote_host,
+                        proxy_pass_to.connect_timeout,
+                    )
+                    .await?;
+                    owned!(
+                        UpstreamInner::Http1OverGateway(result),
+                        result,
+                        read_part,
+                        ssh_handler
+                    );
+                }
+                MyReverseProxyRemoteEndpoint::OverSsh { .. } => Err(NetworkError::OtherStr(
+                    "a unix+http upstream over ssh is not supported",
+                )),
             },
             // This pipeline speaks h1 to the upstream and nothing else. An h2
             // upstream is served by the hyper path, which only runs under an

@@ -35,8 +35,9 @@ impl Http2OverSshContentSource {
             },
         );
 
-        let response = http_client.do_request(&req, self.request_timeout).await?;
-        Ok(HttpResponse::Response(response))
+        // The shared h2 dispatcher also carries a WebSocket opened with an RFC 8441 extended
+        // CONNECT.
+        execute_h2(&http_client, &req, self.request_timeout).await
     }
 
     /// Same upstream, with the client's request body forwarded as a stream of

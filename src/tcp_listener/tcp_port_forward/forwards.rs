@@ -10,60 +10,57 @@ pub async fn handle_port_forward<TRemoteNetworkStream: NetworkStream + Send + Sy
     timeouts: HttpTimeouts,
 ) {
     let (remote_reader, remote_writer) = remote_stream.split();
-    match server_stream {
+    let pumps = std::sync::Arc::new(crate::tcp_utils::ConnectionPumps::new(timeouts));
+
+    // Owned halves: a failed connection resets the client's socket - the client gets an error,
+    // not the end of a stream cut short.
+    let (server_reader, server_writer, (server_to_remote, remote_to_server)) = match server_stream {
         AcceptedServerConnection::Tcp { network_stream, .. } => {
-            let (server_reader, server_writer) = tokio::io::split(network_stream);
-            crate::app::spawn_named(
-                "tcp_forward_copy_server_to_remote_tcp",
-                crate::tcp_utils::copy_streams(
-                    server_reader,
-                    remote_writer,
-                    LoopBuffer::new(),
-                    ssh_session_handler,
-                    None,
-                    None,
-                    timeouts,
+            let (read, write) = network_stream.into_split();
+            (
+                MyOwnedReadHalf::from(read),
+                MyOwnedWriteHalf::from(write),
+                (
+                    "tcp_forward_copy_server_to_remote_tcp",
+                    "tcp_forward_copy_remote_to_server_tcp",
                 ),
-            );
-            crate::app::spawn_named(
-                "tcp_forward_copy_remote_to_server_tcp",
-                crate::tcp_utils::copy_streams(
-                    remote_reader,
-                    server_writer,
-                    LoopBuffer::new(),
-                    None,
-                    None,
-                    None,
-                    timeouts,
-                ),
-            );
+            )
         }
         AcceptedServerConnection::Unix(unix_stream) => {
-            let (server_reader, server_writer) = tokio::io::split(unix_stream);
-            crate::app::spawn_named(
-                "tcp_forward_copy_server_to_remote_unix",
-                crate::tcp_utils::copy_streams(
-                    server_reader,
-                    remote_writer,
-                    LoopBuffer::new(),
-                    ssh_session_handler,
-                    None,
-                    None,
-                    timeouts,
+            let (read, write) = unix_stream.into_split();
+            (
+                MyOwnedReadHalf::from(read),
+                MyOwnedWriteHalf::from(write),
+                (
+                    "tcp_forward_copy_server_to_remote_unix",
+                    "tcp_forward_copy_remote_to_server_unix",
                 ),
-            );
-            crate::app::spawn_named(
-                "tcp_forward_copy_remote_to_server_unix",
-                crate::tcp_utils::copy_streams(
-                    remote_reader,
-                    server_writer,
-                    LoopBuffer::new(),
-                    None,
-                    None,
-                    None,
-                    timeouts,
-                ),
-            );
+            )
         }
-    }
+    };
+
+    crate::app::spawn_named(
+        server_to_remote,
+        crate::tcp_utils::copy_streams(
+            server_reader,
+            remote_writer,
+            LoopBuffer::new(),
+            ssh_session_handler,
+            None,
+            None,
+            pumps.clone(),
+        ),
+    );
+    crate::app::spawn_named(
+        remote_to_server,
+        crate::tcp_utils::copy_streams(
+            remote_reader,
+            server_writer,
+            LoopBuffer::new(),
+            None,
+            None,
+            None,
+            pumps,
+        ),
+    );
 }

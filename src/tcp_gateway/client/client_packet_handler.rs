@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::tcp_gateway::{
-    TcpGatewayConnection, TcpGatewayContract, TcpGatewayInner, TcpGatewayPacketHandler,
+    ConnectionEnd, TcpGatewayConnection, TcpGatewayContract, TcpGatewayInner,
+    TcpGatewayPacketHandler,
 };
 
 pub struct TcpGatewayClientPacketHandler {
@@ -24,6 +25,7 @@ impl TcpGatewayClientPacketHandler {
                 connection_id,
                 timeout,
                 remote_host,
+                receive_window,
             } => {
                 if !gateway_connection.is_incoming_forward_connection_allowed() {
                     crate::tcp_gateway::scripts::send_connection_error(
@@ -32,8 +34,7 @@ impl TcpGatewayClientPacketHandler {
                         "Forward connections are disabled this way to gateway",
                         true,
                         false,
-                    )
-                    .await;
+                    );
                     return;
                 }
 
@@ -45,6 +46,7 @@ impl TcpGatewayClientPacketHandler {
                         connection_id,
                         remote_host,
                         timeout,
+                        receive_window,
                         gateway_connection,
                     ),
                 );
@@ -54,9 +56,7 @@ impl TcpGatewayClientPacketHandler {
                     println!("Got Gateway payload connected: {}", connection_id);
                 }
 
-                gateway_connection
-                    .notify_forward_proxy_connection_accepted(connection_id)
-                    .await;
+                gateway_connection.notify_forward_proxy_connection_accepted(connection_id);
             }
             TcpGatewayContract::ConnectionError {
                 connection_id,
@@ -69,33 +69,57 @@ impl TcpGatewayClientPacketHandler {
                     error
                 );
 
+                gateway_connection.end_tunnelled_connection(
+                    connection_id,
+                    ConnectionEnd::from_connection_error(error),
+                );
+            }
+            TcpGatewayContract::Fin { connection_id } => {
+                gateway_connection.end_tunnelled_connection(connection_id, ConnectionEnd::Closed);
+            }
+            TcpGatewayContract::Rst {
+                connection_id,
+                reason,
+            } => {
+                println!(
+                    "Gateway: [{}]. Connection with id {} is reset. Reason: {}",
+                    gateway_connection.get_gateway_id(),
+                    connection_id,
+                    reason
+                );
+
                 gateway_connection
-                    .disconnect_forward_proxy_connection(connection_id, error)
-                    .await;
+                    .end_tunnelled_connection(connection_id, ConnectionEnd::Reset(reason));
             }
             TcpGatewayContract::ForwardPayload {
                 connection_id,
 
                 payload,
-            } => {
-                crate::tcp_gateway::scripts::forward_payload(
-                    gateway_connection,
-                    connection_id,
-                    payload.as_slice(),
-                )
-                .await
-            }
+            } => crate::tcp_gateway::scripts::forward_payload(
+                gateway_connection,
+                connection_id,
+                payload.as_slice(),
+            ),
 
             TcpGatewayContract::BackwardPayload {
                 connection_id,
                 payload,
             } => {
                 gateway_connection
-                    .incoming_payload_for_proxy_connection(connection_id, payload.as_slice())
-                    .await;
+                    .incoming_payload_for_proxy_connection(connection_id, payload.as_slice());
             }
-            TcpGatewayContract::Ping => {}
+            TcpGatewayContract::WindowUpdate {
+                connection_id,
+                credit,
+            } => gateway_connection.incoming_window_update(connection_id, credit),
+            TcpGatewayContract::Ping { capabilities } => {
+                gateway_connection.set_peer_capabilities(capabilities)
+            }
             TcpGatewayContract::Pong => {
+                // A server with capabilities sends its PING before any other frame: a PONG first
+                // means it has none.
+                gateway_connection.set_peer_capabilities(None);
+
                 gateway_connection.ping_stop_watch.pause();
                 let duration = gateway_connection
                     .ping_stop_watch

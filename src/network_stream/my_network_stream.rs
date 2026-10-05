@@ -228,8 +228,7 @@ impl NetworkStream for TcpGatewayProxyForwardStream {
     type ReadPart = TcpGatewayProxyForwardStream;
 
     fn split(self) -> (Self::ReadPart, Self::WritePart) {
-        let write_part = self.clone();
-        (self, write_part)
+        self.split_halves()
     }
 
     async fn connect(

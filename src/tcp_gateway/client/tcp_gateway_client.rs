@@ -7,8 +7,13 @@ use ed25519_dalek::SigningKey;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 use tokio::net::TcpStream;
 
-use crate::tcp_gateway::handshake::perform_client_handshake;
+use crate::tcp_gateway::handshake::{perform_client_handshake, HANDSHAKE_TIMEOUT};
 use crate::tcp_gateway::{client::*, *};
+
+/// Pause between a connection ending and the next connect. A lost connection is noticed at
+/// once, so without it two clients misconfigured with the same gateway name - each displacing
+/// the other's registration on the server - would reconnect in a tight loop.
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 pub struct TcpGatewayClientParams {
     pub id: String,
@@ -19,6 +24,9 @@ pub struct TcpGatewayClientParams {
     pub connect_timeout: Duration,
     pub debug: bool,
     pub sync_ssl_certificates: Vec<String>,
+    /// The protocol extensions - flow control, `FIN` and `RST` - with servers which have them.
+    /// `false` behaves on the wire like a client built before capabilities.
+    pub protocol_extensions: bool,
 }
 
 pub struct TcpGatewayClient {
@@ -37,6 +45,7 @@ impl TcpGatewayClient {
             connect_timeout,
             debug,
             sync_ssl_certificates,
+            protocol_extensions,
         } = params;
 
         let inner = Arc::new(TcpGatewayInner::new_client(
@@ -46,6 +55,11 @@ impl TcpGatewayClient {
             allow_incoming_forward_connections,
             sync_ssl_certificates,
             compress_outbound,
+            if protocol_extensions {
+                OWN_CAPABILITIES
+            } else {
+                0
+            },
         ));
         let result = Self {
             inner: inner.clone(),
@@ -62,9 +76,14 @@ impl TcpGatewayClient {
         result
     }
 
+    /// Ids of the connections a client opens never carry [`SERVER_CONNECTION_ID_FLAG`] - that
+    /// bit marks the ones the server opens over the same gateway connection.
     pub fn get_next_connection_id(&self) -> u32 {
-        self.next_connection_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        let id = self
+            .next_connection_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        id & !SERVER_CONNECTION_ID_FLAG
     }
 
     pub fn get_gateway_connection(&self, gateway_id: &str) -> Option<Arc<TcpGatewayConnection>> {
@@ -94,7 +113,6 @@ impl Drop for TcpGatewayClient {
 
 async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration, debug: bool) {
     while inner.is_running() {
-        inner.set_gateway_connection(&inner.gateway_id, None);
         println!(
             "Gateway:[{}] Connecting to remote gateway with host '{}' and with timeout: {:?}",
             inner.get_gateway_id(),
@@ -136,19 +154,29 @@ async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration,
             .as_ref()
             .clone();
 
-        let session_key = match perform_client_handshake(
-            &mut tcp_stream,
-            &signing_key,
-            inner.gateway_id.as_str(),
+        let handshake = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            perform_client_handshake(&mut tcp_stream, &signing_key, inner.gateway_id.as_str()),
         )
-        .await
-        {
-            Ok(key) => key,
-            Err(err) => {
+        .await;
+
+        let session_key = match handshake {
+            Ok(Ok(key)) => key,
+            Ok(Err(err)) => {
                 eprintln!(
                     "Gateway:[{}] handshake to '{}' failed: {err}",
                     inner.get_gateway_id(),
                     inner.gateway_host.as_str(),
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+            Err(_) => {
+                eprintln!(
+                    "Gateway:[{}] handshake to '{}' timed out after {:?}",
+                    inner.get_gateway_id(),
+                    inner.gateway_host.as_str(),
+                    HANDSHAKE_TIMEOUT
                 );
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
@@ -163,13 +191,21 @@ async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration,
             session_key,
             inner.compress_outbound,
             inner.allow_incoming_forward_connections,
+            inner.capabilities,
         );
 
         let gateway_connection = Arc::new(gateway_connection);
         let now = DateTimeAsMicroseconds::now();
         gateway_connection.set_connection_timestamp(now);
         gateway_connection.set_gateway_id(inner.gateway_id.as_str());
-        inner.set_gateway_connection(&inner.gateway_id, Some(gateway_connection.clone()));
+
+        // The previous connection is closed before the loop comes round again, so nothing
+        // should be displaced - closing it anyway keeps one live connection per client.
+        if let Some(displaced) =
+            inner.register_gateway_connection(&inner.gateway_id, gateway_connection.clone())
+        {
+            displaced.disconnect_gateway();
+        }
 
         crate::app::spawn_named(
             "tcp_gateway_client_read_loop",
@@ -192,6 +228,14 @@ async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration,
             gateway_connection.send_payload(&request);
         }
 
-        super::gateway_ping_loop(gateway_connection, debug).await;
+        super::gateway_ping_loop(gateway_connection.clone(), debug).await;
+
+        // Whatever ended the ping loop, this connection is finished. Closing it ends its read
+        // loop too - even one blocked on a socket whose peer vanished - which unregisters the
+        // connection and closes everything tunnelled through it.
+        gateway_connection.disconnect_gateway();
+        inner.remove_gateway_connection(&inner.gateway_id, &gateway_connection);
+
+        tokio::time::sleep(RECONNECT_DELAY).await;
     }
 }

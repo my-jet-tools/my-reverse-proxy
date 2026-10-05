@@ -23,6 +23,7 @@ impl Http1OverSshContentSource {
         let mut http_client = crate::app::APP_CTX.http_over_ssh_clients_pool.get(
             self.over_ssh.to_string().into(),
             self.connect_timeout,
+            None,
             || HttpOverSshConnector {
                 remote_endpoint: self.over_ssh.get_remote_endpoint().to_owned(),
                 debug: self.debug,
@@ -34,7 +35,12 @@ impl Http1OverSshContentSource {
         let req = MyHttpRequest::from_hyper_request(req).await;
 
         match http_client.do_request(&req, self.request_timeout).await? {
-            MyHttpResponse::Response(response) => Ok(HttpResponse::Response(response)),
+            // The client stays out of the pool until the body is read to its end: a chunked or
+            // streaming body is still being read on its connection when the head arrives.
+            MyHttpResponse::Response(response) => Ok(HttpResponse::Response(attach_conn_guard(
+                response,
+                Box::new(http_client),
+            ))),
             MyHttpResponse::WebSocketUpgrade {
                 stream,
                 response,

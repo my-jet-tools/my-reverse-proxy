@@ -126,6 +126,8 @@ pub async fn run_ws_tunnel<
         direction: WsDirection::ClientToServer,
     });
 
+    let pumps = Arc::new(crate::tcp_utils::ConnectionPumps::new(timeouts));
+
     // Server -> Client: upstream read half (type-erased) into the client write half.
     crate::app::spawn_named(
         "h1_ws_pump_server_to_client",
@@ -136,7 +138,7 @@ pub async fn run_ws_tunnel<
             ssh_handler,
             s2c_recorder,
             Some(log_scope.clone()),
-            timeouts,
+            pumps.clone(),
         ),
     );
 
@@ -153,7 +155,7 @@ pub async fn run_ws_tunnel<
                     None,
                     c2s_recorder,
                     Some(log_scope),
-                    timeouts,
+                    pumps,
                 ),
             )
         };

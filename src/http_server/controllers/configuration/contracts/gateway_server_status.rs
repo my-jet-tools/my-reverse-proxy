@@ -58,9 +58,9 @@ impl GatewayConnection {
             result.push(Self {
                 name: connection.get_gateway_id().to_string(),
                 forward_connections: connection.get_forward_connections_amount(),
-                proxy_connections: connection.get_forward_proxy_connections_amount().await,
+                proxy_connections: connection.get_forward_proxy_connections_amount(),
                 forward_routes: connection.get_forward_connections_by_route(),
-                proxy_routes: connection.get_forward_proxy_connections_by_route().await,
+                proxy_routes: connection.get_forward_proxy_connections_by_route(),
                 ping_time: format!("{:?}", ping),
                 is_incoming_forward_connection_allowed: connection
                     .is_incoming_forward_connection_allowed(),

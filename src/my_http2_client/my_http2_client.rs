@@ -245,13 +245,21 @@ impl<
         headers: hyper::HeaderMap,
         request_timeout: Duration,
     ) -> Result<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>, MyHttpClientError> {
-        let authority = self
+        let host_port = self
             .connector
             .get_remote_endpoint()
             .get_host_port()
             .to_string();
 
-        self.do_extended_connect_inner(&authority, path, headers, request_timeout)
+        // A unix socket target reached through a gateway has its socket path here, which is no
+        // authority whatever the transport: it takes the placeholder do_extended_connect_unix uses.
+        let authority = if host_port.starts_with('/') {
+            "localhost"
+        } else {
+            host_port.as_str()
+        };
+
+        self.do_extended_connect_inner(authority, path, headers, request_timeout)
             .await
     }
 

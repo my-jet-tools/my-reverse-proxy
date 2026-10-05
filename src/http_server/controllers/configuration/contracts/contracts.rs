@@ -120,6 +120,14 @@ impl CurrentConfigurationHttpModel {
             .http2_over_ssh_clients_pool
             .fill_connections_amount(&mut remote_connections);
 
+        crate::app::APP_CTX
+            .http_over_gateway_clients_pool
+            .fill_connections_amount(&mut remote_connections);
+
+        crate::app::APP_CTX
+            .http2_over_gateway_clients_pool
+            .fill_connections_amount(&mut remote_connections);
+
         for (name, ready, _total) in crate::app::APP_CTX.h1_tcp_pools.snapshot() {
             remote_connections.insert(name, ready);
         }

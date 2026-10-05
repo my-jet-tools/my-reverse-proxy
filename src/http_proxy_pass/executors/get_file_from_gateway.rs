@@ -30,9 +30,8 @@ pub async fn get_file_from_gateway(
             crate::tcp_gateway::FileRequestError::FileNotFound => {
                 Err(ProxyPassError::NoLocationFound)
             }
-            crate::tcp_gateway::FileRequestError::GatewayDisconnected => {
-                Err(ProxyPassError::GatewayError)
-            }
+            crate::tcp_gateway::FileRequestError::GatewayDisconnected
+            | crate::tcp_gateway::FileRequestError::Timeout => Err(ProxyPassError::GatewayError),
         },
     }
 }

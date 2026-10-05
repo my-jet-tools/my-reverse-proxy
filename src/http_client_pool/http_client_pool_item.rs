@@ -39,6 +39,12 @@ impl<
         self.my_http_client.take();
     }
 
+    /// Keeps the client out of the pool: its connection is closed once the item is dropped.
+    pub fn discard(&self) {
+        self.disposed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub async fn do_request(
         &self,
         req: &MyHttpRequest,

@@ -1,8 +1,10 @@
-use std::collections::HashSet;
+use std::net::Ipv4Addr;
 
 use ed25519_dalek::VerifyingKey;
 use serde::*;
 use ssh_key::PublicKey;
+
+use crate::types::WhiteListedIpList;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GatewayServerSettings {
@@ -50,15 +52,30 @@ impl GatewayServerSettings {
         Ok(keys)
     }
 
-    pub fn get_allowed_ip_list(&self) -> Option<HashSet<String>> {
-        let items = self.allowed_ip.as_ref()?;
+    /// `allowed_ip` as a whitelist, `None` when it is not set. Entries are IPv4 addresses or
+    /// `from-to` ranges, the same as in `ip_white_lists`; an empty list restricts nothing.
+    pub fn get_allowed_ip_list(&self) -> Result<Option<WhiteListedIpList>, String> {
+        let Some(items) = self.allowed_ip.as_ref() else {
+            return Ok(None);
+        };
 
-        let mut result = HashSet::new();
-
+        // `WhiteListedIpList` panics on an entry it can not parse - fail with a message saying
+        // which entry is wrong instead.
         for itm in items {
-            result.insert(itm.to_string());
+            let is_valid = match itm.split_once('-') {
+                Some((from, to)) => {
+                    from.parse::<Ipv4Addr>().is_ok() && to.parse::<Ipv4Addr>().is_ok()
+                }
+                None => itm.parse::<Ipv4Addr>().is_ok(),
+            };
+
+            if !is_valid {
+                return Err(format!(
+                    "Gateway server: invalid allowed_ip entry '{itm}' - an IPv4 address or an IPv4 from-to range is expected"
+                ));
+            }
         }
 
-        Some(result)
+        Ok(Some(WhiteListedIpList::new(items)))
     }
 }

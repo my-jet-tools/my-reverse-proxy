@@ -13,3 +13,6 @@ pub use pool_desc::*;
 pub use pool_params::*;
 pub use pool_registry::*;
 pub use pool_supervisor::*;
+
+#[cfg(test)]
+mod tests;

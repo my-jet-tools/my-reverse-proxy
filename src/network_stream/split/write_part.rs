@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use my_ssh::SshAsyncChannel;
+use tokio_util::sync::CancellationToken;
 
 use crate::network_stream::*;
 
@@ -11,6 +12,19 @@ pub trait NetworkStreamWritePart {
     async fn write_to_socket(&mut self, buffer: &[u8]) -> Result<(), std::io::Error>;
 
     async fn flush_it(&mut self) -> Result<(), NetworkError>;
+
+    /// Ends the connection as broken: its other end gets an error - a TCP reset, an `RST` through
+    /// a gateway tunnel - instead of the end of the stream, which would pass a stream cut short
+    /// for a whole one. A stream which can not tell the two apart is shut down.
+    async fn abort_socket(&mut self) {
+        self.shutdown_socket().await
+    }
+
+    /// Cancelled once the connection behind this half is gone, for a stream which learns that
+    /// without a read or a write of its own - a gateway tunnel connection. `None` for sockets.
+    fn connection_closed(&self) -> Option<CancellationToken> {
+        None
+    }
 
     async fn write_all_with_timeout(
         &mut self,
@@ -42,6 +56,25 @@ pub enum MyOwnedWriteHalf {
     Tcp(tokio::net::tcp::OwnedWriteHalf),
     Unix(tokio::net::unix::OwnedWriteHalf),
     Ssh(tokio::io::WriteHalf<SshAsyncChannel>),
+    /// Given up by [`MyOwnedWriteHalf::reset`]: writes fail, a shutdown does nothing.
+    Reset,
+}
+
+impl MyOwnedWriteHalf {
+    /// Gives the write half up without shutting the write side down, and has the connection
+    /// closed with a reset once the read half is dropped too: the other end gets an error, not
+    /// the end of a stream cut short. A unix socket or an ssh channel can not be reset - its write
+    /// side is shut down, and its other end sees the end of the stream.
+    pub fn reset(&mut self) {
+        match std::mem::replace(self, MyOwnedWriteHalf::Reset) {
+            MyOwnedWriteHalf::Tcp(write_half) => {
+                let _ = write_half.as_ref().set_zero_linger();
+                write_half.forget();
+            }
+            // Dropped: an owned unix write half shuts its side down on drop.
+            other => drop(other),
+        }
+    }
 }
 
 impl From<tokio::net::tcp::OwnedWriteHalf> for MyOwnedWriteHalf {
@@ -78,7 +111,12 @@ impl NetworkStreamWritePart for MyOwnedWriteHalf {
                 use tokio::io::AsyncWriteExt;
                 let _ = ssh.shutdown().await;
             }
+            MyOwnedWriteHalf::Reset => {}
         }
+    }
+
+    async fn abort_socket(&mut self) {
+        self.reset();
     }
 
     async fn write_to_socket(&mut self, buffer: &[u8]) -> Result<(), std::io::Error> {
@@ -95,6 +133,10 @@ impl NetworkStreamWritePart for MyOwnedWriteHalf {
                 use tokio::io::AsyncWriteExt;
                 owned_write_half.write_all(buffer).await
             }
+            MyOwnedWriteHalf::Reset => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "The connection is reset",
+            )),
         }
     }
 
@@ -112,6 +154,7 @@ impl NetworkStreamWritePart for MyOwnedWriteHalf {
                 use tokio::io::AsyncWriteExt;
                 write_half.flush().await?;
             }
+            MyOwnedWriteHalf::Reset => {}
         }
 
         Ok(())

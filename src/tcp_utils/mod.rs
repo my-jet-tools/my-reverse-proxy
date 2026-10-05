@@ -1,5 +1,7 @@
 mod allocated_read_buffer;
 pub use allocated_read_buffer::*;
+mod connection_pumps;
+pub use connection_pumps::*;
 mod copy_streams;
 pub use copy_streams::*;
 mod loop_buffer;

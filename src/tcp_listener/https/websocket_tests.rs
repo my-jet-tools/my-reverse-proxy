@@ -48,6 +48,14 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 
 const NO_SESSION_TOKEN: &str = "no session token";
 
+/// The endpoint's read timeout in the idle tests: short enough to hit in a test, long enough to
+/// tell a silent direction from a silent session.
+const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A one-way stream: this many messages, one every fifth of the read timeout - three read
+/// timeouts in all.
+const ONE_WAY_MESSAGES: usize = 15;
+
 #[tokio::test]
 async fn http1_upgrade_keeps_the_tunnel_open_past_the_handshake() {
     let upstream = start_upstream(UpstreamBehaviour::Echo);
@@ -80,6 +88,54 @@ async fn h2_extended_connect_delivers_the_upstream_close_frame() {
     assert_receives_the_upstream_close_frame(connect_with_h2_extended_connect(port).await).await;
 }
 
+#[tokio::test]
+async fn http1_upgrade_carries_a_one_way_upstream_stream_past_the_read_timeout() {
+    let upstream = start_upstream(UpstreamBehaviour::Push);
+    let port = start_https2_endpoint_with_idle_read_timeout(&upstream).await;
+
+    assert_receives_every_pushed_message(connect_with_http1_upgrade(port).await).await;
+}
+
+#[tokio::test]
+async fn h2_extended_connect_carries_a_one_way_upstream_stream_past_the_read_timeout() {
+    let upstream = start_upstream(UpstreamBehaviour::Push);
+    let port = start_https2_endpoint_with_idle_read_timeout(&upstream).await;
+
+    assert_receives_every_pushed_message(connect_with_h2_extended_connect(port).await).await;
+}
+
+#[tokio::test]
+async fn http1_upgrade_carries_a_one_way_client_stream_past_the_read_timeout() {
+    let upstream = start_upstream(UpstreamBehaviour::Count);
+    let port = start_https2_endpoint_with_idle_read_timeout(&upstream).await;
+
+    assert_upstream_receives_every_message(connect_with_http1_upgrade(port).await).await;
+}
+
+#[tokio::test]
+async fn h2_extended_connect_carries_a_one_way_client_stream_past_the_read_timeout() {
+    let upstream = start_upstream(UpstreamBehaviour::Count);
+    let port = start_https2_endpoint_with_idle_read_timeout(&upstream).await;
+
+    assert_upstream_receives_every_message(connect_with_h2_extended_connect(port).await).await;
+}
+
+#[tokio::test]
+async fn http1_upgrade_closes_a_session_silent_both_ways_after_the_read_timeout() {
+    let upstream = start_upstream(UpstreamBehaviour::Count);
+    let port = start_https2_endpoint_with_idle_read_timeout(&upstream).await;
+
+    assert_closed_after_the_read_timeout(connect_with_http1_upgrade(port).await).await;
+}
+
+#[tokio::test]
+async fn h2_extended_connect_closes_a_session_silent_both_ways_after_the_read_timeout() {
+    let upstream = start_upstream(UpstreamBehaviour::Count);
+    let port = start_https2_endpoint_with_idle_read_timeout(&upstream).await;
+
+    assert_closed_after_the_read_timeout(connect_with_h2_extended_connect(port).await).await;
+}
+
 /// Two round trips with a pause after each: the tunnel has to outlive the
 /// handshake, not just carry the first frame.
 async fn assert_echoes_past_the_handshake<S>(mut websocket: WebSocketStream<S>)
@@ -105,6 +161,65 @@ where
         }
         other => panic!("expected the upstream's close frame, got {:?}", other),
     }
+}
+
+/// The upstream pushes for three read timeouts while the client sends nothing: the session is not
+/// idle, only one direction of it is.
+async fn assert_receives_every_pushed_message<S>(mut websocket: WebSocketStream<S>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    for index in 0..ONE_WAY_MESSAGES {
+        assert_eq!(
+            next_message(&mut websocket).await,
+            Message::text(index.to_string())
+        );
+    }
+}
+
+/// The client sends for three read timeouts while the upstream answers nothing, then asks the
+/// upstream how many messages it got.
+async fn assert_upstream_receives_every_message<S>(mut websocket: WebSocketStream<S>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    for index in 0..ONE_WAY_MESSAGES {
+        tokio::time::sleep(IDLE_READ_TIMEOUT / 5).await;
+        websocket
+            .send(Message::text(index.to_string()))
+            .await
+            .unwrap();
+    }
+
+    websocket.send(Message::text(COUNT_QUERY)).await.unwrap();
+
+    assert_eq!(
+        next_message(&mut websocket).await,
+        Message::text(ONE_WAY_MESSAGES.to_string())
+    );
+}
+
+/// Neither side sends anything: the session goes once it has been idle for the read timeout.
+async fn assert_closed_after_the_read_timeout<S>(mut websocket: WebSocketStream<S>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let started = std::time::Instant::now();
+
+    let ended = tokio::time::timeout(TIMEOUT, websocket.next())
+        .await
+        .expect("the idle session is still open");
+
+    assert!(
+        !matches!(ended, Some(Ok(Message::Text(_) | Message::Binary(_)))),
+        "a message on a silent session: {:?}",
+        ended
+    );
+    assert!(
+        started.elapsed() >= IDLE_READ_TIMEOUT * 8 / 10,
+        "closed after {:?}, before the read timeout",
+        started.elapsed()
+    );
 }
 
 async fn next_message<S>(websocket: &mut WebSocketStream<S>) -> Message
@@ -226,6 +341,17 @@ async fn read_response_head(stream: &mut TlsStream<TcpStream>) -> (String, Vec<u
 /// `unix+http` location in front of the upstream socket. The configuration is
 /// compiled from settings the same way a settings file is.
 async fn start_https2_endpoint(upstream: &UpstreamSocket) -> u16 {
+    start_https2_endpoint_with(upstream, "").await
+}
+
+/// The same endpoint with its read timeout cut to [`IDLE_READ_TIMEOUT`].
+async fn start_https2_endpoint_with_idle_read_timeout(upstream: &UpstreamSocket) -> u16 {
+    let endpoint_settings = format!("  read_timeout: {}\n", IDLE_READ_TIMEOUT.as_millis());
+    start_https2_endpoint_with(upstream, &endpoint_settings).await
+}
+
+/// `endpoint_settings`: more lines for the `endpoint` section, indented by two spaces.
+async fn start_https2_endpoint_with(upstream: &UpstreamSocket, endpoint_settings: &str) -> u16 {
     // What main() does before anything touches TLS.
     my_tls::install_default_crypto_providers();
 
@@ -233,8 +359,8 @@ async fn start_https2_endpoint(upstream: &UpstreamSocket) -> u16 {
     let listening_addr = listener.local_addr().unwrap();
 
     let host_settings: HostSettings = my_settings_reader::serde_yaml::from_str(&format!(
-        "endpoint:\n  type: https2\nlocations:\n- path: /ws\n  type: unix+http\n  proxy_pass_to: '{}'\n",
-        upstream.path
+        "endpoint:\n  type: https2\n{}locations:\n- path: /ws\n  type: unix+http\n  proxy_pass_to: '{}'\n",
+        endpoint_settings, upstream.path
     ))
     .unwrap();
 
@@ -283,7 +409,15 @@ enum UpstreamBehaviour {
     /// Refuses the session as soon as the upgrade is done, the way an upstream
     /// that finds no session token does.
     CloseRightAway,
+    /// Sends [`ONE_WAY_MESSAGES`] messages, one every fifth of the idle read
+    /// timeout, and reads nothing.
+    Push,
+    /// Sends nothing but, on a [`COUNT_QUERY`], the number of messages it got
+    /// before it.
+    Count,
 }
+
+const COUNT_QUERY: &str = "how many?";
 
 /// A unix socket path of its own for each test, removed when the test ends.
 struct UpstreamSocket {
@@ -348,13 +482,52 @@ async fn serve_upstream_websocket(websocket: HyperWebsocket, behaviour: Upstream
         return;
     };
 
-    if let UpstreamBehaviour::CloseRightAway = behaviour {
-        let close = CloseFrame {
-            code: CloseCode::Policy,
-            reason: NO_SESSION_TOKEN.into(),
-        };
+    match behaviour {
+        UpstreamBehaviour::Echo => {}
+        UpstreamBehaviour::CloseRightAway => {
+            let close = CloseFrame {
+                code: CloseCode::Policy,
+                reason: NO_SESSION_TOKEN.into(),
+            };
 
-        if websocket.send(Message::Close(Some(close))).await.is_err() {
+            if websocket.send(Message::Close(Some(close))).await.is_err() {
+                return;
+            }
+        }
+        UpstreamBehaviour::Push => {
+            for index in 0..ONE_WAY_MESSAGES {
+                tokio::time::sleep(IDLE_READ_TIMEOUT / 5).await;
+
+                if websocket
+                    .send(Message::text(index.to_string()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+
+            // Held open until the client is done with it.
+            while let Some(Ok(_)) = websocket.next().await {}
+            return;
+        }
+        UpstreamBehaviour::Count => {
+            let mut count = 0usize;
+
+            while let Some(Ok(message)) = websocket.next().await {
+                if message == Message::text(COUNT_QUERY) {
+                    if websocket
+                        .send(Message::text(count.to_string()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                } else if message.is_text() || message.is_binary() {
+                    count += 1;
+                }
+            }
+
             return;
         }
     }

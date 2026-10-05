@@ -8,6 +8,13 @@ use crate::network_stream::NetworkError;
 pub trait NetworkStreamReadPart {
     async fn read_from_socket(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error>;
 
+    /// Has the connection end as broken however it is closed - see
+    /// [`super::NetworkStreamWritePart::abort_socket`]: a byte pump which failed resets the
+    /// connections of both its halves. A gateway tunnel connection is reset at once, a socket
+    /// closes with a reset once both its halves are gone. Nothing for a stream which can not tell
+    /// the two apart.
+    fn abort_connection(&mut self) {}
+
     async fn read_with_timeout(
         &mut self,
         buf: &mut [u8],
@@ -44,6 +51,10 @@ impl NetworkStreamReadPart for Box<dyn NetworkStreamReadPart + Send + Sync> {
     async fn read_from_socket(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         (**self).read_from_socket(buf).await
     }
+
+    fn abort_connection(&mut self) {
+        (**self).abort_connection()
+    }
 }
 
 pub enum MyOwnedReadHalf {
@@ -67,6 +78,15 @@ impl MyOwnedReadHalf {
                 use tokio::io::AsyncReadExt;
                 owned_read_half.read(buf).await
             }
+        }
+    }
+
+    /// Has the connection closed with a reset once both halves are gone - its other end gets an
+    /// error, not the end of the stream - however the write half is given up. A unix socket or
+    /// an ssh channel can not be reset.
+    pub fn reset_on_close(&self) {
+        if let MyOwnedReadHalf::Tcp(read_half) = self {
+            let _ = read_half.as_ref().set_zero_linger();
         }
     }
 
@@ -105,6 +125,10 @@ impl From<tokio::io::ReadHalf<SshAsyncChannel>> for MyOwnedReadHalf {
 impl NetworkStreamReadPart for MyOwnedReadHalf {
     async fn read_from_socket(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         self.read(buf).await
+    }
+
+    fn abort_connection(&mut self) {
+        self.reset_on_close();
     }
 }
 

@@ -18,6 +18,9 @@ pub struct TcpGatewayInner {
     pub authorized_keys: Option<Arc<Vec<VerifyingKey>>>,
     pub signing_key: Option<Arc<SigningKey>>,
     pub compress_outbound: bool,
+    /// What this side advertises to its peers: [`super::OWN_CAPABILITIES`], or 0 for a side which
+    /// behaves on the wire like one built before capabilities.
+    pub capabilities: u8,
 }
 
 impl TcpGatewayInner {
@@ -26,6 +29,7 @@ impl TcpGatewayInner {
         addr: String,
         authorized_keys: Vec<VerifyingKey>,
         compress_outbound: bool,
+        capabilities: u8,
     ) -> Self {
         Self {
             gateway_id: Arc::new(gateway_id),
@@ -37,6 +41,7 @@ impl TcpGatewayInner {
             authorized_keys: Some(Arc::new(authorized_keys)),
             signing_key: None,
             compress_outbound,
+            capabilities,
         }
     }
 
@@ -47,6 +52,7 @@ impl TcpGatewayInner {
         allow_incoming_forward_connections: bool,
         sync_ssl_certificates: Vec<String>,
         compress_outbound: bool,
+        capabilities: u8,
     ) -> Self {
         Self {
             gateway_id: Arc::new(gateway_id),
@@ -58,19 +64,37 @@ impl TcpGatewayInner {
             authorized_keys: None,
             signing_key: Some(Arc::new(signing_key)),
             compress_outbound,
+            capabilities,
         }
     }
 
-    pub fn set_gateway_connection(&self, id: &str, connection: Option<Arc<TcpGatewayConnection>>) {
+    /// Registers `connection` under `id` and returns the connection it displaced, which the
+    /// caller closes: a peer that reconnected leaves its previous connection behind.
+    pub fn register_gateway_connection(
+        &self,
+        id: &str,
+        connection: Arc<TcpGatewayConnection>,
+    ) -> Option<Arc<TcpGatewayConnection>> {
+        let displaced = {
+            let mut connection_access = self.connection.lock();
+            connection_access.insert(id.to_string(), connection.clone())
+        };
+
+        displaced.filter(|itm| !Arc::ptr_eq(itm, &connection))
+    }
+
+    /// Unregisters `connection` - and only it. An old connection is often torn down after a
+    /// reconnect has already registered the new one under the same id, and removing by id
+    /// alone would leave a live connection that no route can find.
+    pub fn remove_gateway_connection(&self, id: &str, connection: &Arc<TcpGatewayConnection>) {
         let mut connection_access = self.connection.lock();
 
-        match connection {
-            Some(connection) => {
-                connection_access.insert(id.to_string(), connection);
-            }
-            None => {
-                connection_access.remove(id);
-            }
+        let is_registered = connection_access
+            .get(id)
+            .is_some_and(|registered| Arc::ptr_eq(registered, connection));
+
+        if is_registered {
+            connection_access.remove(id);
         }
     }
 

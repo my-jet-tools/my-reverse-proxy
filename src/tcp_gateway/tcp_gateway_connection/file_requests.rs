@@ -6,6 +6,7 @@ use rust_extensions::{TaskCompletion, TaskCompletionAwaiter};
 pub enum FileRequestError {
     FileNotFound,
     GatewayDisconnected,
+    Timeout,
 }
 
 #[derive(Default)]
@@ -16,7 +17,7 @@ pub struct FileRequestsInner {
 
 impl FileRequestsInner {
     pub fn get_next_request_id(&mut self) -> u32 {
-        self.next_request_id += 1;
+        self.next_request_id = self.next_request_id.wrapping_add(1);
         self.next_request_id
     }
 }
@@ -63,5 +64,40 @@ impl FileRequests {
         if let Some(mut item) = item {
             let _ = item.try_set_error(error);
         }
+    }
+
+    /// Forgets a request nobody waits for any more. A dropped request completes with its drop
+    /// error, `GatewayDisconnected`.
+    pub fn remove_request(&self, request_id: u32) {
+        let item = {
+            let mut write_access = self.inner.lock();
+            write_access.requests.remove(&request_id)
+        };
+
+        drop(item);
+    }
+
+    /// Fails every pending request with `GatewayDisconnected`: the gateway connection which
+    /// would carry the answers is gone.
+    pub fn fail_all(&self) {
+        let requests = {
+            let mut write_access = self.inner.lock();
+            std::mem::take(&mut write_access.requests)
+        };
+
+        drop(requests);
+    }
+}
+
+/// Removes a request from the registry when whoever waits for it stops waiting - it timed out,
+/// or its caller was dropped. An answer removes the request as well, so this is then a no-op.
+pub struct PendingFileRequest<'s> {
+    pub requests: &'s FileRequests,
+    pub request_id: u32,
+}
+
+impl Drop for PendingFileRequest<'_> {
+    fn drop(&mut self) {
+        self.requests.remove_request(self.request_id);
     }
 }
