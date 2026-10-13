@@ -4,6 +4,10 @@ use serde::*;
 
 use crate::{configurations::GoogleAuthCredentials, types::Email};
 
+/// The most an answer of Google - a token, the user info - is read into memory. Both are a few
+/// hundred bytes.
+const MAX_GOOGLE_RESPONSE_SIZE: usize = 1024 * 1024;
+
 pub async fn resolve_email(
     req: &impl HttpRequestReader,
     code: &str,
@@ -20,7 +24,7 @@ pub async fn resolve_email(
 
     let fl_url_body = HttpRequestBody::as_json(&json_data);
 
-    let response = FlUrl::new("https://oauth2.googleapis.com/token")
+    let mut response = FlUrl::new("https://oauth2.googleapis.com/token")
         .do_not_reuse_connection()
         .post(fl_url_body)
         .await
@@ -30,7 +34,12 @@ pub async fn resolve_email(
         println!("status_code: {:?}", response.get_status_code());
     }
 
-    let response = response.receive_body().await.unwrap();
+    let response = response
+        .get_body()
+        .unwrap()
+        .into_vec(MAX_GOOGLE_RESPONSE_SIZE)
+        .await
+        .unwrap();
 
     if debug {
         println!(
@@ -54,10 +63,11 @@ pub async fn resolve_email(
         .get()
         .await
         .unwrap()
-        .get_body_as_str()
-        .await
+        .get_body()
         .unwrap()
-        .to_string();
+        .into_string(MAX_GOOGLE_RESPONSE_SIZE)
+        .await
+        .unwrap();
 
     if debug {
         println!("response_with_email: {}", resp);

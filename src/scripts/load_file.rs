@@ -1,8 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use http::Method;
-use http_body_util::BodyExt;
-use my_http_client::http1::{MyHttpClient, MyHttpRequestBuilder};
+use my_http_client::http1::{MyHttpClient, MyHttpRequestBuilder, MyHttpResponse};
 use my_settings_reader::flurl::FlUrl;
 use my_ssh::{ssh_settings::OverSshConnectionSettings, SshCredentials};
 use rust_extensions::remote_endpoint::RemoteEndpoint;
@@ -71,13 +70,16 @@ async fn load_from_http_or_https<'s>(
     }
 
     // FlUrl::new never panics: a malformed `https://domain@ip:port/...` source fails the request
-    let response = FlUrl::new(remote_endpoint.as_str())
+    let mut response = FlUrl::new(remote_endpoint.as_str())
         .get()
         .await
         .map_err(|err| format!("Error loading file from HTTP. Error: {:?}", err))?;
 
+    // A file of any size, as before: what is loaded here is named in the settings.
     let result = response
-        .receive_body()
+        .get_body()
+        .map_err(|itm| format!("Error loading file from HTTP. Error: {:?}", itm))?
+        .into_vec(usize::MAX)
         .await
         .map_err(|itm| format!("Error loading file from HTTP. Error: {:?}", itm))?;
 
@@ -140,13 +142,18 @@ async fn load_content_from_http_via_ssh<'s>(
         .await
         .map_err(|err| format!("{:?}", err))?;
 
-    let response = response.into_response();
+    let MyHttpResponse::Response(response) = response else {
+        return Err(
+            "Error loading file from HTTP via ssh: a websocket upgrade is answered".to_string(),
+        );
+    };
 
-    let body = response.into_body();
-
-    let body = body.collect().await.map_err(|err| format!("{:?}", err))?;
-
-    let body = body.to_bytes();
-
-    Ok(body.into())
+    // Through the reader of the body, not as collected frames: a frame is the buffer the
+    // connection is read into, and with the two of them held a file bigger than both would
+    // never be read to its end.
+    response
+        .into_body()
+        .into_vec(usize::MAX)
+        .await
+        .map_err(|err| format!("{:?}", err))
 }

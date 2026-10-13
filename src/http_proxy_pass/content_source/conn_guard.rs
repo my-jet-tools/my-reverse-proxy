@@ -71,13 +71,19 @@ impl Drop for GuardedBody {
 /// Wraps `resp`'s body so `guard` is dropped only when the body is. `guard` is
 /// type-erased so any owning handle/client can be attached (H1 pool handle,
 /// dedicated `MyHttpClient`, gateway or ssh pool client, …).
+///
+/// `resp` is the response as the client gives it, its body still on the wire. A piece of the
+/// body goes on as the buffer it was read into - nothing is copied - so it has to be let go of
+/// for the connection to read on: the body is to be passed on frame by frame, not collected.
 pub fn attach_conn_guard(
-    resp: my_http_client::HyperResponse,
+    resp: http::Response<my_http_client::BodyReader>,
     guard: Box<dyn ConnGuard>,
 ) -> my_http_client::HyperResponse {
-    let (parts, inner) = resp.into_parts();
+    let (parts, body) = resp.into_parts();
     let guarded = GuardedBody {
-        inner,
+        inner: body
+            .map_frame(|frame| frame.map_data(Bytes::from_owner))
+            .boxed(),
         guard,
         finished: false,
     }
