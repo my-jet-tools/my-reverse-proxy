@@ -8,6 +8,7 @@ use rust_extensions::date_time::DateTimeAsMicroseconds;
 use tokio::net::TcpStream;
 
 use crate::tcp_gateway::handshake::{perform_client_handshake, HANDSHAKE_TIMEOUT};
+use crate::tcp_gateway::session::CompressionLevel;
 use crate::tcp_gateway::{client::*, *};
 
 /// Pause between a connection ending and the next connect. A lost connection is noticed at
@@ -19,14 +20,13 @@ pub struct TcpGatewayClientParams {
     pub id: String,
     pub remote_endpoint: String,
     pub signing_key: SigningKey,
-    pub compress_outbound: bool,
+    /// What the batches of the gateway connection are packed with, in both directions: the
+    /// server packs what it sends with the level its client asks for in its handshake.
+    pub compression: CompressionLevel,
     pub allow_incoming_forward_connections: bool,
     pub connect_timeout: Duration,
     pub debug: bool,
     pub sync_ssl_certificates: Vec<String>,
-    /// The protocol extensions - flow control, `FIN` and `RST` - with servers which have them.
-    /// `false` behaves on the wire like a client built before capabilities.
-    pub protocol_extensions: bool,
 }
 
 pub struct TcpGatewayClient {
@@ -40,12 +40,11 @@ impl TcpGatewayClient {
             id,
             remote_endpoint,
             signing_key,
-            compress_outbound,
+            compression,
             allow_incoming_forward_connections,
             connect_timeout,
             debug,
             sync_ssl_certificates,
-            protocol_extensions,
         } = params;
 
         let inner = Arc::new(TcpGatewayInner::new_client(
@@ -54,12 +53,7 @@ impl TcpGatewayClient {
             signing_key,
             allow_incoming_forward_connections,
             sync_ssl_certificates,
-            compress_outbound,
-            if protocol_extensions {
-                OWN_CAPABILITIES
-            } else {
-                0
-            },
+            compression,
         ));
         let result = Self {
             inner: inner.clone(),
@@ -135,7 +129,11 @@ async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration,
         }
 
         let mut tcp_stream = match connect_result.unwrap() {
-            Ok(tcp_stream) => tcp_stream,
+            Ok(tcp_stream) => {
+                // Every frame is written whole: there is nothing for the kernel to wait for.
+                let _ = tcp_stream.set_nodelay(true);
+                tcp_stream
+            }
             Err(err) => {
                 println!(
                     "Gateway[{}]. Can not connect. Err: {:?}",
@@ -156,11 +154,16 @@ async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration,
 
         let handshake = tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
-            perform_client_handshake(&mut tcp_stream, &signing_key, inner.gateway_id.as_str()),
+            perform_client_handshake(
+                &mut tcp_stream,
+                &signing_key,
+                inner.gateway_id.as_str(),
+                inner.compression,
+            ),
         )
         .await;
 
-        let session_key = match handshake {
+        let session_keys = match handshake {
             Ok(Ok(key)) => key,
             Ok(Err(err)) => {
                 eprintln!(
@@ -184,14 +187,14 @@ async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration,
         };
 
         let (read, write) = tcp_stream.into_split();
+        let (sealer, opener) = session_keys.into_client_ends();
 
         let gateway_connection = TcpGatewayConnection::new(
             inner.gateway_host.clone(),
             write.into(),
-            session_key,
-            inner.compress_outbound,
+            sealer,
+            inner.compression,
             inner.allow_incoming_forward_connections,
-            inner.capabilities,
         );
 
         let gateway_connection = Arc::new(gateway_connection);
@@ -212,6 +215,7 @@ async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration,
             crate::tcp_gateway::gateway_read_loop(
                 inner.clone(),
                 read,
+                opener,
                 gateway_connection.clone(),
                 TcpGatewayClientPacketHandler::new(debug),
                 debug,

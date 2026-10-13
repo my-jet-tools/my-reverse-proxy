@@ -1,5 +1,6 @@
 use std::sync::atomic::AtomicUsize;
 
+#[derive(Default)]
 pub struct PerSecondAccumulator {
     value: AtomicUsize,
 }

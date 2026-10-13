@@ -217,6 +217,8 @@ impl SettingsCompiled {
         variables: &VariablesCompiled,
     ) -> Result<(), String> {
         if let Some(itm) = settings_model.global_settings.take() {
+            itm.get_debug_ip()?;
+
             self.global_settings = Some(GlobalSettings {
                 connection_settings: itm.connection_settings,
                 all_http_endpoints: if let Some(itm) = itm.all_http_endpoints {
@@ -233,6 +235,7 @@ impl SettingsCompiled {
                 http_control_port: itm.http_control_port,
                 default_h2_livness_url: itm.default_h2_livness_url,
                 ip_blocklist_white_list: itm.ip_blocklist_white_list,
+                debug_ip: itm.debug_ip,
                 pool_supervisor_interval: itm.pool_supervisor_interval,
                 timeouts: itm.timeouts,
             })

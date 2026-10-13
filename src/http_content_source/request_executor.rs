@@ -10,6 +10,26 @@ pub struct RequestExecutorResult {
     pub body: Vec<u8>,
 }
 
+impl RequestExecutorResult {
+    /// There is no such file in a files location.
+    pub fn not_found() -> Self {
+        Self {
+            status_code: 404,
+            content_type: None,
+            body: "Not found".as_bytes().to_vec(),
+        }
+    }
+
+    /// The path of a request to a files location did not pass the check.
+    pub fn bad_request() -> Self {
+        Self {
+            status_code: 400,
+            content_type: Some(WebContentType::Text),
+            body: "Bad Request".as_bytes().to_vec(),
+        }
+    }
+}
+
 impl From<RequestExecutorResult> for hyper::Response<BoxBody<Bytes, String>> {
     fn from(val: RequestExecutorResult) -> Self {
         let mut builder = hyper::Response::builder().status(val.status_code);

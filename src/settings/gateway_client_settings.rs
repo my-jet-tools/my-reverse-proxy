@@ -4,13 +4,17 @@ use ed25519_dalek::SigningKey;
 use serde::*;
 use ssh_key::{private::Ed25519Keypair, PrivateKey};
 
+use crate::tcp_gateway::session::CompressionLevel;
+
 use super::SshConfigSettings;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GatewayClientSettings {
     pub remote_host: String,
     pub ssh_credentials: String,
-    pub compress: Option<bool>,
+    /// The compression level of the gateway connection: 0 or nothing - off, from 1 on - a row
+    /// of the table in docs/gateway-compression.md.
+    pub compress: Option<u8>,
 
     pub debug: Option<bool>,
     pub allow_incoming_forward_connections: Option<bool>,
@@ -24,8 +28,9 @@ impl GatewayClientSettings {
         self.debug.unwrap_or(false)
     }
 
-    pub fn get_supported_compression(&self) -> bool {
-        self.compress.unwrap_or(false)
+    pub fn get_compression(&self, client_id: &str) -> Result<CompressionLevel, String> {
+        CompressionLevel::new(self.compress.unwrap_or(0))
+            .map_err(|err| format!("Gateway client '{client_id}': compress: {err}"))
     }
 
     pub fn get_allow_incoming_forward_connections(&self) -> bool {
@@ -102,5 +107,50 @@ impl GatewayClientSettings {
         })?;
 
         Ok(SigningKey::from_bytes(&keypair.private.to_bytes()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The settings of a client as they are in the file, with `compress` the way it is given.
+    fn client(compress: &str) -> Result<GatewayClientSettings, serde_yaml::Error> {
+        serde_yaml::from_str(&format!(
+            "remote_host: 10.0.0.1:30000\nssh_credentials: gateway\n{compress}"
+        ))
+    }
+
+    #[test]
+    fn compress_is_the_compression_level() {
+        let level_of = |compress: &str| client(compress).unwrap().get_compression("london");
+
+        assert_eq!(level_of(""), Ok(CompressionLevel::OFF));
+        assert_eq!(level_of("compress: 0"), Ok(CompressionLevel::OFF));
+
+        for level in 1..=CompressionLevel::MAX {
+            let compression = level_of(&format!("compress: {level}")).unwrap();
+            assert_eq!(compression.as_u8(), level);
+            assert!(compression.is_on());
+        }
+
+        // A level the table has no row for: said with the name of the client it is set for.
+        let err = level_of(&format!("compress: {}", CompressionLevel::MAX + 1)).unwrap_err();
+        assert!(err.contains("Gateway client 'london': compress:"), "{err}");
+        assert!(err.contains("is not known"), "{err}");
+    }
+
+    /// It was a yes or a no before the levels: neither is a level, and the settings which
+    /// still say so are not read as some level nobody chose.
+    #[test]
+    fn compress_which_is_not_a_level_is_not_read() {
+        for compress in [
+            "compress: true",
+            "compress: false",
+            "compress: -1",
+            "compress: 300",
+        ] {
+            assert!(client(compress).is_err(), "{compress}");
+        }
     }
 }

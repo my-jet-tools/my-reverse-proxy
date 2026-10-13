@@ -13,6 +13,10 @@ pub async fn load_everything_from_settings() -> Result<(), String> {
 
     crate::scripts::update_ssh_config_list(&settings_model).await;
 
+    crate::app::APP_CTX
+        .debug_ip
+        .set(settings_model.get_debug_ip());
+
     // Build the full new configuration into local maps first, then swap it into the live
     // configuration in a single write. This way endpoints that disappeared from the settings are
     // simply absent from the new maps (instead of lingering, as an in-place merge would leave them),

@@ -36,6 +36,10 @@ pub struct GatewayConnection {
     pub proxy_routes: HashMap<String, usize>,
     pub ping_time: String,
     pub is_incoming_forward_connection_allowed: bool,
+    // The compression level of the connection (0 - off), and what the batches this side sends
+    // are packed with for it: see docs/gateway-compression.md.
+    pub compress: u8,
+    pub compression: String,
     pub in_history: Vec<usize>,
     pub out_history: Vec<usize>,
     pub timestamp: String,
@@ -64,6 +68,8 @@ impl GatewayConnection {
                 ping_time: format!("{:?}", ping),
                 is_incoming_forward_connection_allowed: connection
                     .is_incoming_forward_connection_allowed(),
+                compress: connection.compression().as_u8(),
+                compression: connection.compression().to_string(),
                 in_history,
                 out_history,
                 timestamp: connection.get_connection_timestamp().to_rfc3339(),

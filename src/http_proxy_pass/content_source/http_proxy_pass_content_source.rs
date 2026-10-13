@@ -2,8 +2,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 
 use crate::{
-    http_content_source::local_path::*, http_content_source::static_content::*,
-    http_content_source::*, http_proxy_pass::ProxyPassError,
+    http_content_source::static_content::*, http_content_source::*, http_proxy_pass::ProxyPassError,
 };
 
 use super::*;
@@ -19,9 +18,7 @@ pub enum HttpProxyPassContentSource {
     Http2OverGateway(Http2OverGatewayContentSource),
     Http1OverSsh(Http1OverSshContentSource),
     Http2OverSsh(Http2OverSshContentSource),
-    LocalPath(LocalPathContentSrc),
-    PathOverSsh(PathOverSshContentSource),
-    PathOverGateway(PathOverGatewayContentSource),
+    Files(FilesContentSource),
     Static(StaticContentSrc),
     Drop,
     DynamicProxy(DynamicProxyContentSource),
@@ -74,11 +71,9 @@ impl HttpProxyPassContentSource {
             Self::Https2(model) => model.execute(req).await,
             Self::Http1OverSsh(model) => model.execute(req).await,
             Self::Http2OverSsh(model) => model.execute(req).await,
-            Self::LocalPath(model) => model.execute(req).await,
-            Self::PathOverSsh(model) => model.execute(req).await,
             Self::Http1OverGateway(model) => model.execute(req).await,
             Self::Http2OverGateway(model) => model.execute(req).await,
-            Self::PathOverGateway(model) => model.execute(req).await,
+            Self::Files(source) => source.execute(req).await,
             Self::Static(model) => model.execute(req).await,
             Self::Drop => {
                 println!(

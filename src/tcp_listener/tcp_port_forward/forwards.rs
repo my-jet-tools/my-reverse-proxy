@@ -16,6 +16,9 @@ pub async fn handle_port_forward<TRemoteNetworkStream: NetworkStream + Send + Sy
     // not the end of a stream cut short.
     let (server_reader, server_writer, (server_to_remote, remote_to_server)) = match server_stream {
         AcceptedServerConnection::Tcp { network_stream, .. } => {
+            // A pump writes what comes as it comes: a piece which follows another must not wait
+            // for the client to acknowledge the first.
+            let _ = network_stream.set_nodelay(true);
             let (read, write) = network_stream.into_split();
             (
                 MyOwnedReadHalf::from(read),

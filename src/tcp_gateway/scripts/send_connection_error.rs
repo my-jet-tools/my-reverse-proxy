@@ -2,7 +2,8 @@ use crate::tcp_gateway::*;
 
 /// Refuses forward connection `connection_id` with `CONNECTION_ERROR` - a connect which failed or
 /// is not allowed - and resets the connection if one was registered under the id. `send_force`
-/// sends the error even when no connection was registered.
+/// sends the error even when no connection was registered. The peer reads `err` as the reason of
+/// a reset, whatever it says.
 pub fn send_connection_error(
     gateway_connection: &TcpGatewayConnection,
     connection_id: u32,
@@ -32,13 +33,11 @@ pub fn send_connection_error(
 }
 
 /// Ends forward connection `connection_id` - if it is still registered - and tells the peer how
-/// it ended. After a clean close the target gets what the peer sent and then the end of the
-/// stream; after a reset its connection is reset at once. `remote_host` names the target in the
-/// text a peer without `FIN` gets for a clean close.
+/// it ended, with `FIN` or `RST`. After a clean close the target gets what the peer sent and then
+/// the end of the stream; after a reset its connection is reset at once.
 pub fn end_forward_connection(
     gateway_connection: &TcpGatewayConnection,
     connection_id: u32,
-    remote_host: &str,
     end: ConnectionEnd,
 ) {
     if let ConnectionEnd::Reset(reason) = end {
@@ -49,8 +48,7 @@ pub fn end_forward_connection(
         );
     }
 
-    let closed_text = target_closed_message(remote_host, connection_id);
-    let contract = gateway_connection.connection_end_contract(connection_id, end, &closed_text);
+    let contract = end.to_contract(connection_id);
 
     let removed =
         gateway_connection.remove_forward_connection_and_send(connection_id, &contract, false);

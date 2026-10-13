@@ -113,6 +113,16 @@ impl SettingsCompiled {
         false
     }
 
+    /// Source IPs that are shown the diagnostic page on a refused request
+    /// (`global_settings.debug_ip`). The entries were validated when the
+    /// settings were compiled.
+    pub fn get_debug_ip(&self) -> Vec<std::net::IpAddr> {
+        self.global_settings
+            .as_ref()
+            .and_then(|g| g.get_debug_ip().ok())
+            .unwrap_or_default()
+    }
+
     /// Global IP block-list allow-list (fail2ban exemptions), if configured.
     pub fn get_ip_blocklist_white_list(&self) -> Option<Vec<String>> {
         self.global_settings

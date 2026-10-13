@@ -66,37 +66,33 @@ impl ReceiveState {
 
 /// Payloads received for one proxy connection, waiting for its reader. Its close state is the
 /// state of the whole connection.
-#[derive(Default)]
 pub struct ProxyReceiveBuffer {
     state: Mutex<ReceiveState>,
     /// Cancelled together with the close, whatever closed the connection: the flag every loop
     /// working for this connection watches, so that a failure anywhere stops all of them -
     /// including a loop blocked in a read on its other side, which a plain flag would not wake.
     closed: CancellationToken,
-    /// This side's window for what the peer sends; `None` without flow control.
-    receive_window: Option<ReceiveWindow>,
+    /// This side's window for what the peer sends.
+    receive_window: ReceiveWindow,
     /// The peer's credit for what this side sends. Closed with the connection, which stops every
     /// writer waiting on it - however many clones wait.
-    send_window: Option<Arc<Semaphore>>,
+    send_window: Arc<Semaphore>,
 }
 
 impl ProxyReceiveBuffer {
-    /// `receive_window`: `Some` on a flow-controlled connection, which gets a send window too -
-    /// empty until the peer's first credit.
-    pub fn new(receive_window: Option<ReceiveWindow>) -> Self {
-        let send_window = receive_window
-            .is_some()
-            .then(|| Arc::new(Semaphore::new(0)));
-
+    /// The send window is empty until the peer's first credit, which comes ahead of its
+    /// `CONNECT_OK`.
+    pub fn new(receive_window: ReceiveWindow) -> Self {
         Self {
+            state: Mutex::default(),
+            closed: CancellationToken::new(),
             receive_window,
-            send_window,
-            ..Default::default()
+            send_window: Arc::new(Semaphore::new(0)),
         }
     }
 
-    pub fn send_window(&self) -> Option<&Arc<Semaphore>> {
-        self.send_window.as_ref()
+    pub fn send_window(&self) -> &Arc<Semaphore> {
+        &self.send_window
     }
 
     pub async fn get_data(&self, out: &mut [u8]) -> Result<usize, std::io::Error> {
@@ -120,9 +116,7 @@ impl ProxyReceiveBuffer {
             // Credit for what the reader now has. Not after a close: the peer no longer knows
             // the id.
             if open {
-                if let Some(receive_window) = self.receive_window.as_ref() {
-                    receive_window.consumed(read_size);
-                }
+                self.receive_window.consumed(read_size);
             }
 
             return Poll::Ready(Ok(read_size));
@@ -169,10 +163,8 @@ impl ProxyReceiveBuffer {
                 return true;
             }
 
-            if let Some(receive_window) = self.receive_window.as_ref() {
-                if !receive_window.received(payload.len()) {
-                    return false;
-                }
+            if !self.receive_window.received(payload.len()) {
+                return false;
             }
 
             // Joining the front chunk is safe while the reader is in it: it reads what is past
@@ -207,9 +199,7 @@ impl ProxyReceiveBuffer {
 
         self.closed.cancel();
 
-        if let Some(send_window) = self.send_window.as_ref() {
-            send_window.close();
-        }
+        self.send_window.close();
 
         if let Some(reader) = reader {
             reader.wake();

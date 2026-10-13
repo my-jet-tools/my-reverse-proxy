@@ -16,6 +16,8 @@
 
 mod body_collector_sink;
 pub use body_collector_sink::*;
+mod files;
+pub use files::*;
 mod oauth_gate;
 pub use oauth_gate::*;
 mod response_event;

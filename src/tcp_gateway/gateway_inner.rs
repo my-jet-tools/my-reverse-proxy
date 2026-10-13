@@ -6,7 +6,7 @@ use std::{
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use parking_lot::Mutex;
 
-use super::TcpGatewayConnection;
+use super::{session::CompressionLevel, TcpGatewayConnection};
 
 pub struct TcpGatewayInner {
     pub gateway_id: Arc<String>,
@@ -17,10 +17,10 @@ pub struct TcpGatewayInner {
     pub sync_ssl_certificates: Vec<String>,
     pub authorized_keys: Option<Arc<Vec<VerifyingKey>>>,
     pub signing_key: Option<Arc<SigningKey>>,
-    pub compress_outbound: bool,
-    /// What this side advertises to its peers: [`super::OWN_CAPABILITIES`], or 0 for a side which
-    /// behaves on the wire like one built before capabilities.
-    pub capabilities: u8,
+    /// A client: what the batches of its gateway connection are packed with, in both directions -
+    /// it says so in its handshake. A server has no say of its own: it packs with the level each
+    /// of its clients asks for.
+    pub compression: CompressionLevel,
 }
 
 impl TcpGatewayInner {
@@ -28,8 +28,6 @@ impl TcpGatewayInner {
         gateway_id: String,
         addr: String,
         authorized_keys: Vec<VerifyingKey>,
-        compress_outbound: bool,
-        capabilities: u8,
     ) -> Self {
         Self {
             gateway_id: Arc::new(gateway_id),
@@ -40,8 +38,7 @@ impl TcpGatewayInner {
             sync_ssl_certificates: Vec::new(),
             authorized_keys: Some(Arc::new(authorized_keys)),
             signing_key: None,
-            compress_outbound,
-            capabilities,
+            compression: CompressionLevel::OFF,
         }
     }
 
@@ -51,8 +48,7 @@ impl TcpGatewayInner {
         signing_key: SigningKey,
         allow_incoming_forward_connections: bool,
         sync_ssl_certificates: Vec<String>,
-        compress_outbound: bool,
-        capabilities: u8,
+        compression: CompressionLevel,
     ) -> Self {
         Self {
             gateway_id: Arc::new(gateway_id),
@@ -63,8 +59,7 @@ impl TcpGatewayInner {
             sync_ssl_certificates,
             authorized_keys: None,
             signing_key: Some(Arc::new(signing_key)),
-            compress_outbound,
-            capabilities,
+            compression,
         }
     }
 

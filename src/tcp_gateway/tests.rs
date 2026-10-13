@@ -24,6 +24,7 @@ use super::{
     client::{TcpGatewayClient, TcpGatewayClientParams},
     forwarded_connection::TcpGatewayProxyForwardStream,
     server::{is_ip_allowed, TcpGatewayServer},
+    session::CompressionLevel,
     *,
 };
 use crate::{
@@ -292,72 +293,67 @@ async fn a_dropped_stream_closes_the_upstream_connection() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_bulk_transfer_with_compression_keeps_the_gateway_connection() {
-    let gateway = Gateway::start("bulk-compressed", true).await;
-    let server_side = gateway.server_side();
-
-    let (collected_tx, mut collected) = mpsc::unbounded_channel();
-    let upstream =
-        start_upstream(move |stream| collect(stream, collected_tx.clone(), Duration::ZERO)).await;
-
-    let mut stream = gateway.connect_from_client(upstream).await;
-
     // Incompressible, and far more than one frame may carry.
     let data = pseudo_random(12 * 1024 * 1024);
-    for chunk in data.chunks(1024 * 1024) {
-        stream.write_to_socket(chunk).await.unwrap();
+
+    for compression in CompressionLevel::all().filter(|level| level.is_on()) {
+        let name = format!("bulk-compressed-{}", compression.as_u8());
+        let gateway = Gateway::start_at(&name, compression).await;
+        let server_side = gateway.server_side();
+
+        let (collected_tx, mut collected) = mpsc::unbounded_channel();
+        let upstream =
+            start_upstream(move |stream| collect(stream, collected_tx.clone(), Duration::ZERO))
+                .await;
+
+        let mut stream = gateway.connect_from_client(upstream).await;
+
+        for chunk in data.chunks(1024 * 1024) {
+            stream.write_to_socket(chunk).await.unwrap();
+        }
+        stream.disconnect();
+
+        let received = tokio::time::timeout(Duration::from_secs(120), collected.recv())
+            .await
+            .expect("the upstream connection is closed")
+            .unwrap();
+
+        assert!(
+            received == data,
+            "{name}: received {} of {} bytes",
+            received.len(),
+            data.len()
+        );
+        assert!(
+            Arc::ptr_eq(&gateway.server_side(), &server_side),
+            "{name}: the gateway connection must survive the transfer"
+        );
     }
-    stream.disconnect();
-
-    let received = tokio::time::timeout(Duration::from_secs(120), collected.recv())
-        .await
-        .expect("the upstream connection is closed")
-        .unwrap();
-
-    assert!(
-        received == data,
-        "received {} of {} bytes",
-        received.len(),
-        data.len()
-    );
-    assert!(
-        Arc::ptr_eq(&gateway.server_side(), &server_side),
-        "the gateway connection must survive the transfer"
-    );
 }
 
 #[tokio::test]
-async fn a_poll_write_keeps_its_place_in_the_budget_queue_when_its_buffer_grows() {
+async fn a_poll_write_keeps_its_place_in_the_budget_queue_when_its_buffer_changes() {
     let gateway = Gateway::start("budget-queue", false).await;
     let upstream = start_upstream(discard).await;
 
-    // Plain connections: on a flow-controlled one the credit taken first fixes the request size,
-    // and the budget request would never see the buffer grow.
-    let plain = || async {
-        gateway
-            .client_side()
-            .connect_to_forward_proxy_connection_plain(
-                endpoint(upstream),
-                CONNECT_TIMEOUT,
-                gateway.client.get_next_connection_id(),
-            )
-            .await
-            .unwrap()
-    };
-    let mut first = plain().await;
-    let mut second = plain().await;
+    let mut first = gateway.connect_from_client(upstream).await;
+    let mut second = gateway.connect_from_client(upstream).await;
 
     let budget = gateway.client_side().write_budget_for_tests().unwrap();
     let spent = budget.forget_permits(budget.available_permits());
 
-    // `first` queues for budget, then a bulk write of `second` queues behind it.
+    // `first` takes the credit for its 100 bytes and queues for budget, then a bulk write of
+    // `second` queues behind it.
     assert!(poll_write_once(&mut first, &[1u8; 100]).is_pending());
     let bulk =
         tokio::spawn(async move { second.write_to_socket(&vec![2u8; 256 * 1024]).await.is_ok() });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // The caller polls again with a longer buffer, the way the h2 client does when it adds
-    // frames: the request keeps its place in the queue and its permit count.
+    // frames, and with a shorter one: the request keeps its place in the queue and its permit
+    // count. The credit held caps what a longer buffer may take; nothing caps a shorter one.
     assert!(poll_write_once(&mut first, &[1u8; 101]).is_pending());
+    assert!(poll_write_once(&mut first, &[1u8; 60]).is_pending());
 
     // Exactly what `first` asked for comes back. It goes to `first`, the head of the queue, which
     // writes what that covers.
@@ -374,20 +370,16 @@ async fn a_poll_write_keeps_its_place_in_the_budget_queue_when_its_buffer_grows(
 #[tokio::test]
 async fn an_upstream_which_resets_the_connection_reads_as_an_error_not_as_eof() {
     let gateway = Gateway::start("upstream-reset", false).await;
-    let upstream = start_upstream(|mut stream| async move {
-        stream.write_all(b"the first part of a body").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        // Closing with a zero linger resets the connection instead of closing it.
-        let _ = stream.set_zero_linger();
-        drop(stream);
-    })
-    .await;
+    let upstream = start_upstream(|stream| reset_after(stream, b"the first part of a body")).await;
 
-    let mut stream = gateway.connect_from_client(upstream).await;
+    // With either end of the gateway as the initiator.
+    for from_server in [false, true] {
+        let mut stream = connect_from(&gateway, from_server, upstream).await;
 
-    match read_to_end(&mut stream).await {
-        Err(received) => assert_eq!(received, b"the first part of a body"),
-        Ok(_) => panic!("a body cut short by a reset must not read as complete"),
+        match read_to_end(&mut stream).await {
+            Err(received) => assert_eq!(received, b"the first part of a body"),
+            Ok(_) => panic!("a body cut short by a reset must not read as complete"),
+        }
     }
 }
 
@@ -1188,6 +1180,26 @@ async fn allowed_ip_lets_only_the_listed_addresses_in() {
     wait_until(|| server.get_gateway_connection("listed").is_some()).await;
 }
 
+/// A port which can not be had fails the construction of the server - `AppContext::new` unwraps
+/// it, which ends the startup - instead of leaving a server which listens nowhere.
+#[tokio::test]
+async fn a_server_does_not_start_on_a_taken_port() {
+    let key = signing_key();
+    let (_first, port) = start_server(&key, None).await;
+
+    let second = TcpGatewayServer::new(
+        format!("127.0.0.1:{port}"),
+        vec![key.verifying_key()],
+        None,
+        false,
+    );
+
+    let Err(err) = second else {
+        panic!("a second server started on the port of the first");
+    };
+    assert!(err.contains(&format!("127.0.0.1:{port}")), "{err}");
+}
+
 /// A flush to the target which gives up resets the connection instead of shutting it down: the
 /// target must not take the part of the stream it got for all of it.
 #[tokio::test]
@@ -1248,10 +1260,10 @@ fn short_frames_are_rejected_instead_of_panicking() {
         }
     }
 
-    assert!(TcpGatewayContract::parse(&[3]).is_err());
+    assert!(TcpGatewayContract::parse(&[14]).is_err());
     assert!(TcpGatewayContract::parse(&[6, 1, 2]).is_err());
     assert!(TcpGatewayContract::parse(&[10, 1, 0, 0, 0]).is_err());
-    // CONNECT_FC: the id, the timeout and only 3 bytes of the window.
+    // CONNECT: the id, the timeout and only 3 bytes of the window.
     assert!(TcpGatewayContract::parse(&[14, 1, 0, 0, 0, 5, 0, 0, 0]).is_err());
     // WINDOW_UPDATE: the id and only 3 bytes of the credit.
     assert!(TcpGatewayContract::parse(&[15, 1, 0, 0, 0, 0, 0, 0]).is_err());
@@ -1264,7 +1276,7 @@ fn the_connect_timeout_survives_the_wire() {
             connection_id: 1,
             timeout,
             remote_host: "localhost:80",
-            receive_window: None,
+            receive_window: FLOW_CONTROL_WINDOW as u32,
         }
         .to_plain_frame();
 
@@ -1292,90 +1304,84 @@ fn the_connect_timeout_survives_the_wire() {
     );
 }
 
-#[test]
-fn decompression_stops_at_the_limit() {
-    let too_big =
-        zstd::stream::encode_all(&vec![0u8; MAX_DECOMPRESSED_BATCH_SIZE + 1][..], 3).unwrap();
-    assert!(super::gateway_read_loop::decompress_batch(&too_big).is_err());
-
-    let fits = zstd::stream::encode_all(&vec![7u8; 1024][..], 3).unwrap();
-    assert_eq!(
-        super::gateway_read_loop::decompress_batch(&fits).unwrap(),
-        vec![7u8; 1024]
-    );
-}
-
 // Flow control.
 
 #[test]
-fn a_ping_carries_capabilities_and_a_bare_one_reads_as_none() {
+fn ping_and_pong_are_bare_frames() {
+    assert_eq!(
+        TcpGatewayContract::Ping.to_plain_frame(),
+        vec![1, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        TcpGatewayContract::Pong.to_plain_frame(),
+        vec![1, 0, 0, 0, 1]
+    );
+
     assert!(matches!(
         TcpGatewayContract::parse(&[0]).unwrap(),
-        TcpGatewayContract::Ping { capabilities: None }
+        TcpGatewayContract::Ping
     ));
     assert!(matches!(
-        TcpGatewayContract::parse(&[0, 1]).unwrap(),
-        TcpGatewayContract::Ping {
-            capabilities: Some(1)
-        }
+        TcpGatewayContract::parse(&[1]).unwrap(),
+        TcpGatewayContract::Pong
+    ));
+
+    // Both are read by the type alone.
+    assert!(matches!(
+        TcpGatewayContract::parse(&[0, 3]).unwrap(),
+        TcpGatewayContract::Ping
     ));
     assert!(matches!(
         TcpGatewayContract::parse(&[1, 1, 7, 7]).unwrap(),
         TcpGatewayContract::Pong
     ));
+}
 
-    // The bare PING is the one a peer built before capabilities sends, byte for byte.
-    assert_eq!(
-        TcpGatewayContract::Ping { capabilities: None }.to_plain_frame(),
-        vec![1, 0, 0, 0, 0]
-    );
-    assert_eq!(
-        TcpGatewayContract::Ping {
-            capabilities: Some(CAP_FLOW_CONTROL)
-        }
-        .to_plain_frame(),
-        vec![2, 0, 0, 0, 0, 1]
-    );
-
-    assert_eq!(advertised(0), None);
-    assert_eq!(
-        advertised(OWN_CAPABILITIES),
-        Some(CAP_FLOW_CONTROL | CAP_FIN_RST)
-    );
+/// The frame types protocol version 1 had and version 2 has not - `HANDSHAKE`, `CONNECT` without
+/// a window, `COMPRESSED_BATCH` - and one which never was.
+#[test]
+fn frame_types_which_are_none_any_more_are_unknown() {
+    for packet_type in [2u8, 3, 18, 20, 255] {
+        let err =
+            TcpGatewayContract::parse(&[packet_type, 1, 0, 0, 0, 5, b'h', b':', b'1']).unwrap_err();
+        assert!(
+            err.starts_with("Unknown packet type"),
+            "{packet_type}: {err}"
+        );
+    }
 }
 
 #[test]
-fn a_plain_connect_is_unchanged_and_connect_fc_carries_the_window() {
-    let connect = |receive_window| TcpGatewayContract::Connect {
+fn a_connect_carries_the_receive_window() {
+    let connect = TcpGatewayContract::Connect {
         connection_id: 5,
         timeout: Duration::from_secs(5),
         remote_host: "h:1",
-        receive_window,
-    };
+        receive_window: FLOW_CONTROL_WINDOW as u32,
+    }
+    .to_plain_frame();
 
     assert_eq!(
-        connect(None).to_plain_frame(),
-        vec![9, 0, 0, 0, 3, 5, 0, 0, 0, 5, b'h', b':', b'1']
-    );
-
-    let connect_fc = connect(Some(FLOW_CONTROL_WINDOW as u32)).to_plain_frame();
-    assert_eq!(
-        connect_fc,
+        connect,
         vec![13, 0, 0, 0, 14, 5, 0, 0, 0, 5, 0, 0, 0x80, 0, b'h', b':', b'1']
     );
 
-    match TcpGatewayContract::parse(&connect_fc[4..]).unwrap() {
+    match TcpGatewayContract::parse(&connect[4..]).unwrap() {
         TcpGatewayContract::Connect {
             connection_id: 5,
             timeout,
             remote_host: "h:1",
-            receive_window: Some(window),
+            receive_window,
         } => {
             assert_eq!(timeout, Duration::from_secs(5));
-            assert_eq!(window as usize, FLOW_CONTROL_WINDOW);
+            assert_eq!(receive_window as usize, FLOW_CONTROL_WINDOW);
         }
         other => panic!("parsed as {:?}", other),
     }
+
+    // CONNECT without a window - type 3 of protocol version 1 - is not a frame type any more.
+    let err = TcpGatewayContract::parse(&[3, 5, 0, 0, 0, 5, b'h', b':', b'1']).unwrap_err();
+    assert!(err.starts_with("Unknown packet type"), "{err}");
 }
 
 #[test]
@@ -1395,49 +1401,6 @@ fn a_window_update_round_trips() {
             credit: 524_288
         }
     ));
-}
-
-#[test]
-fn extension_frames_are_unknown_to_a_side_built_without_them() {
-    let window_update = TcpGatewayContract::WindowUpdate {
-        connection_id: 1,
-        credit: 1,
-    }
-    .to_plain_frame();
-    let connect_fc = TcpGatewayContract::Connect {
-        connection_id: 1,
-        timeout: Duration::from_secs(1),
-        remote_host: "h:1",
-        receive_window: Some(FLOW_CONTROL_WINDOW as u32),
-    }
-    .to_plain_frame();
-    let fin = TcpGatewayContract::Fin { connection_id: 1 }.to_plain_frame();
-    let rst = TcpGatewayContract::Rst {
-        connection_id: 1,
-        reason: "broken",
-    }
-    .to_plain_frame();
-
-    for (frame, extension, other) in [
-        (&window_update, CAP_FLOW_CONTROL, CAP_FIN_RST),
-        (&connect_fc, CAP_FLOW_CONTROL, CAP_FIN_RST),
-        (&fin, CAP_FIN_RST, CAP_FLOW_CONTROL),
-        (&rst, CAP_FIN_RST, CAP_FLOW_CONTROL),
-    ] {
-        for without in [0, other] {
-            let err =
-                TcpGatewayContract::parse_with_capabilities(&frame[4..], without).unwrap_err();
-            assert!(err.starts_with("Unknown packet type"), "{err}");
-        }
-        assert!(TcpGatewayContract::parse_with_capabilities(&frame[4..], extension).is_ok());
-    }
-
-    // The rest reads the same either way.
-    let ping = TcpGatewayContract::Ping {
-        capabilities: Some(CAP_FLOW_CONTROL),
-    }
-    .to_plain_frame();
-    assert!(TcpGatewayContract::parse_with_capabilities(&ping[4..], 0).is_ok());
 }
 
 #[test]
@@ -1494,9 +1457,12 @@ fn the_raw_writer_coalesces_small_payloads_and_moves_big_ones() {
     assert!(written == expected, "the order is kept");
 }
 
-#[test]
-fn tiny_payloads_cost_about_their_bytes() {
-    let buffer = super::forwarded_connection::ProxyReceiveBuffer::new(None);
+#[tokio::test]
+async fn tiny_payloads_cost_about_their_bytes() {
+    // 100 000 bytes: far below the window, and below what is credited back.
+    let (gateway_writer, _peer) = lone_gateway_writer().await;
+    let buffer =
+        super::forwarded_connection::ProxyReceiveBuffer::new(ReceiveWindow::new(1, gateway_writer));
     for index in 0..100_000u32 {
         assert!(buffer.extend_from_slice(&[index as u8]));
     }
@@ -1519,309 +1485,30 @@ fn tiny_payloads_cost_about_their_bytes() {
     assert!(read == expected);
 }
 
-/// A connect opened while the other end's capabilities are on the way waits for them - never
-/// longer than its timeout - and is flow controlled only when they say so.
+/// A connection opens with a full window, from either end: the acceptor's window comes ahead of
+/// CONNECT_OK.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_connect_waits_for_the_capabilities_within_its_timeout() {
-    let limit = Duration::from_secs(10);
-
-    // They come during the wait, with flow control.
-    let (connection, _peer) = lone_gateway_connection(OWN_CAPABILITIES).await;
-    let started = Instant::now();
-    let waiting = {
-        let connection = connection.clone();
-        tokio::spawn(async move {
-            connection
-                .flow_control_for_new_connection_for_tests(limit)
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(!waiting.is_finished(), "it did not wait");
-    connection.set_peer_capabilities(Some(CAP_FLOW_CONTROL));
-    assert!(waiting.await.unwrap());
-    assert!(started.elapsed() < Duration::from_secs(2));
-
-    // A PONG first: the other end has none.
-    let (connection, _peer) = lone_gateway_connection(OWN_CAPABILITIES).await;
-    let waiting = {
-        let connection = connection.clone();
-        tokio::spawn(async move {
-            connection
-                .flow_control_for_new_connection_for_tests(limit)
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    connection.set_peer_capabilities(None);
-    assert!(!waiting.await.unwrap());
-
-    // They never come: plain once the wait runs out, never optimistic.
-    let (connection, _peer) = lone_gateway_connection(OWN_CAPABILITIES).await;
-    let started = Instant::now();
-    assert!(
-        !connection
-            .flow_control_for_new_connection_for_tests(Duration::from_millis(300))
-            .await
-    );
-    assert!(started.elapsed() >= Duration::from_millis(300));
-
-    // The gateway connection goes down meanwhile.
-    let (connection, _peer) = lone_gateway_connection(OWN_CAPABILITIES).await;
-    let started = Instant::now();
-    let waiting = {
-        let connection = connection.clone();
-        tokio::spawn(async move {
-            connection
-                .flow_control_for_new_connection_for_tests(limit)
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    connection.disconnect_gateway();
-    assert!(!waiting.await.unwrap());
-    assert!(started.elapsed() < Duration::from_secs(2));
-
-    // A side built without flow control does not wait at all.
-    let (connection, _peer) = lone_gateway_connection(0).await;
-    let started = Instant::now();
-    assert!(
-        !connection
-            .flow_control_for_new_connection_for_tests(limit)
-            .await
-    );
-    assert!(started.elapsed() < Duration::from_millis(100));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_extensions_are_on_between_current_peers() {
+async fn a_connection_opens_with_a_full_window_from_either_end() {
     let gateway = Gateway::start("fc-on", false).await;
     let upstream = start_upstream(|stream| echo(stream, None)).await;
-
-    assert!(gateway.server_side().fin_rst_enabled());
-    assert!(gateway.client_side().fin_rst_enabled());
 
     for mut stream in [
         gateway.connect_from_client(upstream).await,
         gateway.connect_from_server(upstream).await,
     ] {
-        assert!(stream.is_flow_controlled());
-        // The acceptor's window came ahead of CONNECT_OK.
         assert_eq!(
-            stream.send_window_for_tests().unwrap().available_permits(),
+            stream.send_window_for_tests().available_permits(),
             FLOW_CONTROL_WINDOW
         );
         assert_echoes(&mut stream).await;
     }
 }
 
-/// Without the client's first PING going out at once, and the server's PING right after the
-/// handshake, the server would learn the capabilities only after 3 s.
+/// Connects opened the moment the gateway connection is registered, from both ends at once -
+/// pools dial exactly then, after every reconnect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_capabilities_are_known_within_a_round_trip() {
-    let started = Instant::now();
-    let gateway = Gateway::start_registered("fc-quick", false, true, true).await;
-
-    wait_until(|| {
-        gateway.server_side().flow_control_enabled() && gateway.client_side().flow_control_enabled()
-    })
-    .await;
-
-    assert!(
-        started.elapsed() < Duration::from_millis(2500),
-        "the capabilities took {:?}",
-        started.elapsed()
-    );
-}
-
-/// A server built before capabilities, emulated: it closes the gateway connection on a frame of
-/// an extension, so a frame which leaked would show.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_current_client_and_an_old_server_work_without_the_extensions() {
-    let gateway = Gateway::start_registered("fc-old-server", true, false, true).await;
-    let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
-
-    assert_works_without_the_extensions(&gateway).await;
-    assert_still_connected(&gateway, &server_side, &client_side).await;
-}
-
-/// The mirror: a client built before capabilities, which pings first after 3 s.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_old_client_and_a_current_server_work_without_the_extensions() {
-    let gateway = Gateway::start_registered("fc-old-client", true, true, false).await;
-    let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
-
-    assert_works_without_the_extensions(&gateway).await;
-    assert_still_connected(&gateway, &server_side, &client_side).await;
-}
-
-/// A frame the old side does not know closes its gateway connection within moments - the
-/// original connections still being there means none went over.
-async fn assert_still_connected(
-    gateway: &Gateway,
-    server_side: &Arc<TcpGatewayConnection>,
-    client_side: &Arc<TcpGatewayConnection>,
-) {
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    assert!(server_side.is_gateway_connected());
-    assert!(client_side.is_gateway_connected());
-    assert!(Arc::ptr_eq(&gateway.server_side(), server_side));
-    assert!(Arc::ptr_eq(&gateway.client_side(), client_side));
-}
-
-/// Connections opened at once, from both ends, while the capabilities are still on the way; then
-/// echoes, ends of every kind, and a slow reader holding more than a window - no bound without
-/// flow control.
-async fn assert_works_without_the_extensions(gateway: &Gateway) {
-    let echo_upstream = start_upstream(|stream| echo(stream, None)).await;
-
-    let mut streams = Vec::new();
-    for _ in 0..3 {
-        streams.push(gateway.connect_from_client(echo_upstream).await);
-        streams.push(gateway.connect_from_server(echo_upstream).await);
-    }
-
-    gateway.wait_for_capabilities().await;
-    assert!(!gateway.server_side().flow_control_enabled());
-    assert!(!gateway.client_side().flow_control_enabled());
-    assert!(!gateway.server_side().fin_rst_enabled());
-    assert!(!gateway.client_side().fin_rst_enabled());
-
-    for stream in streams.iter_mut() {
-        assert!(!stream.is_flow_controlled());
-        assert_echoes(stream).await;
-    }
-
-    // Uploads past the credit threshold, each end acting as the acceptor: an acceptor which
-    // credited a plain connection would send the other end a frame it does not know, and that
-    // end would close the gateway connection.
-    let upload = Arc::new(pseudo_random(2 * 1024 * 1024));
-    let (collected_tx, mut collected) = mpsc::unbounded_channel();
-    let collecting =
-        start_upstream(move |stream| collect(stream, collected_tx.clone(), Duration::ZERO)).await;
-    for from_server in [false, true] {
-        let mut stream = if from_server {
-            gateway.connect_from_server(collecting).await
-        } else {
-            gateway.connect_from_client(collecting).await
-        };
-        stream.write_to_socket(&upload).await.unwrap();
-        stream.disconnect();
-
-        let received = tokio::time::timeout(Duration::from_secs(60), collected.recv())
-            .await
-            .expect("the upload did not arrive")
-            .unwrap();
-        assert!(received == *upload);
-    }
-
-    // Ends of every kind, each end acting as the initiator: a FIN or an RST which leaked would
-    // close the old side's gateway connection. A reset still reads as one, by the text.
-    let resetting = start_upstream(|stream| reset_after(stream, b"cut short")).await;
-    for from_server in [false, true] {
-        let mut stream = connect_from(gateway, from_server, resetting).await;
-        assert_eq!(read_to_end(&mut stream).await, Err(b"cut short".to_vec()));
-
-        let mut stream = connect_from(gateway, from_server, echo_upstream).await;
-        assert_echoes(&mut stream).await;
-        stream.abort();
-
-        let mut stream = connect_from(gateway, from_server, echo_upstream).await;
-        assert_echoes(&mut stream).await;
-        stream.disconnect();
-    }
-
-    let data = Arc::new(pseudo_random(FLOW_CONTROL_WINDOW + 4 * 1024 * 1024));
-    let upstream = {
-        let data = data.clone();
-        start_upstream(move |stream| send_and_close(stream, data.clone())).await
-    };
-
-    let mut stream = gateway.connect_from_client(upstream).await;
-    wait_until_within(Duration::from_secs(60), || {
-        stream.buffered_for_tests() > FLOW_CONTROL_WINDOW
-    })
-    .await;
-
-    assert!(read_to_end(&mut stream).await.unwrap() == *data);
-}
-
-/// Each frame of an extension at a side built without it tears that side's gateway connection
-/// down - which is what proves the tests above would see a frame that leaked.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_side_built_without_the_extensions_closes_on_their_frames() {
-    let frames = [
-        TcpGatewayContract::WindowUpdate {
-            connection_id: 1,
-            credit: 1,
-        },
-        TcpGatewayContract::Connect {
-            connection_id: 1,
-            timeout: CONNECT_TIMEOUT,
-            remote_host: "127.0.0.1:1",
-            receive_window: Some(FLOW_CONTROL_WINDOW as u32),
-        },
-        TcpGatewayContract::Fin { connection_id: 1 },
-        TcpGatewayContract::Rst {
-            connection_id: 1,
-            reason: "broken",
-        },
-    ];
-
-    for (index, frame) in frames.iter().enumerate() {
-        let gateway =
-            Gateway::start_registered(&format!("fc-leak-{index}"), false, false, true).await;
-        gateway.wait_for_capabilities().await;
-
-        let server_side = gateway.server_side();
-        gateway.client_side().send_payload(frame);
-
-        wait_until(|| !server_side.is_gateway_connected()).await;
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn plain_and_flow_controlled_connections_share_a_gateway_connection() {
-    let gateway = Gateway::start("fc-mixed", false).await;
-
-    let data = Arc::new(pseudo_random(FLOW_CONTROL_WINDOW + 4 * 1024 * 1024));
-    let upstream = {
-        let data = data.clone();
-        start_upstream(move |stream| send_and_close(stream, data.clone())).await
-    };
-
-    let mut plain = gateway
-        .client_side()
-        .connect_to_forward_proxy_connection_plain(
-            endpoint(upstream),
-            CONNECT_TIMEOUT,
-            gateway.client.get_next_connection_id(),
-        )
-        .await
-        .unwrap();
-    let mut flow_controlled = gateway.connect_from_client(upstream).await;
-
-    assert!(!plain.is_flow_controlled());
-    assert!(flow_controlled.is_flow_controlled());
-
-    // Neither is read: the plain one takes it all, the flow-controlled one stops at its window.
-    wait_until_within(Duration::from_secs(60), || {
-        plain.buffered_for_tests() == data.len()
-    })
-    .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(flow_controlled.buffered_for_tests() <= FLOW_CONTROL_WINDOW);
-
-    assert!(read_to_end(&mut plain).await.unwrap() == *data);
-    assert!(read_to_end(&mut flow_controlled).await.unwrap() == *data);
-}
-
-/// Connects opened right after the gateway connection came up wait for the capabilities instead
-/// of going plain for good - pools dial exactly then, after every reconnect.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn connections_opened_right_after_registration_get_flow_control() {
-    let gateway = Arc::new(Gateway::start_registered("fc-early", false, true, true).await);
+async fn connections_opened_right_after_registration_work() {
+    let gateway = Arc::new(Gateway::start("fc-early", false).await);
     let upstream = start_upstream(|stream| echo(stream, None)).await;
 
     let tasks: Vec<_> = (0..20)
@@ -1834,7 +1521,6 @@ async fn connections_opened_right_after_registration_get_flow_control() {
                     gateway.connect_from_server(upstream).await
                 };
 
-                assert!(stream.is_flow_controlled());
                 assert_echoes(&mut stream).await;
             })
         })
@@ -1849,7 +1535,7 @@ async fn connections_opened_right_after_registration_get_flow_control() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_reconnect_negotiates_flow_control_again() {
+async fn connections_open_again_after_a_reconnect() {
     let gateway = Gateway::start("fc-reconnect", false).await;
     let (first_server_side, first_client_side) = (gateway.server_side(), gateway.client_side());
 
@@ -1858,7 +1544,7 @@ async fn a_reconnect_negotiates_flow_control_again() {
     wait_until(|| {
         let renewed = |side: Option<Arc<TcpGatewayConnection>>,
                        first: &Arc<TcpGatewayConnection>| {
-            side.is_some_and(|side| !Arc::ptr_eq(&side, first) && side.flow_control_enabled())
+            side.is_some_and(|side| !Arc::ptr_eq(&side, first))
         };
 
         renewed(
@@ -1873,7 +1559,10 @@ async fn a_reconnect_negotiates_flow_control_again() {
 
     let upstream = start_upstream(|stream| echo(stream, None)).await;
     let mut stream = gateway.connect_from_client(upstream).await;
-    assert!(stream.is_flow_controlled());
+    assert_eq!(
+        stream.send_window_for_tests().available_permits(),
+        FLOW_CONTROL_WINDOW
+    );
     assert_echoes(&mut stream).await;
 }
 
@@ -2056,7 +1745,7 @@ async fn a_poll_write_waits_for_credit_without_holding_budget() {
     let upstream = start_upstream(discard).await;
 
     let mut stream = gateway.connect_from_client(upstream).await;
-    let window = stream.send_window_for_tests().unwrap();
+    let window = stream.send_window_for_tests();
     let budget = gateway.client_side().write_budget_for_tests().unwrap();
 
     // No credit: Pending, and no budget asked for meanwhile.
@@ -2198,7 +1887,7 @@ async fn a_writer_waiting_for_credit_wakes_on_every_close() {
 
     // Two writers on the poll_write path, both parked on an empty window.
     let stream = gateway.connect_from_client(silent).await;
-    let window = stream.send_window_for_tests().unwrap();
+    let window = stream.send_window_for_tests();
     window.forget_permits(window.available_permits());
     let writers: Vec<_> = (0..2)
         .map(|_| {
@@ -2438,36 +2127,25 @@ async fn credit_beyond_reason_saturates_and_credit_for_nothing_is_ignored() {
     let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
     let upstream = start_upstream(|stream| echo(stream, None)).await;
 
+    // One the client opened, found among the client's own connections, and one the server
+    // opened, found among those the client accepted.
     let connection_id = gateway.client.get_next_connection_id();
     let mut stream = client_side
         .connect_to_forward_proxy_connection(endpoint(upstream), CONNECT_TIMEOUT, connection_id)
         .await
         .unwrap();
-
-    // Plain connections: one the client opened, found among the client's own connections, and
-    // one the server opened, found among those the client accepted.
-    let plain_id = gateway.client.get_next_connection_id();
-    let mut plain = client_side
-        .connect_to_forward_proxy_connection_plain(endpoint(upstream), CONNECT_TIMEOUT, plain_id)
-        .await
-        .unwrap();
-    let accepted_plain_id = gateway.server.get_next_connection_id();
-    let mut accepted_plain = server_side
-        .connect_to_forward_proxy_connection_plain(
-            endpoint(upstream),
-            CONNECT_TIMEOUT,
-            accepted_plain_id,
-        )
+    let accepted_id = gateway.server.get_next_connection_id();
+    let mut accepted = server_side
+        .connect_to_forward_proxy_connection(endpoint(upstream), CONNECT_TIMEOUT, accepted_id)
         .await
         .unwrap();
 
-    // Twice the most credit there may be, credit for the plain connections, and for an id nobody
-    // opened.
+    // Twice the most credit there may be, for each of them, and credit for an id nobody opened.
     for target in [
         connection_id,
         connection_id,
-        plain_id,
-        accepted_plain_id,
+        accepted_id,
+        accepted_id,
         0x7fff_fff0,
     ] {
         server_side.send_payload(&TcpGatewayContract::WindowUpdate {
@@ -2475,22 +2153,214 @@ async fn credit_beyond_reason_saturates_and_credit_for_nothing_is_ignored() {
             credit: u32::MAX,
         });
     }
-    client_side.send_payload(&TcpGatewayContract::WindowUpdate {
-        connection_id: accepted_plain_id,
-        credit: u32::MAX,
-    });
 
-    let window = stream.send_window_for_tests().unwrap();
+    let window = stream.send_window_for_tests();
     wait_until(|| window.available_permits() == MAX_SEND_CREDIT).await;
+    let accepted_on_client = client_side.get_forward_connection(accepted_id).unwrap();
+    wait_until(|| accepted_on_client.send_window().available_permits() == MAX_SEND_CREDIT).await;
 
     assert_echoes(&mut stream).await;
-    assert_echoes(&mut plain).await;
-    assert_echoes(&mut accepted_plain).await;
+    assert_echoes(&mut accepted).await;
     assert!(Arc::ptr_eq(&gateway.server_side(), &server_side));
     assert!(Arc::ptr_eq(&gateway.client_side(), &client_side));
 }
 
+/// A window under the protocol floor is refused by the acceptor, before it connects to anything;
+/// at the floor the connect goes through, the acceptor's window right ahead of its CONNECT_OK.
+#[tokio::test]
+async fn a_connect_with_a_window_under_the_floor_is_refused() {
+    const NAME: &str = "small-window";
+
+    let key = signing_key();
+    let (server, port) = start_server(&key, None).await;
+    let mut client = RawClient::connect(&server, port, &key, NAME).await;
+
+    let (accepted_tx, mut accepted) = mpsc::unbounded_channel();
+    let upstream = start_upstream(move |stream| {
+        let _ = accepted_tx.send(());
+        echo(stream, None)
+    })
+    .await;
+    let remote_host = format!("127.0.0.1:{upstream}");
+
+    let connect = |connection_id, receive_window: usize| TcpGatewayContract::Connect {
+        connection_id,
+        timeout: CONNECT_TIMEOUT,
+        remote_host: remote_host.as_str(),
+        receive_window: receive_window as u32,
+    };
+
+    client.send(&connect(7, MIN_RECEIVE_WINDOW - 1)).await;
+    let answer = client.read_frame().await;
+    match TcpGatewayContract::parse(&answer).unwrap() {
+        TcpGatewayContract::ConnectionError {
+            connection_id: 7,
+            error,
+        } => assert!(error.contains("window out of range"), "{error}"),
+        other => panic!("answered with {other:?}"),
+    }
+    assert!(accepted.try_recv().is_err(), "the target was connected to");
+
+    client.send(&connect(8, MIN_RECEIVE_WINDOW)).await;
+    assert!(matches!(
+        TcpGatewayContract::parse(&client.read_frame().await).unwrap(),
+        TcpGatewayContract::WindowUpdate {
+            connection_id: 8,
+            credit
+        } if credit as usize == FLOW_CONTROL_WINDOW
+    ));
+    assert!(matches!(
+        TcpGatewayContract::parse(&client.read_frame().await).unwrap(),
+        TcpGatewayContract::Connected { connection_id: 8 }
+    ));
+}
+
+/// The floor on the initiator's side: a CONNECT_OK which finds less credit than the floor fails
+/// the connect, and the acceptor is told to close what it connected.
+#[tokio::test]
+async fn a_connect_answered_with_too_little_credit_fails() {
+    const NAME: &str = "little-credit";
+
+    let key = signing_key();
+    let (server, port) = start_server(&key, None).await;
+    let mut client = RawClient::connect(&server, port, &key, NAME).await;
+    let server_side = server.get_gateway_connection(NAME).unwrap();
+
+    let connection_id = server.get_next_connection_id();
+    let connecting = {
+        let server_side = server_side.clone();
+        tokio::spawn(async move {
+            server_side
+                .connect_to_forward_proxy_connection(endpoint(1), CONNECT_TIMEOUT, connection_id)
+                .await
+                .map(|_| ())
+        })
+    };
+
+    match TcpGatewayContract::parse(&client.read_frame().await).unwrap() {
+        TcpGatewayContract::Connect {
+            connection_id: id,
+            receive_window,
+            ..
+        } => {
+            assert_eq!(id, connection_id);
+            assert_eq!(receive_window as usize, FLOW_CONTROL_WINDOW);
+        }
+        other => panic!("opened with {other:?}"),
+    }
+
+    client
+        .send(&TcpGatewayContract::WindowUpdate {
+            connection_id,
+            credit: (MIN_RECEIVE_WINDOW - 1) as u32,
+        })
+        .await;
+    client
+        .send(&TcpGatewayContract::Connected { connection_id })
+        .await;
+
+    let err = tokio::time::timeout(TIMEOUT, connecting)
+        .await
+        .expect("the connect got no answer")
+        .unwrap()
+        .expect_err("a connect with too little credit went through");
+    assert!(err.contains("window out of range"), "{err}");
+
+    assert!(matches!(
+        TcpGatewayContract::parse(&client.read_frame().await).unwrap(),
+        TcpGatewayContract::Fin { connection_id: id } if id == connection_id
+    ));
+    assert_eq!(server_side.get_forward_proxy_connections_amount(), 0);
+}
+
+/// A frame of a type which is none any more - `CONNECT` without a window, type 3 of protocol
+/// version 1 - closes the gateway connection of whichever end gets it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_frame_type_which_is_none_any_more_closes_the_gateway_connection() {
+    // The type, a connection id, a timeout and a host.
+    let connect_without_a_window = [3u8, 1, 0, 0, 0, 5, b'h', b':', b'1'];
+
+    for to_server in [true, false] {
+        let gateway = Gateway::start(&format!("gone-type-{to_server}"), false).await;
+        let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
+        let (sender, receiver) = if to_server {
+            (&client_side, &server_side)
+        } else {
+            (&server_side, &client_side)
+        };
+
+        assert!(sender.send_raw_frame_for_tests(&connect_without_a_window));
+
+        wait_until(|| !receiver.is_gateway_connected()).await;
+    }
+}
+
 // FIN and RST.
+
+#[test]
+fn an_end_goes_as_fin_or_rst() {
+    assert!(matches!(
+        ConnectionEnd::Closed.to_contract(3),
+        TcpGatewayContract::Fin { connection_id: 3 }
+    ));
+    assert!(matches!(
+        ConnectionEnd::Reset("broken").to_contract(3),
+        TcpGatewayContract::Rst {
+            connection_id: 3,
+            reason: "broken"
+        }
+    ));
+}
+
+/// CONNECTION_ERROR ends a connection as a reset, whatever its text says - the texts which stood
+/// in for a clean close in protocol version 1 as well: at the initiator the reader gets an error,
+/// at the acceptor the target connection is reset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_connection_error_is_a_reset_whatever_its_text_says() {
+    let gateway = Gateway::start("connection-error", false).await;
+    let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
+    let (arrived_tx, mut arrived) = mpsc::unbounded_channel();
+    let (ended_tx, mut ended) = mpsc::unbounded_channel();
+    let upstream = start_upstream(move |stream| {
+        read_until_the_end(stream, 5, arrived_tx.clone(), ended_tx.clone())
+    })
+    .await;
+
+    for text in [
+        "",
+        "ReadLoop. Connection to 127.0.0.1:1 with id:1 is disconnected",
+        "Connection is not found",
+    ] {
+        let connection_id = gateway.client.get_next_connection_id();
+        let mut stream = client_side
+            .connect_to_forward_proxy_connection(endpoint(upstream), CONNECT_TIMEOUT, connection_id)
+            .await
+            .unwrap();
+        stream.write_to_socket(b"hello").await.unwrap();
+        tokio::time::timeout(TIMEOUT, arrived.recv())
+            .await
+            .expect("the data did not arrive");
+
+        server_side.send_payload(&TcpGatewayContract::ConnectionError {
+            connection_id,
+            error: text,
+        });
+        assert!(
+            read_to_end(&mut stream).await.is_err(),
+            "{text:?} reached the reader as the end of the stream"
+        );
+
+        client_side.send_payload(&TcpGatewayContract::ConnectionError {
+            connection_id,
+            error: text,
+        });
+        let end = tokio::time::timeout(TIMEOUT, ended.recv())
+            .await
+            .expect("the target's connection did not end")
+            .unwrap();
+        assert_eq!(end, StreamEnd::Reset, "{text:?} at the acceptor");
+    }
+}
 
 #[test]
 fn fin_and_rst_round_trip() {
@@ -2519,47 +2389,6 @@ fn fin_and_rst_round_trip() {
             }
             other => panic!("{other:?}"),
         }
-    }
-}
-
-/// A peer without FIN and RST gets CONNECTION_ERROR texts - which a peer with them reads back as
-/// the same end, whatever the reason says.
-#[test]
-fn a_peer_without_fin_and_rst_gets_texts_which_read_as_the_same_end() {
-    assert!(matches!(
-        ConnectionEnd::Closed.to_contract(3, true, ""),
-        TcpGatewayContract::Fin { connection_id: 3 }
-    ));
-    assert!(matches!(
-        ConnectionEnd::Reset("broken").to_contract(3, true, ""),
-        TcpGatewayContract::Rst {
-            connection_id: 3,
-            reason: "broken"
-        }
-    ));
-
-    let target_closed = target_closed_message("127.0.0.1:1", 3);
-    for (end, closed_text) in [
-        (ConnectionEnd::Closed, ""),
-        (ConnectionEnd::Closed, target_closed.as_str()),
-        (ConnectionEnd::Reset("broken"), ""),
-        // Reasons which would read as a clean close.
-        (ConnectionEnd::Reset(""), ""),
-        (ConnectionEnd::Reset(target_closed.as_str()), ""),
-    ] {
-        let TcpGatewayContract::ConnectionError {
-            connection_id: 3,
-            error,
-        } = end.to_contract(3, false, closed_text)
-        else {
-            panic!("{end:?} went as another frame");
-        };
-
-        assert_eq!(
-            ConnectionEnd::from_connection_error(error) == ConnectionEnd::Closed,
-            end == ConnectionEnd::Closed,
-            "{end:?} went as {error:?}"
-        );
     }
 }
 
@@ -3189,6 +3018,882 @@ async fn an_h2_websocket_session_which_fails_resets_the_upstream() {
     drop(tunnel);
 }
 
+// Speed, limits and liveness.
+
+/// The compression level is the client's setting, and it holds for both directions: the server
+/// packs what it sends with the level its client asked for in its handshake. With it off neither
+/// end packs. What an end counts as sent and as received is what is on the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_compression_level_of_the_client_holds_for_both_directions() {
+    let text = Arc::new(compressible(4 * 1024 * 1024, 1));
+
+    // What the text went as up, at every level.
+    let mut sent_up = Vec::new();
+
+    for compression in CompressionLevel::all() {
+        let name = format!("packed-{}", compression.as_u8());
+        let gateway = Gateway::start_at(&name, compression).await;
+        let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
+
+        assert_eq!(client_side.compression(), compression);
+        assert_eq!(server_side.compression(), compression);
+
+        let compress = compression.is_on();
+
+        // Up: what the client sends, as it leaves and as the server gets it off the wire.
+        let (collected_tx, mut collected) = mpsc::unbounded_channel();
+        let upstream =
+            start_upstream(move |stream| collect(stream, collected_tx.clone(), Duration::ZERO))
+                .await;
+        // Counted from before the connection is there: nothing of it is missed.
+        client_side.out_per_second.get_per_second();
+        server_side.in_per_second.get_per_second();
+        let mut stream = gateway.connect_from_client(upstream).await;
+        stream.write_to_socket(&text).await.unwrap();
+        stream.disconnect();
+        let received = tokio::time::timeout(TIMEOUT, collected.recv())
+            .await
+            .expect("the upstream connection is closed")
+            .unwrap();
+        assert!(received == *text);
+        let up = [
+            sent_by(&client_side, if compress { 0 } else { text.len() }).await,
+            server_side.in_per_second.get_per_second(),
+        ];
+
+        // Down: what the server sends, as it leaves and as the client gets it off the wire.
+        let upstream = {
+            let text = text.clone();
+            start_upstream(move |stream| send_and_close(stream, text.clone())).await
+        };
+        // The upstream sends as soon as it is connected to - before the connect is answered.
+        server_side.out_per_second.get_per_second();
+        client_side.in_per_second.get_per_second();
+        let mut stream = gateway.connect_from_client(upstream).await;
+        assert!(read_to_end(&mut stream).await.unwrap() == *text);
+        let down = [
+            sent_by(&server_side, if compress { 0 } else { text.len() }).await,
+            client_side.in_per_second.get_per_second(),
+        ];
+
+        for on_the_wire in up.into_iter().chain(down) {
+            if compress {
+                assert!(
+                    on_the_wire < text.len() / 2,
+                    "{name}: {} bytes went as {up:?} up and {down:?} down",
+                    text.len()
+                );
+            } else {
+                assert!(
+                    on_the_wire >= text.len(),
+                    "{name}: {} bytes went as {up:?} up and {down:?} down",
+                    text.len()
+                );
+            }
+        }
+
+        sent_up.push(up[1]);
+    }
+
+    // The levels are not one algorithm under several names: what Zstandard packs is smaller
+    // than what LZ4 does.
+    for zstd_level in 2..sent_up.len() {
+        assert!(
+            sent_up[zstd_level] < sent_up[1],
+            "level {zstd_level} sent as much as LZ4: {sent_up:?}"
+        );
+    }
+}
+
+/// What `side` has counted as sent. A writer counts a write right after it is done, which may be
+/// a moment after the peer has what was written: this waits for `at_least` bytes, for a second.
+async fn sent_by(side: &TcpGatewayConnection, at_least: usize) -> usize {
+    let mut sent = side.out_per_second.get_per_second();
+
+    for _ in 0..200 {
+        if sent >= at_least {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        sent += side.out_per_second.get_per_second();
+    }
+
+    sent
+}
+
+/// The biggest file a response carries - one which can not be made smaller - served by either
+/// end with compression on, whatever the level: the frame which carries it is within what the
+/// other end accepts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_biggest_file_is_served_by_either_end_with_compression_on() {
+    let dir = std::env::temp_dir().join(format!("gateway-biggest-file-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("biggest.bin");
+    let content = pseudo_random(MAX_FILE_RESPONSE_SIZE);
+    std::fs::write(&file, &content).unwrap();
+    let path = file.to_str().unwrap();
+
+    for compression in CompressionLevel::all().filter(|level| level.is_on()) {
+        let name = format!("biggest-file-{}", compression.as_u8());
+        let gateway = Gateway::start_at(&name, compression).await;
+        let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
+
+        assert!(
+            server_side.request_file(path).await.ok().as_deref() == Some(content.as_slice()),
+            "{name}"
+        );
+        assert!(
+            client_side.request_file(path).await.ok().as_deref() == Some(content.as_slice()),
+            "{name}"
+        );
+
+        assert!(Arc::ptr_eq(&gateway.server_side(), &server_side));
+        assert!(Arc::ptr_eq(&gateway.client_side(), &client_side));
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Many connections at once, opened from both ends, each echoing data of its own - in pieces of
+/// its own size, some of it text and some of it noise: nothing of one connection ends up in
+/// another, whatever the batches are packed with, and nothing is left registered once they are
+/// done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn many_connections_at_once_keep_their_data_apart() {
+    for compression in CompressionLevel::all() {
+        let name = &format!("many-{}", compression.as_u8());
+        let gateway = Gateway::start_at(name, compression).await;
+        let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
+        let upstream = start_upstream(|stream| echo(stream, None)).await;
+
+        let mut transfers = Vec::new();
+        for no in 0..120usize {
+            let stream = if no % 2 == 0 {
+                gateway.connect_from_client(upstream).await
+            } else {
+                gateway.connect_from_server(upstream).await
+            };
+
+            let size = [1, 100, 4096, 65_536, 300_000, 1_500_000, 3_000_000][no % 7] + no;
+            let data = if no % 3 == 0 {
+                compressible(size, no as u64)
+            } else {
+                pseudo_random_seeded(size, no as u64)
+            };
+            let piece = 1 + (no * 7919) % (300 * 1024);
+
+            transfers.push(tokio::spawn(echo_round_trip_of(stream, data, piece)));
+        }
+
+        for transfer in transfers {
+            tokio::time::timeout(Duration::from_secs(120), transfer)
+                .await
+                .unwrap_or_else(|_| panic!("{name}: a transfer stalled"))
+                .unwrap();
+        }
+
+        assert!(Arc::ptr_eq(&gateway.server_side(), &server_side));
+        wait_until(|| {
+            client_side.get_forward_proxy_connections_amount() == 0
+                && client_side.get_forward_connections_amount() == 0
+                && server_side.get_forward_proxy_connections_amount() == 0
+                && server_side.get_forward_connections_amount() == 0
+        })
+        .await;
+    }
+}
+
+/// What a client puts on the wire first: a PING, at once, with nothing in it.
+#[tokio::test]
+async fn a_client_pings_as_soon_as_it_is_connected() {
+    const NAME: &str = "first-ping";
+
+    let key = signing_key();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _client = start_client(NAME, &key, port, false);
+
+    let (mut stream, _) = tokio::time::timeout(TIMEOUT, listener.accept())
+        .await
+        .expect("the client did not connect")
+        .unwrap();
+    let outcome = handshake::perform_server_handshake(&mut stream, &[key.verifying_key()])
+        .await
+        .unwrap();
+    let (_sealer, mut opener) = outcome.session_keys.into_server_ends();
+
+    let connected = Instant::now();
+    let frames = tokio::time::timeout(
+        TIMEOUT,
+        session::read_frame_for_tests(&mut stream, &mut opener),
+    )
+    .await
+    .expect("the client sent nothing");
+
+    // Well before the second one is due.
+    assert!(
+        connected.elapsed() < Duration::from_secs(2),
+        "the first frame took {:?}",
+        connected.elapsed()
+    );
+    assert_eq!(frames, vec![vec![0u8]]);
+}
+
+/// A frame which is not what the peer sealed - a bit changed on the way - ends the gateway
+/// connection: nothing of it reaches a handler.
+#[tokio::test]
+async fn a_frame_which_does_not_open_closes_the_gateway_connection() {
+    const NAME: &str = "raw-client";
+
+    let key = signing_key();
+    let (server, port) = start_server(&key, None).await;
+
+    let mut client = RawClient::connect(&server, port, &key, NAME).await;
+
+    // As a client sends it: the server answers - and the PONG is the first frame it sends at all.
+    client.send(&TcpGatewayContract::Ping).await;
+    assert_eq!(client.read_frame().await, vec![1u8]);
+
+    // With one bit changed on the way.
+    let mut changed = client.seal(&TcpGatewayContract::Ping);
+    *changed.last_mut().unwrap() ^= 1;
+    client.stream.write_all(&changed).await.unwrap();
+
+    wait_until(|| server.get_gateway_connection(NAME).is_none()).await;
+
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(TIMEOUT, client.stream.read_to_end(&mut rest)).await;
+    assert!(closed.is_ok(), "the server did not close the socket");
+    assert!(rest.is_empty(), "the frame which did not open was answered");
+}
+
+/// What a peer may not send ends the gateway connection, whichever of the two read-side tasks
+/// finds it - and the socket is closed for good, its reading side too: a peer which goes on
+/// writing gets an error instead of a socket which takes its bytes and handles none.
+#[tokio::test]
+async fn what_a_peer_may_not_send_closes_the_gateway_connection() {
+    type Bad = Box<dyn Fn(&mut RawClient) -> Vec<u8>>;
+
+    let sealed = |batch: Vec<u8>| -> Bad { Box::new(move |client| client.seal_batch(&batch)) };
+
+    let cases: Vec<(&str, Bad)> = vec![
+        (
+            "a frame bigger than the limit",
+            Box::new(|_| ((MAX_PAYLOAD_SIZE + 1) as u32).to_le_bytes().to_vec()),
+        ),
+        (
+            "a frame which is a tag and nothing else",
+            Box::new(|_| {
+                let mut wire = (session::FRAME_TAG_LEN as u32).to_le_bytes().to_vec();
+                wire.extend_from_slice(&[0u8; session::FRAME_TAG_LEN]);
+                wire
+            }),
+        ),
+        (
+            "a batch of a kind which is none",
+            sealed(vec![7, 1, 0, 0, 0, 0]),
+        ),
+        (
+            "a packed batch which says it unpacks to more than the limit",
+            {
+                let mut batch = vec![session::BATCH_LZ4];
+                batch.extend_from_slice(&(MAX_DECOMPRESSED_BATCH_SIZE as u32 + 1).to_le_bytes());
+                batch.extend_from_slice(&[0u8; 32]);
+                sealed(batch)
+            },
+        ),
+        (
+            "a batch packed with zstd which says it unpacks to more than the limit",
+            {
+                let mut batch = vec![session::BATCH_ZSTD];
+                batch.extend_from_slice(&(MAX_DECOMPRESSED_BATCH_SIZE as u32 + 1).to_le_bytes());
+                batch.extend_from_slice(&[0u8; 32]);
+                sealed(batch)
+            },
+        ),
+        ("a batch said to be packed with lz4 which is not", {
+            let mut batch = vec![session::BATCH_LZ4];
+            batch.extend_from_slice(&1000u32.to_le_bytes());
+            batch.extend_from_slice(&pseudo_random(300));
+            sealed(batch)
+        }),
+        ("a batch said to be packed with zstd which is not", {
+            let mut batch = vec![session::BATCH_ZSTD];
+            batch.extend_from_slice(&1000u32.to_le_bytes());
+            batch.extend_from_slice(&pseudo_random(300));
+            sealed(batch)
+        }),
+        (
+            "an inner frame cut short",
+            sealed(vec![session::BATCH_STORED, 9, 0, 0, 0, 0]),
+        ),
+        (
+            "bytes behind the last inner frame",
+            sealed(vec![session::BATCH_STORED, 1, 0, 0, 0, 0, 0xff, 0xff]),
+        ),
+        (
+            "an inner frame with nothing in it",
+            sealed(vec![session::BATCH_STORED, 0, 0, 0, 0]),
+        ),
+        (
+            "an inner frame of a type which is none",
+            sealed(vec![session::BATCH_STORED, 1, 0, 0, 0, 99]),
+        ),
+    ];
+
+    for (index, (what, bad)) in cases.iter().enumerate() {
+        let name = format!("may-not-send-{index}");
+        let key = signing_key();
+        let (server, port) = start_server(&key, None).await;
+        let mut client = RawClient::connect(&server, port, &key, &name).await;
+
+        // It speaks the protocol: until the frame under test the server answers it.
+        client.send(&TcpGatewayContract::Ping).await;
+        assert_eq!(client.read_frame().await, vec![1u8], "{what}");
+
+        let wire = bad(&mut client);
+        client.stream.write_all(&wire).await.unwrap();
+
+        tokio::time::timeout(TIMEOUT, async {
+            while server.get_gateway_connection(&name).is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}: the gateway connection is still there"));
+
+        let mut refused = false;
+        for _ in 0..100 {
+            if client.stream.write_all(&[0u8; 1024]).await.is_err() {
+                refused = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            refused,
+            "{what}: the socket still takes what is written to it"
+        );
+    }
+}
+
+/// A healthy link is not given up: an idle gateway held past the client's dead-peer check - 9
+/// seconds of silence, looked at every 3 - is still the same pair of connected objects. The
+/// client records what comes in, and the server answers every PING.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_healthy_gateway_outlives_the_dead_peer_check() {
+    let gateway = Gateway::start("idle-healthy", false).await;
+    let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
+
+    tokio::time::sleep(Duration::from_secs(15)).await;
+
+    assert!(client_side.is_gateway_connected() && server_side.is_gateway_connected());
+    assert!(Arc::ptr_eq(&gateway.client_side(), &client_side));
+    assert!(Arc::ptr_eq(&gateway.server_side(), &server_side));
+
+    // And it works.
+    let upstream = start_upstream(|stream| echo(stream, None)).await;
+    let mut stream = gateway.connect_from_client(upstream).await;
+    assert_echoes(&mut stream).await;
+}
+
+/// A client whose key the server does not list is not let in, whatever it signs.
+#[tokio::test]
+async fn a_client_with_a_key_which_is_not_authorized_is_not_let_in() {
+    let key = signing_key();
+    let (server, port) = start_server(&key, None).await;
+
+    let _stranger = start_client("stranger", &signing_key(), port, false);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(server.get_gateway_connection("stranger").is_none());
+
+    let _known = start_client("known", &key, port, false);
+    wait_until(|| server.get_gateway_connection("known").is_some()).await;
+    assert!(server.get_gateway_connection("stranger").is_none());
+}
+
+/// A link which goes silent without closing anything - a route which died. The client gives the
+/// connection up within its dead-peer check, what waits on it fails, and once the link passes
+/// bytes again the gateway is back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_link_is_given_up_and_the_gateway_comes_back() {
+    const NAME: &str = "silent-link";
+
+    let key = signing_key();
+    let (server, server_port) = start_server(&key, None).await;
+    let link = Link::start(server_port).await;
+    let client = start_client(NAME, &key, link.port, false);
+
+    wait_until(|| {
+        server.get_gateway_connection(NAME).is_some()
+            && client.get_gateway_connection(NAME).is_some()
+    })
+    .await;
+    let client_before = client.get_gateway_connection(NAME).unwrap();
+    let server_before = server.get_gateway_connection(NAME).unwrap();
+
+    let upstream = start_upstream(|stream| echo(stream, None)).await;
+    let mut stream = client_before
+        .connect_to_forward_proxy_connection(
+            endpoint(upstream),
+            CONNECT_TIMEOUT,
+            client.get_next_connection_id(),
+        )
+        .await
+        .unwrap();
+    assert_echoes(&mut stream).await;
+
+    let went_silent = Instant::now();
+    link.go_silent();
+
+    // A request in flight when the link dies.
+    let in_flight = tokio::spawn(async move {
+        let _ = stream.write_to_socket(b"into the void").await;
+        let mut buf = [0u8; 64];
+        stream.read_from_socket(&mut buf).await
+    });
+
+    // 9 seconds of silence, looked at every 3.
+    wait_until_within(Duration::from_secs(20), || {
+        !client_before.is_gateway_connected()
+    })
+    .await;
+    assert!(went_silent.elapsed() >= Duration::from_secs(9));
+
+    let answer = tokio::time::timeout(TIMEOUT, in_flight)
+        .await
+        .expect("what waited on the dead link was left waiting")
+        .unwrap();
+    assert!(
+        answer.is_err(),
+        "a request cut by a dead link must read as an error"
+    );
+
+    // The link passes new connections again: the client is back, and the server lets its side
+    // of the dead connection go for the new one.
+    wait_until_within(Duration::from_secs(20), || {
+        client
+            .get_gateway_connection(NAME)
+            .is_some_and(|connection| !Arc::ptr_eq(&connection, &client_before))
+            && server
+                .get_gateway_connection(NAME)
+                .is_some_and(|connection| !Arc::ptr_eq(&connection, &server_before))
+    })
+    .await;
+    assert!(!server_before.is_gateway_connected());
+
+    let mut stream = client
+        .get_gateway_connection(NAME)
+        .unwrap()
+        .connect_to_forward_proxy_connection(
+            endpoint(upstream),
+            CONNECT_TIMEOUT,
+            client.get_next_connection_id(),
+        )
+        .await
+        .unwrap();
+    assert_echoes(&mut stream).await;
+}
+
+/// A client which vanished and can not come back. Nothing tells the server: it finds out by the
+/// silence, and stops routing to the client once that has lasted for the read timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_server_drops_a_client_silent_for_the_read_timeout() {
+    const NAME: &str = "vanished-client";
+
+    let key = signing_key();
+    let (server, server_port) = start_server(&key, None).await;
+    let link = Link::start(server_port).await;
+    let _client = start_client(NAME, &key, link.port, false);
+
+    wait_until(|| server.get_gateway_connection(NAME).is_some()).await;
+    let server_side = server.get_gateway_connection(NAME).unwrap();
+
+    let went_silent = Instant::now();
+    link.go_silent_for_good();
+
+    wait_until_within(Duration::from_secs(45), || {
+        !server_side.is_gateway_connected()
+    })
+    .await;
+    assert!(went_silent.elapsed() >= Duration::from_secs(25));
+    wait_until(|| server.get_gateway_connection(NAME).is_none()).await;
+}
+
+/// What the tunnel moves per second at every compression level, and how much smaller the data
+/// is on the wire for it: one connection, both directions. For a release build:
+/// `cargo test --release --bin my-reverse-proxy throughput -- --ignored --nocapture`
+///
+/// It prints what the tables of docs/gateway-compression.md are made of: the best of
+/// `GATEWAY_BENCH_ROUNDS` runs (3, when it is not set) of every level. The data is rows of an API
+/// answer, HTTP requests with their answers, and bytes nothing packs.
+/// `GATEWAY_BENCH_FILES=/a/sample.json,/b/sample.html` measures samples of the real traffic
+/// instead.
+///
+/// The data is megabytes which do not repeat, sent over and over: a block which comes round
+/// again within moments is packed far faster than data ever is - the processor has learned its
+/// way through it - and the figure would be of that. So a sample is to be megabytes as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore]
+async fn throughput() {
+    /// How long one end sends for, in one run.
+    const SENDING: Duration = Duration::from_millis(1500);
+    const MIB: f64 = 1024.0 * 1024.0;
+
+    let rounds: usize = std::env::var("GATEWAY_BENCH_ROUNDS")
+        .ok()
+        .and_then(|rounds| rounds.parse().ok())
+        .unwrap_or(3);
+
+    println!("| data | level | packed with | ratio | up, MiB/s | down, MiB/s |");
+    println!("|---|---|---|---|---|---|");
+
+    for (sample_no, (sample_name, sample)) in bench_samples().into_iter().enumerate() {
+        for compression in CompressionLevel::all() {
+            let (mut ratio, mut best_up, mut best_down) = (0f64, 0f64, 0f64);
+
+            for round in 0..rounds {
+                let name = format!("throughput-{sample_no}-{}-{round}", compression.as_u8());
+                let gateway = Gateway::start_at(&name, compression).await;
+                let client_side = gateway.client_side();
+
+                // Up: the client writes, an upstream behind the server takes it.
+                let (taken_tx, mut taken) = mpsc::unbounded_channel();
+                let upstream = start_upstream(move |mut stream| {
+                    let taken_tx = taken_tx.clone();
+                    async move {
+                        let mut buf = vec![0u8; 1024 * 1024];
+                        let mut total = 0usize;
+                        while let Ok(read_size) = stream.read(&mut buf).await {
+                            if read_size == 0 {
+                                break;
+                            }
+                            total += read_size;
+                        }
+                        let _ = taken_tx.send(total);
+                    }
+                })
+                .await;
+
+                let mut stream = gateway.connect_from_client(upstream).await;
+                client_side.out_per_second.get_per_second();
+                let started = Instant::now();
+                let mut sent = 0usize;
+                'sending: loop {
+                    for piece in sample.chunks(MAX_PAYLOAD_CHUNK) {
+                        stream.write_to_socket(piece).await.unwrap();
+                        sent += piece.len();
+                        if started.elapsed() >= SENDING {
+                            break 'sending;
+                        }
+                    }
+                }
+                stream.disconnect();
+                let received = tokio::time::timeout(Duration::from_secs(300), taken.recv())
+                    .await
+                    .expect("the upload did not end")
+                    .unwrap();
+                assert_eq!(received, sent);
+                let up = sent as f64 / MIB / started.elapsed().as_secs_f64();
+                ratio = sent as f64 / sent_by(&client_side, 1).await as f64;
+
+                // Down: an upstream behind the server writes, the client reads.
+                let upstream = {
+                    let sample = sample.clone();
+                    start_upstream(move |mut stream| {
+                        let sample = sample.clone();
+                        async move {
+                            let started = Instant::now();
+                            loop {
+                                for piece in sample.chunks(MAX_PAYLOAD_CHUNK) {
+                                    if stream.write_all(piece).await.is_err()
+                                        || started.elapsed() >= SENDING
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    })
+                    .await
+                };
+
+                let mut stream = gateway.connect_from_client(upstream).await;
+                let started = Instant::now();
+                let mut buf = vec![0u8; 1024 * 1024];
+                let mut received = 0usize;
+                loop {
+                    match stream.read_from_socket(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read_size) => received += read_size,
+                    }
+                }
+                let down = received as f64 / MIB / started.elapsed().as_secs_f64();
+
+                best_up = best_up.max(up);
+                best_down = best_down.max(down);
+            }
+
+            println!(
+                "| {sample_name} | {} | {compression} | {ratio:.2} | {best_up:.0} | {best_down:.0} |",
+                compression.as_u8()
+            );
+        }
+    }
+}
+
+/// What a small request and its answer cost through the tunnel at a compression level: 100
+/// bytes there, 100 bytes back, over one connection and over many at once. For a release build:
+/// `cargo test --release --bin my-reverse-proxy round_trips -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore]
+async fn round_trips() {
+    println!(
+        "| level | packed with | connections | round trips a second | of one connection, us |"
+    );
+    println!("|---|---|---|---|---|");
+
+    for compression in CompressionLevel::all() {
+        for (connections, per_connection) in [(1usize, 30_000usize), (64, 5_000)] {
+            let name = format!("round-trips-{}-{connections}", compression.as_u8());
+            let gateway = Gateway::start_at(&name, compression).await;
+            let upstream = start_upstream(|stream| echo(stream, None)).await;
+
+            let mut streams = Vec::new();
+            for _ in 0..connections {
+                streams.push(gateway.connect_from_client(upstream).await);
+            }
+
+            let started = Instant::now();
+
+            let tasks: Vec<_> = streams
+                .into_iter()
+                .enumerate()
+                .map(|(no, mut stream)| {
+                    tokio::spawn(async move {
+                        // A request of its own for every connection: text, as requests are.
+                        let request = compressible(100, no as u64);
+                        let mut buf = [0u8; 256];
+
+                        for _ in 0..per_connection {
+                            stream.write_to_socket(&request).await.unwrap();
+
+                            let mut answered = 0;
+                            while answered < request.len() {
+                                answered += stream.read_from_socket(&mut buf).await.unwrap();
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            for task in tasks {
+                task.await.unwrap();
+            }
+
+            let elapsed = started.elapsed();
+            let total = connections * per_connection;
+
+            println!(
+                "| {} | {compression} | {connections} | {:.0} | {:.1} |",
+                compression.as_u8(),
+                total as f64 / elapsed.as_secs_f64(),
+                elapsed.as_secs_f64() * 1_000_000.0 / per_connection as f64,
+            );
+        }
+    }
+}
+
+/// How much a level saves by the size of a batch: the bytes the batches take on the wire
+/// without compression for a byte they take with it, the sealing of a frame counted in both. A
+/// batch is packed on its own, so the frames of a busy connection - they travel in big batches -
+/// pack better than the same frames sent one by one. The data is the first megabytes of what
+/// [`throughput`] sends, cut into batches of every size:
+/// `cargo test --release --bin my-reverse-proxy batch_sizes -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn batch_sizes() {
+    const SIZES: [usize; 6] = [256, 1024, 4096, 16 * 1024, 64 * 1024, 256 * 1024];
+
+    /// What a frame adds to the batch it carries.
+    const SEALING: usize = session::FRAME_LEN_SIZE + session::FRAME_TAG_LEN;
+
+    println!("| data | level | packed with | 256 B | 1 KiB | 4 KiB | 16 KiB | 64 KiB | 256 KiB |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+
+    for (sample_name, sample) in bench_samples() {
+        let sample = &sample[..sample.len().min(2 * 1024 * 1024)];
+
+        for compression in CompressionLevel::all().filter(|level| level.is_on()) {
+            let mut packer = session::BatchPacker::new(compression);
+            let mut wire = Vec::new();
+            let mut ratios = String::new();
+
+            for size in SIZES {
+                let (mut packed, mut not_packed) = (0usize, 0usize);
+
+                for batch in sample.chunks(size) {
+                    wire.clear();
+                    packer.write_batch(batch, &mut wire);
+                    packed += wire.len() + SEALING;
+                    not_packed += 1 + batch.len() + SEALING;
+                }
+
+                ratios += &format!(" {:.2} |", not_packed as f64 / packed as f64);
+            }
+
+            println!(
+                "| {sample_name} | {} | {compression} |{ratios}",
+                compression.as_u8()
+            );
+        }
+    }
+}
+
+/// What [`throughput`] sends: the samples named by `GATEWAY_BENCH_FILES`, or the data made here.
+fn bench_samples() -> Vec<(String, Arc<Vec<u8>>)> {
+    /// Far beyond what a packer looks back at, and enough for what repeats to be forgotten.
+    const SAMPLE_SIZE: usize = 8 * 1024 * 1024;
+
+    if let Ok(files) = std::env::var("GATEWAY_BENCH_FILES") {
+        return files
+            .split(',')
+            .map(|file| {
+                let mut sample = std::fs::read(file.trim())
+                    .unwrap_or_else(|err| panic!("GATEWAY_BENCH_FILES: {file}: {err}"));
+                sample.truncate(8 * SAMPLE_SIZE);
+
+                let name = std::path::Path::new(file.trim())
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| file.to_string());
+
+                (name, Arc::new(sample))
+            })
+            .collect();
+    }
+
+    vec![
+        ("API rows".to_string(), Arc::new(api_rows(SAMPLE_SIZE))),
+        (
+            "HTTP messages".to_string(),
+            Arc::new(http_messages(SAMPLE_SIZE)),
+        ),
+        (
+            "packed already".to_string(),
+            Arc::new(pseudo_random(SAMPLE_SIZE)),
+        ),
+    ]
+}
+
+/// Requests of an API with their answers, as they travel through a proxy: the headers of a
+/// browser, a token, an id of its own in every one - and a small JSON body in the answer.
+fn http_messages(size: usize) -> Vec<u8> {
+    let mut state = 0x0FED_CBA9_8765_4321u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    let mut out = Vec::with_capacity(size + 2048);
+
+    while out.len() < size {
+        let (a, b, c, d) = (next(), next(), next(), next());
+        let account = a % 900_000 + 100_000;
+
+        out.extend_from_slice(
+            format!(
+                "GET /api/v1/accounts/{account}/positions?limit=50&offset={} HTTP/1.1\r\n\
+                 host: api.example.com\r\n\
+                 user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36\r\n\
+                 accept: application/json, text/plain, */*\r\n\
+                 accept-encoding: gzip, deflate, br, zstd\r\n\
+                 accept-language: en-US,en;q=0.9\r\n\
+                 authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.{b:016x}{c:016x}.{d:016x}\r\n\
+                 x-request-id: {c:016x}\r\n\
+                 cookie: session={d:x}; theme=dark\r\n\r\n",
+                b % 13 * 50,
+            )
+            .as_bytes(),
+        );
+
+        let body = format!(
+            "{{\"account\":{account},\"balance\":{}.{:02},\"currency\":\"USD\",\"positions\":[{{\"symbol\":\"EURUSD\",\"volume\":{}.{:02},\"profit\":{}.{:02}}}]}}",
+            b % 100_000,
+            c % 100,
+            d % 50,
+            a % 100,
+            (c % 10_000) as i64 - 5_000,
+            b % 100,
+        );
+
+        out.extend_from_slice(
+            format!(
+                "HTTP/1.1 200 OK\r\n\
+                 content-type: application/json; charset=utf-8\r\n\
+                 content-length: {}\r\n\
+                 date: Tue, 13 Oct 2026 12:{:02}:{:02} GMT\r\n\
+                 cache-control: no-store\r\n\
+                 x-request-id: {c:016x}\r\n\
+                 strict-transport-security: max-age=31536000\r\n\r\n{body}",
+                body.len(),
+                a % 60,
+                b % 60,
+            )
+            .as_bytes(),
+        );
+    }
+
+    out.truncate(size);
+    out
+}
+
+/// Rows of an API answer: the names repeat from row to row, the values do not.
+fn api_rows(size: usize) -> Vec<u8> {
+    const SYMBOLS: [&str; 8] = [
+        "EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSD", "US500", "GER40", "AUDCAD",
+    ];
+
+    let mut state = 0x1234_5678_9ABC_DEF1u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    let mut out = Vec::with_capacity(size + 256);
+
+    while out.len() < size {
+        let (a, b, c) = (next(), next(), next());
+
+        out.extend_from_slice(
+            format!(
+                "{{\"id\":\"{a:016x}\",\"account\":{},\"symbol\":\"{}\",\"volume\":{}.{:02},\"open_price\":{}.{:05},\"profit\":{}.{:02},\"comment\":\"{:x}\",\"open_time\":\"2026-10-{:02}T{:02}:{:02}:{:02}Z\"}},\n",
+                b % 900_000 + 100_000,
+                SYMBOLS[(c % 8) as usize],
+                c % 50,
+                a % 100,
+                b % 2000,
+                c % 100_000,
+                (a % 20_000) as i64 - 10_000,
+                b % 100,
+                c >> 40,
+                a % 28 + 1,
+                b % 24,
+                c % 60,
+                a % 60,
+            )
+            .as_bytes(),
+        );
+    }
+
+    out.truncate(size);
+    out
+}
+
 struct Gateway {
     server: TcpGatewayServer,
     client: TcpGatewayClient,
@@ -3196,32 +3901,16 @@ struct Gateway {
 }
 
 impl Gateway {
-    /// Both ends registered, with the protocol extensions on between them.
+    /// Both ends registered. `compress`: at the first level of the table - LZ4.
     async fn start(name: &str, compress: bool) -> Self {
-        let gateway = Self::start_registered(name, compress, true, true).await;
-
-        wait_until(|| {
-            gateway.server_side().flow_control_enabled()
-                && gateway.client_side().flow_control_enabled()
-                && gateway.server_side().fin_rst_enabled()
-                && gateway.client_side().fin_rst_enabled()
-        })
-        .await;
-
-        gateway
+        Self::start_at(name, first_level_if(compress)).await
     }
 
-    /// Both ends registered; their capabilities may still be on the way. An end started without
-    /// the protocol extensions behaves on the wire like a peer built before capabilities.
-    async fn start_registered(
-        name: &str,
-        compress: bool,
-        server_extensions: bool,
-        client_extensions: bool,
-    ) -> Self {
+    /// Both ends registered, the batches packed with what `compression` says.
+    async fn start_at(name: &str, compression: CompressionLevel) -> Self {
         let key = signing_key();
-        let (server, port) = start_server_with(&key, None, server_extensions).await;
-        let client = start_client_with(name, &key, port, compress, client_extensions);
+        let (server, port) = start_server(&key, None).await;
+        let client = start_client_at(name, &key, port, compression);
 
         wait_until(|| {
             server.get_gateway_connection(name).is_some()
@@ -3234,14 +3923,6 @@ impl Gateway {
             client,
             name: name.to_string(),
         }
-    }
-
-    async fn wait_for_capabilities(&self) {
-        wait_until(|| {
-            self.server_side().capabilities_exchanged()
-                && self.client_side().capabilities_exchanged()
-        })
-        .await;
     }
 
     fn server_side(&self) -> Arc<TcpGatewayConnection> {
@@ -3282,14 +3963,6 @@ impl Gateway {
 }
 
 async fn start_server(key: &SigningKey, allowed_ip: Option<&[&str]>) -> (TcpGatewayServer, u16) {
-    start_server_with(key, allowed_ip, true).await
-}
-
-async fn start_server_with(
-    key: &SigningKey,
-    allowed_ip: Option<&[&str]>,
-    protocol_extensions: bool,
-) -> (TcpGatewayServer, u16) {
     let port = free_port().await;
 
     let allowed_ip = allowed_ip.map(|list| {
@@ -3297,51 +3970,109 @@ async fn start_server_with(
         WhiteListedIpList::new(&list)
     });
 
+    // It listens once it is constructed: a client may connect at once.
     let server = TcpGatewayServer::new(
         format!("127.0.0.1:{port}"),
         vec![key.verifying_key()],
         allowed_ip,
         false,
-        protocol_extensions,
-        false,
-    );
-
-    // The server binds in a task of its own: wait until it listens, or the first client connect
-    // fails and the client backs off for seconds.
-    let started = Instant::now();
-    while TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-        assert!(
-            started.elapsed() < TIMEOUT,
-            "the gateway server does not listen"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    )
+    .expect("the gateway server starts");
 
     (server, port)
 }
 
-fn start_client(name: &str, key: &SigningKey, port: u16, compress: bool) -> TcpGatewayClient {
-    start_client_with(name, key, port, compress, true)
+/// The first level of the table - LZ4 - or no compression.
+fn first_level_if(compress: bool) -> CompressionLevel {
+    CompressionLevel::new(compress as u8).unwrap()
 }
 
-fn start_client_with(
+fn start_client(name: &str, key: &SigningKey, port: u16, compress: bool) -> TcpGatewayClient {
+    start_client_at(name, key, port, first_level_if(compress))
+}
+
+fn start_client_at(
     name: &str,
     key: &SigningKey,
     port: u16,
-    compress: bool,
-    protocol_extensions: bool,
+    compression: CompressionLevel,
 ) -> TcpGatewayClient {
     TcpGatewayClient::new(TcpGatewayClientParams {
         id: name.to_string(),
         remote_endpoint: format!("127.0.0.1:{port}"),
         signing_key: key.clone(),
-        compress_outbound: compress,
+        compression,
         allow_incoming_forward_connections: true,
         connect_timeout: CONNECT_TIMEOUT,
         debug: false,
         sync_ssl_certificates: Vec::new(),
-        protocol_extensions,
     })
+}
+
+/// A gateway client driven by hand: the frames it sends and the frames it gets, one by one.
+struct RawClient {
+    stream: TcpStream,
+    sealer: session::FrameSealer,
+    opener: session::FrameOpener,
+    received: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl RawClient {
+    /// Connected and past the handshake, registered on `server` as `name`.
+    async fn connect(server: &TcpGatewayServer, port: u16, key: &SigningKey, name: &str) -> Self {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let session_keys =
+            handshake::perform_client_handshake(&mut stream, key, name, CompressionLevel::OFF)
+                .await
+                .unwrap();
+        let (sealer, opener) = session_keys.into_client_ends();
+        wait_until(|| server.get_gateway_connection(name).is_some()).await;
+
+        Self {
+            stream,
+            sealer,
+            opener,
+            received: Default::default(),
+        }
+    }
+
+    /// `contract` as a sealed frame of its own, ready for the wire.
+    fn seal(&mut self, contract: &TcpGatewayContract<'_>) -> Vec<u8> {
+        let mut wire = vec![0u8; session::FRAME_LEN_SIZE];
+        wire.push(session::BATCH_STORED);
+        wire.extend_from_slice(&contract.to_plain_frame());
+        self.sealer.seal(&mut wire).unwrap();
+        wire
+    }
+
+    /// `batch` - whatever it is - as a sealed frame: one which opens, and is refused for what it
+    /// carries.
+    fn seal_batch(&mut self, batch: &[u8]) -> Vec<u8> {
+        let mut wire = vec![0u8; session::FRAME_LEN_SIZE];
+        wire.extend_from_slice(batch);
+        self.sealer.seal(&mut wire).unwrap();
+        wire
+    }
+
+    async fn send(&mut self, contract: &TcpGatewayContract<'_>) {
+        let wire = self.seal(contract);
+        self.stream.write_all(&wire).await.unwrap();
+    }
+
+    /// The next inner frame the server sent, `[u8 TYPE][PAYLOAD]`.
+    async fn read_frame(&mut self) -> Vec<u8> {
+        while self.received.is_empty() {
+            let frames = tokio::time::timeout(
+                TIMEOUT,
+                session::read_frame_for_tests(&mut self.stream, &mut self.opener),
+            )
+            .await
+            .expect("the server sent nothing");
+            self.received.extend(frames);
+        }
+
+        self.received.pop_front().unwrap()
+    }
 }
 
 fn signing_key() -> SigningKey {
@@ -3978,9 +4709,9 @@ async fn wait_until(mut condition: impl FnMut() -> bool) {
     }
 }
 
-/// A gateway connection over a socket nobody speaks the protocol on - the peer half is returned
-/// to keep the socket open - for the parts of a connection which need no peer.
-async fn lone_gateway_connection(own_capabilities: u8) -> (Arc<TcpGatewayConnection>, TcpStream) {
+/// The writer of a gateway connection over a socket nobody speaks the protocol on - the peer half
+/// is returned to keep the socket open - for what needs a gateway writer and no peer.
+async fn lone_gateway_writer() -> (Arc<TcpConnectionInner>, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer = TcpStream::connect(listener.local_addr().unwrap())
         .await
@@ -3988,17 +4719,14 @@ async fn lone_gateway_connection(own_capabilities: u8) -> (Arc<TcpGatewayConnect
     let (accepted, _) = listener.accept().await.unwrap();
     let (_read, write) = accepted.into_split();
 
-    let connection = TcpGatewayConnection::new(
-        Arc::new("lone".to_string()),
+    let writer = TcpConnectionInner::new_gateway_peer(
         write.into(),
-        Arc::new(encryption::aes::AesKey::new(&[7u8; 48])),
-        false,
-        true,
-        own_capabilities,
+        session::FrameSealer::for_tests([7u8; 32]),
+        CompressionLevel::OFF,
+        Default::default(),
     );
-    connection.set_connection_timestamp(rust_extensions::date_time::DateTimeAsMicroseconds::now());
 
-    (Arc::new(connection), peer)
+    (writer, peer)
 }
 
 async fn wait_until_within(limit: Duration, mut condition: impl FnMut() -> bool) {
@@ -4117,7 +4845,7 @@ async fn assert_ends_with_an_error(writer: tokio::task::JoinHandle<bool>) {
     assert!(!succeeded, "the write succeeded on a closed connection");
 }
 
-/// Bytes zstd can not shrink, so a compressed batch is as big as its plaintext.
+/// Bytes which do not pack: a batch of them travels as it is.
 fn pseudo_random(size: usize) -> Vec<u8> {
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     (0..size)
@@ -4128,6 +4856,178 @@ fn pseudo_random(size: usize) -> Vec<u8> {
             (state >> 24) as u8
         })
         .collect()
+}
+
+/// [`pseudo_random`], another run of bytes for every `seed`.
+fn pseudo_random_seeded(size: usize, seed: u64) -> Vec<u8> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64 ^ (seed.wrapping_mul(0xA24B_AED4_963E_E407) | 1);
+    (0..size)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+/// Text which packs well - rows of an API answer - and differs for every `seed`.
+fn compressible(size: usize, seed: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size + 128);
+    let mut row = 0u64;
+
+    while out.len() < size {
+        row += 1;
+        out.extend_from_slice(
+            format!(
+                "{{\"connection\":{seed},\"row\":{row},\"symbol\":\"EURUSD\",\"bid\":1.0{},\"ask\":1.0{}}},\n",
+                row % 977,
+                row % 983
+            )
+            .as_bytes(),
+        );
+    }
+
+    out.truncate(size);
+    out
+}
+
+/// Sends `data` through an echoing upstream, `piece` bytes a write, while reading the echo at
+/// the same time.
+async fn echo_round_trip_of(stream: TcpGatewayProxyForwardStream, data: Vec<u8>, piece: usize) {
+    let data = Arc::new(data);
+    let (mut reader, mut writer) = split(stream);
+
+    let writing = {
+        let data = data.clone();
+        tokio::spawn(async move {
+            for piece in data.chunks(piece) {
+                writer.write_to_socket(piece).await.unwrap();
+            }
+            writer
+        })
+    };
+
+    let mut received = Vec::with_capacity(data.len());
+    let mut buf = vec![0u8; 64 * 1024];
+    while received.len() < data.len() {
+        let read_size = reader.read_from_socket(&mut buf).await.unwrap();
+        assert!(
+            read_size > 0,
+            "closed after {} of {} bytes",
+            received.len(),
+            data.len()
+        );
+        received.extend_from_slice(&buf[..read_size]);
+    }
+
+    let _writer = writing.await.unwrap();
+    assert!(received == *data, "the echo is not what was sent");
+}
+
+/// The link between a gateway client and its server: passes the bytes both ways until it is
+/// told to go silent - and then keeps every socket open and passes nothing, the way a route
+/// which died does.
+struct Link {
+    port: u16,
+    silent: Arc<std::sync::atomic::AtomicBool>,
+    silent_for_good: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Link {
+    async fn start(server_port: u16) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let silent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let silent_for_good = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        {
+            let (silent, silent_for_good) = (silent.clone(), silent_for_good.clone());
+
+            tokio::spawn(async move {
+                while let Ok((client_side, _)) = listener.accept().await {
+                    let passes = {
+                        let (silent, silent_for_good) = (silent.clone(), silent_for_good.clone());
+                        // A connection accepted after `go_silent` is of a link which works again.
+                        let of_the_link_which_is_back = silent.load(Ordering::Relaxed);
+                        move || {
+                            !silent_for_good.load(Ordering::Relaxed)
+                                && (of_the_link_which_is_back || !silent.load(Ordering::Relaxed))
+                        }
+                    };
+
+                    tokio::spawn(async move {
+                        let Ok(server_side) = TcpStream::connect(("127.0.0.1", server_port)).await
+                        else {
+                            return;
+                        };
+
+                        let (client_read, client_write) = client_side.into_split();
+                        let (server_read, server_write) = server_side.into_split();
+
+                        let up =
+                            tokio::spawn(pass_bytes(client_read, server_write, passes.clone()));
+                        let down = tokio::spawn(pass_bytes(server_read, client_write, passes));
+                        let _ = up.await;
+                        let _ = down.await;
+                    });
+                }
+            });
+        }
+
+        Self {
+            port,
+            silent,
+            silent_for_good,
+        }
+    }
+
+    /// The connections which are there pass nothing from now on; new ones work.
+    fn go_silent(&self) {
+        self.silent.store(true, Ordering::Relaxed);
+    }
+
+    /// Nothing passes from now on, on any connection.
+    fn go_silent_for_good(&self) {
+        self.silent_for_good.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Passes bytes one way while `passes` says so, then holds both halves open and passes nothing.
+async fn pass_bytes(
+    mut read: tokio::net::tcp::OwnedReadHalf,
+    mut write: tokio::net::tcp::OwnedWriteHalf,
+    passes: impl Fn() -> bool,
+) {
+    let mut buf = vec![0u8; 64 * 1024];
+
+    loop {
+        let read_size = tokio::select! {
+            read_size = read.read(&mut buf) => read_size,
+            // Looks at `passes` again: a silent socket would not say that the link went silent.
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                if passes() {
+                    continue;
+                }
+                break;
+            }
+        };
+
+        if !passes() {
+            break;
+        }
+
+        match read_size {
+            Ok(read_size) if read_size > 0 => {
+                if write.write_all(&buf[..read_size]).await.is_err() {
+                    return;
+                }
+            }
+            _ => return,
+        }
+    }
+
+    std::future::pending::<()>().await;
 }
 
 /// A hyper upstream: `/upload` answers with the size of the request body, `/download` with
@@ -4324,4 +5224,85 @@ fn poll_write_once(
 
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     std::pin::Pin::new(stream).poll_write(&mut cx, buf)
+}
+
+/// A files location whose folder is behind the gateway: the requesting end puts the folder and
+/// the checked request path together, and either end serves the file.
+#[tokio::test]
+async fn a_file_of_a_folder_behind_the_gateway_is_served_by_either_end() {
+    use crate::http_content_source::FileRequestPath;
+    use crate::http_proxy_pass::{executors::get_file_from_gateway_connection, ProxyPassError};
+
+    let gateway = Gateway::start("files-location", false).await;
+
+    let dir = std::env::temp_dir().join(format!("gateway-files-location-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("css")).unwrap();
+    std::fs::write(dir.join("index.html"), b"<h1>index</h1>").unwrap();
+    std::fs::write(dir.join("css").join("site.css"), b"body {}").unwrap();
+    let folder = dir.to_str().unwrap();
+
+    let root = FileRequestPath::parse("/").unwrap();
+    let css = FileRequestPath::parse("/css/site.css").unwrap();
+    let missing = FileRequestPath::parse("/missing.html").unwrap();
+
+    for side in [gateway.client_side(), gateway.server_side()] {
+        let file = get_file_from_gateway_connection(&side, folder, Some("index.html"), &css)
+            .await
+            .unwrap();
+        assert_eq!(file.status_code, 200);
+        assert_eq!(file.content_type.unwrap().as_str(), "text/css");
+        assert_eq!(file.body, b"body {}");
+
+        // The default file is the answer to the root.
+        let file = get_file_from_gateway_connection(&side, folder, Some("index.html"), &root)
+            .await
+            .unwrap();
+        assert_eq!(file.status_code, 200);
+        assert_eq!(file.content_type.unwrap().as_str(), "text/html");
+        assert_eq!(file.body, b"<h1>index</h1>");
+
+        // Without one the root is no file: it is not asked for.
+        let file = get_file_from_gateway_connection(&side, folder, None, &root)
+            .await
+            .unwrap();
+        assert_eq!(file.status_code, 404);
+
+        let result =
+            get_file_from_gateway_connection(&side, folder, Some("index.html"), &missing).await;
+        assert!(matches!(result, Err(ProxyPassError::NoLocationFound)));
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The serving end reads the path it is sent as it is, `..` included: it does not know the
+/// folder. So the path is checked on the requesting end, where a path which leaves the folder
+/// never gets to be a request.
+#[tokio::test]
+async fn the_serving_end_reads_the_path_it_is_sent_as_it_is() {
+    use crate::http_content_source::FileRequestPath;
+
+    let gateway = Gateway::start("files-parent-segment", false).await;
+
+    let dir = std::env::temp_dir().join(format!("gateway-parent-segment-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("root")).unwrap();
+    std::fs::write(dir.join("secret.txt"), b"secret").unwrap();
+    let folder = dir.join("root");
+    let folder = folder.to_str().unwrap();
+
+    let out_of_the_folder = format!("{folder}/../secret.txt");
+    assert_eq!(
+        gateway
+            .client_side()
+            .request_file(&out_of_the_folder)
+            .await
+            .ok(),
+        Some(b"secret".to_vec())
+    );
+
+    for path in ["/../secret.txt", "/%2e%2e/secret.txt", "/..%2fsecret.txt"] {
+        assert!(FileRequestPath::parse(path).is_err(), "{path}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

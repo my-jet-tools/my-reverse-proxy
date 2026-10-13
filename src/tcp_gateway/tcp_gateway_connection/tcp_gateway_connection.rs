@@ -5,7 +5,6 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use encryption::aes::AesKey;
 use parking_lot::Mutex;
 
 use rust_extensions::{
@@ -15,7 +14,11 @@ use rust_extensions::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{metrics::PerSecondAccumulator, network_stream::MyOwnedWriteHalf};
+use crate::{
+    metrics::PerSecondAccumulator,
+    network_stream::MyOwnedWriteHalf,
+    tcp_gateway::session::{CompressionLevel, FrameSealer},
+};
 
 use super::{super::forwarded_connection::*, super::*};
 
@@ -44,28 +47,32 @@ pub struct TcpGatewayConnection {
     pub file_requests: FileRequests,
     pub file_response_slots: tokio::sync::Semaphore,
     pub metrics: Mutex<GatewayConnectionMetrics>,
+    /// Bytes off the wire and bytes onto it - the frames as they travel, sealed and packed -
+    /// since the last tick of the metrics timer.
     pub in_per_second: PerSecondAccumulator,
-    pub out_per_second: PerSecondAccumulator,
+    pub out_per_second: Arc<PerSecondAccumulator>,
     connection_timestamp: AtomicI64,
     pub created_at: DateTimeAsMicroseconds,
-    /// What this side advertises - see [`TcpGatewayInner::capabilities`].
-    own_capabilities: u8,
-    /// Cancelled once the capabilities both ends have are fixed - from the peer's first PING
-    /// (server) or first PING or PONG (client), for the life of the gateway connection. They are
-    /// kept by the writer: everything which sends to the peer holds it.
-    capabilities_known: CancellationToken,
+    compression: CompressionLevel,
 }
 
 impl TcpGatewayConnection {
+    /// `sealer` seals what this side sends. `compression`: what the batches this side sends
+    /// are packed with - the level the client has asked for in its handshake, on both ends.
     pub fn new(
         addr: Arc<String>,
         write_half: MyOwnedWriteHalf,
-        aes_key: Arc<AesKey>,
-        compress_outbound: bool,
+        sealer: FrameSealer,
+        compression: CompressionLevel,
         allow_incoming_forward_connection: bool,
-        own_capabilities: u8,
     ) -> Self {
-        let inner = TcpConnectionInner::new_gateway_peer(write_half, aes_key, compress_outbound);
+        let out_per_second = Arc::new(PerSecondAccumulator::new());
+        let inner = TcpConnectionInner::new_gateway_peer(
+            write_half,
+            sealer,
+            compression,
+            out_per_second.clone(),
+        );
         Self {
             gateway_id: ArcSwap::from_pointee(String::new()),
             addr,
@@ -80,66 +87,16 @@ impl TcpGatewayConnection {
             allow_incoming_forward_connection,
             metrics: Mutex::default(),
             in_per_second: PerSecondAccumulator::new(),
-            out_per_second: PerSecondAccumulator::new(),
+            out_per_second,
             connection_timestamp: AtomicI64::new(0),
             created_at: DateTimeAsMicroseconds::now(),
-            own_capabilities,
-            capabilities_known: CancellationToken::new(),
+            compression,
         }
     }
 
-    pub fn own_capabilities(&self) -> u8 {
-        self.own_capabilities
-    }
-
-    /// The other end's capabilities: from the first PING (server), or the first PING or PONG
-    /// (client). Later ones change nothing.
-    pub fn set_peer_capabilities(&self, peer: Option<u8>) {
-        let negotiated = peer.unwrap_or(0) & self.own_capabilities;
-
-        if self.inner.set_negotiated_capabilities(negotiated) {
-            self.capabilities_known.cancel();
-
-            let on_off = |capability: u8| {
-                if negotiated & capability != 0 {
-                    "on"
-                } else {
-                    "off"
-                }
-            };
-            println!(
-                "Gateway:[{}]. Peer capabilities: {:?}. Flow control: {}. FIN/RST: {}",
-                self.get_gateway_id(),
-                peer,
-                on_off(CAP_FLOW_CONTROL),
-                on_off(CAP_FIN_RST)
-            );
-        }
-    }
-
-    /// Connections opened from now on are flow controlled.
-    pub fn flow_control_enabled(&self) -> bool {
-        self.inner.peer_takes(CAP_FLOW_CONTROL)
-    }
-
-    /// Connections end with `FIN` or `RST` from now on.
-    pub fn fin_rst_enabled(&self) -> bool {
-        self.inner.peer_takes(CAP_FIN_RST)
-    }
-
-    pub fn capabilities_exchanged(&self) -> bool {
-        self.inner.negotiated_capabilities().is_some()
-    }
-
-    /// The frame which tells the peer that `connection_id` ended - see
-    /// [`ConnectionEnd::to_contract`].
-    pub fn connection_end_contract<'s>(
-        &self,
-        connection_id: u32,
-        end: ConnectionEnd<'s>,
-        closed_text: &'s str,
-    ) -> TcpGatewayContract<'s> {
-        end.to_contract(connection_id, self.fin_rst_enabled(), closed_text)
+    /// What the batches this side sends are packed with.
+    pub fn compression(&self) -> CompressionLevel {
+        self.compression
     }
 
     pub fn set_connection_timestamp(&self, value: DateTimeAsMicroseconds) {
@@ -172,10 +129,6 @@ impl TcpGatewayConnection {
         let mut write_access = self.metrics.lock();
         write_access.in_per_second.add(in_per_second);
         write_access.out_per_second.add(out_per_second);
-    }
-
-    pub fn get_aes_key(&self) -> &Arc<AesKey> {
-        self.inner.aes_key()
     }
 
     pub fn set_gateway_id(&self, id: &str) {
@@ -273,78 +226,6 @@ impl TcpGatewayConnection {
     ) -> Result<TcpGatewayProxyForwardStream, String> {
         self.check_handshake(&remote_endpoint)?;
 
-        let flow_control = self.flow_control_for_new_connection(timeout).await;
-
-        self.connect_with(remote_endpoint, timeout, connection_id, flow_control)
-            .await
-    }
-
-    /// A plain connection, as with a peer without flow control.
-    #[cfg(test)]
-    pub async fn connect_to_forward_proxy_connection_plain(
-        &self,
-        remote_endpoint: Arc<RemoteEndpointOwned>,
-        timeout: Duration,
-        connection_id: u32,
-    ) -> Result<TcpGatewayProxyForwardStream, String> {
-        self.check_handshake(&remote_endpoint)?;
-
-        self.connect_with(remote_endpoint, timeout, connection_id, false)
-            .await
-    }
-
-    fn check_handshake(&self, remote_endpoint: &RemoteEndpointOwned) -> Result<(), String> {
-        if self.has_handshake() {
-            return Ok(());
-        }
-
-        println!("No Handshake");
-        Err(format!(
-            "Failed establishing connection to {}. Reason: Tcp gateway connection created at {} did not do handshake yet",
-            remote_endpoint.as_str(),
-            self.created_at.to_rfc3339()
-        ))
-    }
-
-    /// Whether a connection opened now is flow controlled - decided once: the frame which opens
-    /// it tells the acceptor, and both ends keep the mode for the connection's life. While the
-    /// other end's capabilities are unknown - right after the gateway connection came up: next to
-    /// nothing on the client, about a round trip on the server, 3 s with a client which predates
-    /// capabilities - this waits for them, at most `limit`, the connect's own timeout. A
-    /// connection opened without them has no flow control for life.
-    async fn flow_control_for_new_connection(&self, limit: Duration) -> bool {
-        if self.own_capabilities & CAP_FLOW_CONTROL == 0 {
-            return false;
-        }
-
-        if !self.capabilities_exchanged() {
-            let known = self.capabilities_known.clone();
-            let gone = self.disconnected_token();
-
-            let _ = tokio::time::timeout(limit, async {
-                tokio::select! {
-                    _ = known.cancelled() => {}
-                    _ = gone.cancelled() => {}
-                }
-            })
-            .await;
-        }
-
-        self.flow_control_enabled()
-    }
-
-    #[cfg(test)]
-    pub async fn flow_control_for_new_connection_for_tests(&self, limit: Duration) -> bool {
-        self.flow_control_for_new_connection(limit).await
-    }
-
-    async fn connect_with(
-        &self,
-        remote_endpoint: Arc<RemoteEndpointOwned>,
-        timeout: Duration,
-        connection_id: u32,
-        flow_control: bool,
-    ) -> Result<TcpGatewayProxyForwardStream, String> {
         let gateway_id = self.get_gateway_id();
 
         println!(
@@ -362,7 +243,6 @@ impl TcpGatewayConnection {
             self.inner.clone(),
             Arc::new(remote_host_port.as_str().to_string()),
             Arc::downgrade(&self.forward_proxy_handlers),
-            flow_control,
         );
 
         self.forward_proxy_handlers
@@ -375,7 +255,7 @@ impl TcpGatewayConnection {
             connection_id,
             timeout,
             remote_host: remote_host_port.as_str(),
-            receive_window: flow_control.then_some(FLOW_CONTROL_WINDOW as u32),
+            receive_window: FLOW_CONTROL_WINDOW as u32,
         };
 
         if !self.send_payload(&connect_contract) {
@@ -391,10 +271,7 @@ impl TcpGatewayConnection {
             Ok(Ok(Ok(()))) => {
                 // The acceptor's window came ahead of CONNECT_OK. Under the protocol floor a
                 // chunk might never fit, and the writer would stall without a word.
-                if stream
-                    .send_credit_available()
-                    .is_some_and(|credit| !initial_credit_is_enough(credit))
-                {
+                if !initial_credit_is_enough(stream.send_credit_available()) {
                     return Err(format!(
                         "Cannot connect to {}. Flow control: window out of range",
                         remote_host_port.as_str()
@@ -414,6 +291,19 @@ impl TcpGatewayConnection {
                 wait_for
             )),
         }
+    }
+
+    fn check_handshake(&self, remote_endpoint: &RemoteEndpointOwned) -> Result<(), String> {
+        if self.has_handshake() {
+            return Ok(());
+        }
+
+        println!("No Handshake");
+        Err(format!(
+            "Failed establishing connection to {}. Reason: Tcp gateway connection created at {} did not do handshake yet",
+            remote_endpoint.as_str(),
+            self.created_at.to_rfc3339()
+        ))
     }
 
     pub fn notify_forward_proxy_connection_accepted(&self, connection_id: u32) {
@@ -503,7 +393,7 @@ impl TcpGatewayConnection {
     }
 
     /// Sends upstream bytes of a forward connection to the peer as one frame - first waiting for
-    /// the peer's credit on a flow-controlled connection, then for room in the write budget.
+    /// the peer's credit, then for room in the write budget.
     /// Returns `false` once the connection is closed or the gateway connection is gone.
     ///
     /// Always one frame: the read loop re-sends the same chunk after its select drops a send for a
@@ -517,12 +407,13 @@ impl TcpGatewayConnection {
 
         // The connection's credit first, the shared budget second: a connection waiting for its
         // peer's reader holds no budget. The window closes once the connection is unregistered.
-        let credit = match forward_connection.send_window() {
-            Some(window) => match window.acquire_many(payload.len() as u32).await {
-                Ok(permit) => Some(permit),
-                Err(_) => return false,
-            },
-            None => None,
+        let credit = match forward_connection
+            .send_window()
+            .acquire_many(payload.len() as u32)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(_) => return false,
         };
 
         let payload = TcpGatewayContract::BackwardPayload {
@@ -534,22 +425,20 @@ impl TcpGatewayConnection {
 
         // Spent once queued. A future dropped before - the read loop's select, the drain
         // deadline - gives the credit back.
-        if let Some(permit) = credit {
-            permit.forget();
-        }
+        credit.forget();
 
         sent
     }
 
-    /// The window of a flow-controlled connection the peer opened: what the raw writer hands to
-    /// the target is credited back through this gateway connection.
+    /// The window of a connection the peer opened: what the raw writer hands to the target is
+    /// credited back through this gateway connection.
     pub(crate) fn new_receive_window(&self, connection_id: u32) -> Arc<ReceiveWindow> {
         Arc::new(ReceiveWindow::new(connection_id, self.inner.clone()))
     }
 
-    /// The peer's credit for a flow-controlled connection: one this side opened, or one the peer
-    /// opened - the ends allocate ids apart. Credit for an id closed meanwhile is dropped without
-    /// an answer: credit crossing a close is normal.
+    /// The peer's credit for a connection: one this side opened, or one the peer opened - the
+    /// ends allocate ids apart. Credit for an id closed meanwhile is dropped without an answer:
+    /// credit crossing a close is normal.
     pub fn incoming_window_update(&self, connection_id: u32, credit: u32) {
         if credit == 0 {
             return;
@@ -563,9 +452,7 @@ impl TcpGatewayConnection {
             .map(|handler| handler.send_window());
 
         match initiated {
-            Some(Some(window)) => add_credit(&window, credit),
-            // A connection without flow control.
-            Some(None) => {}
+            Some(window) => add_credit(&window, credit),
             None => {
                 if let Some(forward_connection) = self.get_forward_connection(connection_id) {
                     forward_connection.add_send_credit(credit);
@@ -586,14 +473,14 @@ impl TcpGatewayConnection {
         // acceptor's target connection is reset.
         let end = ConnectionEnd::Reset(reason);
         self.end_tunnelled_connection(connection_id, end);
-        self.send_payload(&self.connection_end_contract(connection_id, end, ""));
+        self.send_payload(&end.to_contract(connection_id));
     }
 
     /// What the acceptor side holds for the target of `connection_id`, not yet written.
     #[cfg(test)]
     pub fn forward_buffered_for_tests(&self, connection_id: u32) -> Option<usize> {
-        self.get_forward_connection(connection_id)?
-            .buffered_for_tests()
+        self.get_forward_connection(connection_id)
+            .map(|forward_connection| forward_connection.buffered_for_tests())
     }
 
     pub fn incoming_payload_for_proxy_connection(&self, connection_id: u32, payload: &[u8]) {
@@ -639,17 +526,17 @@ impl TcpGatewayConnection {
         }
     }
 
+    /// Queues `[u8 TYPE][PAYLOAD]` as an inner frame - one no contract of this side makes.
+    #[cfg(test)]
+    pub fn send_raw_frame_for_tests(&self, inner_frame: &[u8]) -> bool {
+        let mut frame = (inner_frame.len() as u32).to_le_bytes().to_vec();
+        frame.extend_from_slice(inner_frame);
+        self.inner.send_payload(frame)
+    }
+
     /// Queues a control frame. Never waits, so the read loop may use it.
     pub fn send_payload<'d>(&self, payload: &TcpGatewayContract<'d>) -> bool {
-        let vec = payload.to_plain_frame();
-        let len = vec.len();
-
-        if self.inner.send_payload(vec) {
-            self.out_per_second.add(len);
-            return true;
-        }
-
-        false
+        self.inner.send_payload(payload.to_plain_frame())
     }
 
     /// Queues a data frame once there is room for it in the write budget - see
@@ -658,15 +545,9 @@ impl TcpGatewayConnection {
         &self,
         payload: &TcpGatewayContract<'d>,
     ) -> bool {
-        let vec = payload.to_plain_frame();
-        let len = vec.len();
-
-        if self.inner.send_payload_with_backpressure(vec).await {
-            self.out_per_second.add(len);
-            return true;
-        }
-
-        false
+        self.inner
+            .send_payload_with_backpressure(payload.to_plain_frame())
+            .await
     }
 
     pub fn set_last_incoming_payload_time(&self, time: DateTimeAsMicroseconds) {

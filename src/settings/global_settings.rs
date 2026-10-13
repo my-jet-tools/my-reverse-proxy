@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use serde::*;
 
 use super::{ConnectionsSettings, ModifyHttpHeadersSettings, TimeoutsSettings};
@@ -15,6 +17,12 @@ pub struct GlobalSettings {
     /// exemptions.
     #[serde(default)]
     pub ip_blocklist_white_list: Option<Vec<String>>,
+    /// Source IPs that are shown a detailed diagnostic page when their request
+    /// is refused before an endpoint is resolved (unknown / undetectable host).
+    /// Everybody else gets a bare `400 Bad Request`. A single address or a
+    /// list of them, IPv4 or IPv6, exact addresses only. Empty/absent = nobody.
+    #[serde(default)]
+    pub debug_ip: Option<DebugIpSettings>,
     /// How often the (single, global) supervisor sweeps every H1/H2 upstream
     /// pool, in milliseconds. Defaults to 10000 (10s). Global-only — a single
     /// timer drives every pool, so it is not part of the cascade.
@@ -25,7 +33,95 @@ pub struct GlobalSettings {
     pub timeouts: TimeoutsSettings,
 }
 
+impl GlobalSettings {
+    /// Parsed `debug_ip`. Errors on an entry that is not an IP address, so a
+    /// typo fails the settings load instead of silently matching nobody.
+    pub fn get_debug_ip(&self) -> Result<Vec<IpAddr>, String> {
+        let items: &[String] = match self.debug_ip.as_ref() {
+            Some(DebugIpSettings::Single(ip)) => std::slice::from_ref(ip),
+            Some(DebugIpSettings::List(list)) => list,
+            None => &[],
+        };
+
+        let mut result = Vec::with_capacity(items.len());
+        for itm in items {
+            let itm = itm.trim();
+            if itm.is_empty() {
+                continue;
+            }
+
+            match itm.parse::<IpAddr>() {
+                Ok(ip) => result.push(ip),
+                Err(_) => {
+                    return Err(format!(
+                        "global_settings.debug_ip: '{}' is not a valid ip address",
+                        itm
+                    ));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+/// `debug_ip:` takes either one address or a list of them.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum DebugIpSettings {
+    Single(String),
+    List(Vec<String>),
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AllHttpEndpointsGlobalSettings {
     pub modify_http_headers: Option<ModifyHttpHeadersSettings>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(yaml: &str) -> GlobalSettings {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn debug_ip_is_absent_by_default() {
+        let settings = parse("http_control_port: 9000");
+
+        assert!(settings.get_debug_ip().unwrap().is_empty());
+    }
+
+    #[test]
+    fn debug_ip_accepts_a_single_address() {
+        let settings = parse("debug_ip: 10.0.0.5");
+
+        assert_eq!(
+            settings.get_debug_ip().unwrap(),
+            vec!["10.0.0.5".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn debug_ip_accepts_a_list() {
+        let settings = parse("debug_ip:\n- 10.0.0.5\n- \"::1\"\n- \"\"");
+
+        assert_eq!(
+            settings.get_debug_ip().unwrap(),
+            vec![
+                "10.0.0.5".parse::<IpAddr>().unwrap(),
+                "::1".parse::<IpAddr>().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn debug_ip_refuses_what_is_not_an_address() {
+        let settings = parse("debug_ip: 10.0.0.5-10.0.0.9");
+
+        let err = settings.get_debug_ip().unwrap_err();
+
+        assert!(err.contains("10.0.0.5-10.0.0.9"), "{err}");
+    }
 }

@@ -1,6 +1,6 @@
-//! Per-connection flow control: each direction of a tunnelled connection opened with
-//! `CONNECT_FC` has a credit window, so its receiving end holds at most the window it advertised,
-//! however slow its reader or target. See "Flow control" in docs/gateway-protocol.md.
+//! Per-connection flow control: each direction of a tunnelled connection has a credit window, so
+//! its receiving end holds at most the window it advertised, however slow its reader or target.
+//! See "Flow control" in docs/gateway-protocol.md.
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -19,7 +19,7 @@ pub const FLOW_CONTROL_WINDOW: usize = 8 * 1024 * 1024;
 /// Payload the consumer has taken before it is credited back in one `WINDOW_UPDATE`.
 pub const FLOW_CONTROL_UPDATE_THRESHOLD: usize = 512 * 1024;
 
-/// Protocol rule: the least window either end may advertise. A smaller `CONNECT_FC` window is
+/// Protocol rule: the least window either end may advertise. A `CONNECT` with a smaller window is
 /// refused, and a connect whose credit at `CONNECT_OK` is smaller fails - under it a chunk might
 /// never fit, and the sender would stall without a word.
 pub const MIN_RECEIVE_WINDOW: usize = 1024 * 1024;
@@ -38,7 +38,7 @@ const _: () = assert!(FLOW_CONTROL_UPDATE_THRESHOLD + MAX_PAYLOAD_CHUNK <= MIN_R
 const _: () = assert!(MIN_RECEIVE_WINDOW <= FLOW_CONTROL_WINDOW);
 const _: () = assert!(FLOW_CONTROL_WINDOW <= u32::MAX as usize);
 
-/// Accounting of one receiving direction of a flow-controlled connection.
+/// Accounting of one receiving direction of a tunnelled connection.
 #[derive(Default)]
 pub struct ReceiveCounter {
     /// Received, not yet taken by the consumer.

@@ -1,9 +1,11 @@
-use std::{io::Read, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
-use encryption::AesEncryptedDataRef;
-use rust_extensions::date_time::DateTimeAsMicroseconds;
+use rust_extensions::{
+    date_time::DateTimeAsMicroseconds, DoubleBuffer, DoubleBufferReader, DoubleBufferWriter,
+};
 use tokio::{io::AsyncReadExt, net::tcp::OwnedReadHalf};
 
+use super::session::{BatchUnpacker, FrameOpener, FRAME_LEN_SIZE, FRAME_TAG_LEN};
 use super::*;
 
 /// A live peer is never silent this long: the client pings every 3 seconds and the server
@@ -12,9 +14,17 @@ use super::*;
 /// the socket - nothing else on the server side would.
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Reads the gateway connection until it ends, and tears it down then.
+///
+/// The work is split between two tasks, with the two buffers of a [`DoubleBuffer`] between
+/// them: the socket reader reads a frame into a buffer and opens it there, and this task unpacks
+/// the batch the frame carries and handles its inner frames, in the order they came. The next
+/// frame may be read and opened there - into the other buffer - while a batch is handled here;
+/// how much the two overlap is up to the scheduler.
 pub async fn gateway_read_loop(
     tcp_gateway: Arc<TcpGatewayInner>,
-    mut read: OwnedReadHalf,
+    read: OwnedReadHalf,
+    opener: FrameOpener,
     gateway_connection: Arc<TcpGatewayConnection>,
     packet_handler: impl TcpGatewayPacketHandler,
     debug: bool,
@@ -28,6 +38,24 @@ pub async fn gateway_read_loop(
 
     let disconnected = gateway_connection.disconnected_token();
 
+    // Each buffer takes a frame of any size a peer may send, and is allocated when it is first
+    // read into.
+    let (buffers, batches) = DoubleBuffer::new(MAX_PAYLOAD_SIZE);
+
+    // The socket reader goes together with this loop, however the loop ends - also while it
+    // waits on a silent socket.
+    let _socket_reader = AbortOnDrop(crate::app::spawn_named(
+        "tcp_gateway_socket_reader",
+        read_socket(
+            read,
+            buffers,
+            opener,
+            gateway_connection.clone(),
+            tcp_gateway.gateway_host.clone(),
+            debug,
+        ),
+    ));
+
     tokio::select! {
         _ = disconnected.cancelled() => {
             if debug {
@@ -38,7 +66,7 @@ pub async fn gateway_read_loop(
                 );
             }
         }
-        _ = read_frames(&tcp_gateway, &mut read, &gateway_connection, &packet_handler, debug) => {}
+        _ = handle_batches(&tcp_gateway, &batches, &gateway_connection, &packet_handler) => {}
     }
 }
 
@@ -56,121 +84,168 @@ impl Drop for ReadLoopTeardown {
     }
 }
 
-async fn read_frames(
-    tcp_gateway: &Arc<TcpGatewayInner>,
-    read: &mut OwnedReadHalf,
-    gateway_connection: &Arc<TcpGatewayConnection>,
-    packet_handler: &impl TcpGatewayPacketHandler,
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The socket reader: reads the frames off the socket, each into one of the two buffers, opens
+/// it in place and hands the batch it carried over to the read loop. It waits while both
+/// buffers are still being handled - the socket is left alone meanwhile, and the peer's writer
+/// slows down to the speed of this side.
+///
+/// It ends when the socket does, on a frame which is too big or does not open, or with the read
+/// loop. Its end of the buffers is dropped then: the read loop handles what was handed over
+/// before, and ends.
+async fn read_socket(
+    mut read: OwnedReadHalf,
+    buffers: DoubleBufferWriter,
+    mut opener: FrameOpener,
+    gateway_connection: Arc<TcpGatewayConnection>,
+    gateway_host: Arc<String>,
     debug: bool,
 ) {
-    let mut buf = crate::tcp_utils::allocated_read_buffer(None);
-    let mut payload_no: u64 = 0;
-    let aes_key = gateway_connection.get_aes_key().clone();
+    let mut frame_no: u64 = 0;
 
     loop {
-        payload_no += 1;
-        let mut payload_size = [0u8; 4];
+        frame_no += 1;
+        let mut frame_len = [0u8; FRAME_LEN_SIZE];
 
-        if let Err(err) = read_exact(read, &mut payload_size, gateway_connection).await {
+        if let Err(err) = read_exact(&mut read, &mut frame_len, &gateway_connection).await {
             if debug {
                 println!(
-                    "[1] Failed to read payload size from TCP Gateway at {}. Err: {}",
-                    tcp_gateway.gateway_host.as_str(),
+                    "[1] Failed to read frame length from TCP Gateway at {}. Err: {}",
+                    gateway_host.as_str(),
                     err
                 );
             }
             return;
         }
 
-        let payload_size = u32::from_le_bytes(payload_size) as usize;
+        let frame_len = u32::from_le_bytes(frame_len) as usize;
 
-        if payload_size > MAX_PAYLOAD_SIZE {
+        if frame_len > MAX_PAYLOAD_SIZE {
             println!(
-                "[1] Failed to read payload size from TCP Gateway at {}. Payload no: {payload_no}. Max payload size is overflown, PayloadSize: {payload_size}",
-                tcp_gateway.gateway_host.as_str(),
+                "[1] Failed to read frame from TCP Gateway at {}. Frame no: {frame_no}. Max frame size is overflown, FrameSize: {frame_len}",
+                gateway_host.as_str(),
             );
             return;
         }
 
-        let mut dynamic_buffer: Vec<u8>;
-        let frame: &mut [u8] = if payload_size > buf.len() {
-            dynamic_buffer = crate::tcp_utils::allocated_read_buffer(Some(payload_size));
-            &mut dynamic_buffer[..]
-        } else {
-            &mut buf[..payload_size]
+        // A frame is a batch - its kind at least - and the tag.
+        if frame_len <= FRAME_TAG_LEN {
+            println!(
+                "[1] Failed to read frame from TCP Gateway at {}. Frame no: {frame_no}. A frame of {frame_len} bytes carries nothing",
+                gateway_host.as_str(),
+            );
+            return;
+        }
+
+        // The read loop is gone.
+        let Ok(mut buffer) = buffers.get_buffer_to_read().await else {
+            return;
         };
 
-        if let Err(err) = read_exact(read, frame, gateway_connection).await {
+        if let Err(err) = read_exact(&mut read, &mut buffer[..frame_len], &gateway_connection).await
+        {
             if debug {
                 println!(
-                    "[2] Failed to read payload from TCP Gateway at {}. Err: {}",
-                    tcp_gateway.gateway_host.as_str(),
+                    "[2] Failed to read frame from TCP Gateway at {}. Err: {}",
+                    gateway_host.as_str(),
                     err
                 );
             }
             return;
         }
 
-        let decrypted = match aes_key.decrypt(&AesEncryptedDataRef::new(frame)) {
-            Ok(decrypted) => decrypted,
-            Err(_) => {
-                println!("TcpGateway is closing connection: decryption failed");
+        let batch_len = match opener.open(&mut buffer[..frame_len]) {
+            Ok(batch_len) => batch_len,
+            Err(err) => {
+                println!(
+                    "TcpGateway is closing connection to {}. Frame no: {frame_no}. {err}",
+                    gateway_host.as_str()
+                );
                 return;
             }
         };
 
-        let decrypted_bytes = decrypted.as_slice();
+        buffer.send(batch_len);
+    }
+}
 
-        if decrypted_bytes.is_empty() {
-            println!("TcpGateway received empty frame body");
+/// Handles the batches the socket reader hands over, until it ends or a batch can not be
+/// handled.
+async fn handle_batches(
+    tcp_gateway: &Arc<TcpGatewayInner>,
+    batches: &DoubleBufferReader,
+    gateway_connection: &Arc<TcpGatewayConnection>,
+    packet_handler: &impl TcpGatewayPacketHandler,
+) {
+    // Unpacks the packed batches; what it needs for that is kept from batch to batch.
+    let mut unpacker = BatchUnpacker::new();
+
+    // Until the socket reader ends: the socket did, or a frame was not what a peer may send.
+    while let Ok(Some(batch)) = batches.get_next().await {
+        let handled = handle_batch(
+            &batch,
+            &mut unpacker,
+            tcp_gateway,
+            gateway_connection,
+            packet_handler,
+        )
+        .await;
+
+        if let Err(err) = handled {
+            println!(
+                "Failed to handle batch from TCP Gateway at {}. Err: {err}",
+                tcp_gateway.gateway_host.as_str()
+            );
             return;
         }
 
-        if decrypted_bytes[0] == COMPRESSED_BATCH_PACKET_ID {
-            if let Err(err) = handle_compressed_batch(
-                decrypted_bytes,
-                tcp_gateway,
-                gateway_connection,
-                packet_handler,
-            )
-            .await
-            {
-                println!(
-                    "TcpGateway compressed batch from {} failed: {err}",
-                    tcp_gateway.gateway_host.as_str()
-                );
-                return;
-            }
-            continue;
+        unpacker.release_buffer();
+
+        // `batch` is dropped here: handled, and its buffer is free for a frame again.
+    }
+}
+
+/// Handles the inner frames `[u32 LEN][u8 TYPE][PAYLOAD]` of one batch, one after another.
+async fn handle_batch(
+    batch: &[u8],
+    unpacker: &mut BatchUnpacker,
+    tcp_gateway: &Arc<TcpGatewayInner>,
+    gateway_connection: &Arc<TcpGatewayConnection>,
+    packet_handler: &impl TcpGatewayPacketHandler,
+) -> Result<(), String> {
+    let mut frames = unpacker.read_batch(batch)?;
+
+    while !frames.is_empty() {
+        let Some((frame_len, rest)) = frames.split_first_chunk::<4>() else {
+            return Err("Batch: trailing bytes after last inner frame".to_string());
+        };
+
+        let frame_len = u32::from_le_bytes(*frame_len) as usize;
+
+        if frame_len > rest.len() {
+            return Err("Batch: truncated inner frame".to_string());
         }
 
-        match TcpGatewayContract::parse_with_capabilities(
-            decrypted_bytes,
-            gateway_connection.own_capabilities(),
-        ) {
-            Ok(packet) => {
-                if let Err(err) = packet_handler
-                    .handle_packet(packet, tcp_gateway, gateway_connection)
-                    .await
-                {
-                    println!(
-                        "Failed to handle packet from TCP Gateway at {}. Err: {}",
-                        tcp_gateway.gateway_host.as_str(),
-                        err
-                    );
-                    return;
-                }
-            }
-            Err(err) => {
-                println!(
-                    "Failed to parse packet from TCP Gateway at {}. Err: {:?}",
-                    tcp_gateway.gateway_host.as_str(),
-                    err
-                );
-                return;
-            }
-        }
+        let (frame, rest) = rest.split_at(frame_len);
+        frames = rest;
+
+        let packet = TcpGatewayContract::parse(frame)
+            .map_err(|err| format!("Batch: failed to parse inner frame: {err}"))?;
+
+        packet_handler
+            .handle_packet(packet, tcp_gateway, gateway_connection)
+            .await
+            .map_err(|err| format!("Batch: handler failed: {err}"))?;
     }
+
+    Ok(())
 }
 
 /// `read_exact` which gives up on a peer silent for [`READ_IDLE_TIMEOUT`] and records every
@@ -197,82 +272,4 @@ async fn read_exact(
     }
 
     Ok(())
-}
-
-async fn handle_compressed_batch(
-    decrypted: &[u8],
-    tcp_gateway: &Arc<TcpGatewayInner>,
-    gateway_connection: &Arc<TcpGatewayConnection>,
-    packet_handler: &impl TcpGatewayPacketHandler,
-) -> Result<(), String> {
-    if decrypted.len() < 2 {
-        return Err("COMPRESSED_BATCH: missing algo byte".to_string());
-    }
-    let algo = decrypted[1];
-    if algo != COMPRESSION_ALGO_ZSTD {
-        return Err(format!("COMPRESSED_BATCH: unknown algo byte {algo}"));
-    }
-
-    let decompressed = decompress_batch(&decrypted[2..])?;
-
-    let mut offset = 0usize;
-    while offset + 4 <= decompressed.len() {
-        let inner_len = u32::from_le_bytes([
-            decompressed[offset],
-            decompressed[offset + 1],
-            decompressed[offset + 2],
-            decompressed[offset + 3],
-        ]) as usize;
-        offset += 4;
-        if offset + inner_len > decompressed.len() {
-            return Err("COMPRESSED_BATCH: truncated inner frame".to_string());
-        }
-        let body = &decompressed[offset..offset + inner_len];
-        offset += inner_len;
-
-        if body.is_empty() {
-            return Err("COMPRESSED_BATCH: empty inner frame".to_string());
-        }
-        if body[0] == COMPRESSED_BATCH_PACKET_ID {
-            return Err("COMPRESSED_BATCH: nested batch is not allowed".to_string());
-        }
-
-        let packet = TcpGatewayContract::parse_with_capabilities(
-            body,
-            gateway_connection.own_capabilities(),
-        )
-        .map_err(|err| format!("COMPRESSED_BATCH: failed to parse inner frame: {err}"))?;
-        packet_handler
-            .handle_packet(packet, tcp_gateway, gateway_connection)
-            .await
-            .map_err(|err| format!("COMPRESSED_BATCH: handler failed: {err}"))?;
-    }
-
-    if offset != decompressed.len() {
-        return Err("COMPRESSED_BATCH: trailing bytes after last inner frame".to_string());
-    }
-
-    Ok(())
-}
-
-/// Decompresses no further than one byte past [`MAX_DECOMPRESSED_BATCH_SIZE`]: checking the
-/// size of a fully decompressed batch would come after the memory is already spent.
-pub(crate) fn decompress_batch(compressed: &[u8]) -> Result<Vec<u8>, String> {
-    let decoder = zstd::stream::read::Decoder::new(compressed)
-        .map_err(|err| format!("COMPRESSED_BATCH: zstd decompress failed: {err}"))?;
-
-    let mut decompressed = Vec::new();
-    decoder
-        .take(MAX_DECOMPRESSED_BATCH_SIZE as u64 + 1)
-        .read_to_end(&mut decompressed)
-        .map_err(|err| format!("COMPRESSED_BATCH: zstd decompress failed: {err}"))?;
-
-    if decompressed.len() > MAX_DECOMPRESSED_BATCH_SIZE {
-        return Err(format!(
-            "COMPRESSED_BATCH: decompressed size exceeds {} limit",
-            MAX_DECOMPRESSED_BATCH_SIZE
-        ));
-    }
-
-    Ok(decompressed)
 }

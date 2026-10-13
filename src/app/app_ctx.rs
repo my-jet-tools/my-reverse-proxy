@@ -85,6 +85,9 @@ pub struct AppContext {
     pub metrics: Metrics,
     pub proxy_logs: ProxyLogs,
     pub debug_flags: DebugFlags,
+    /// `global_settings.debug_ip`. Filled by `load_everything_from_settings`, so
+    /// it follows every settings reload.
+    pub debug_ip: DebugIpList,
     pub active_listen_ports: Mutex<ActiveListenPorts>,
 
     pub ssh_config_list: SshConfigList,
@@ -129,14 +132,17 @@ impl AppContext {
             if let Some(gateway_server_settings) = settings_model.get_gateway_server() {
                 let authorized_keys = gateway_server_settings.load_authorized_keys().unwrap();
                 let allowed_ip = gateway_server_settings.get_allowed_ip_list().unwrap();
-                Some(TcpGatewayServer::new(
-                    format!("0.0.0.0:{}", gateway_server_settings.port,),
-                    authorized_keys,
-                    allowed_ip,
-                    false,
-                    true,
-                    gateway_server_settings.is_debug(),
-                ))
+                // A port which can not be bound ends the startup, as the keys above do: a
+                // proxy with no gateway listener must not come up.
+                Some(
+                    TcpGatewayServer::new(
+                        format!("0.0.0.0:{}", gateway_server_settings.port,),
+                        authorized_keys,
+                        allowed_ip,
+                        gateway_server_settings.is_debug(),
+                    )
+                    .unwrap(),
+                )
             } else {
                 None
             };
@@ -152,13 +158,12 @@ impl AppContext {
                 id: id.to_string(),
                 remote_endpoint: client_settings.remote_host.to_string(),
                 signing_key,
-                compress_outbound: client_settings.get_supported_compression(),
+                compression: client_settings.get_compression(id.as_str()).unwrap(),
                 allow_incoming_forward_connections: client_settings
                     .get_allow_incoming_forward_connections(),
                 connect_timeout: client_settings.get_connect_timeout(),
                 debug: client_settings.is_debug(),
                 sync_ssl_certificates: client_settings.get_sync_ssl_certificates(),
-                protocol_extensions: true,
             });
 
             gateway_clients.insert(id.clone(), client);
@@ -187,6 +192,7 @@ impl AppContext {
             metrics: Metrics::new(),
             proxy_logs: ProxyLogs::new(),
             debug_flags: DebugFlags::new(),
+            debug_ip: DebugIpList::new(),
             active_listen_ports: Mutex::new(ActiveListenPorts::new()),
             ssh_config_list: SshConfigList::new(),
             allowed_users_list: AllowedUsersList::new(),

@@ -12,9 +12,7 @@ use tokio_util::sync::{CancellationToken, PollSemaphore};
 
 use crate::{
     network_stream::*,
-    tcp_gateway::{
-        ConnectionEnd, TcpConnectionInner, TcpGatewayContract, CAP_FIN_RST, MAX_PAYLOAD_CHUNK,
-    },
+    tcp_gateway::{ConnectionEnd, TcpConnectionInner, TcpGatewayContract, MAX_PAYLOAD_CHUNK},
 };
 
 use super::{ForwardProxyHandlers, ProxyReceiveBuffer, ProxyReceiveClose};
@@ -53,8 +51,8 @@ pub struct TcpGatewayProxyForwardStream {
     /// request behind every producer which queued since - and a hyper h2 client grows its buffer
     /// with every new stream, so it would never get its turn under load.
     pending_budget: Option<u32>,
-    /// Where `poll_write` waits for the peer's credit on a flow-controlled connection. Like the
-    /// budget wait, never carried over to a clone.
+    /// Where `poll_write` waits for the peer's credit. Like the budget wait, never carried over
+    /// to a clone.
     window_wait: Option<PollSemaphore>,
     /// Credit `poll_write` holds while it waits for budget. Dropping it - with the stream, or on
     /// an error - gives the credit back.
@@ -117,18 +115,9 @@ impl TcpGatewayProxyForwardStream {
         }
     }
 
-    /// Opened with `CONNECT_FC`: the peer's credit bounds what it sends, and what it holds.
-    #[cfg(test)]
-    pub fn is_flow_controlled(&self) -> bool {
-        self.shared.receive_buffer.send_window().is_some()
-    }
-
-    /// Credit for what this stream may still send; `None` without flow control.
-    pub(crate) fn send_credit_available(&self) -> Option<usize> {
-        self.shared
-            .receive_buffer
-            .send_window()
-            .map(|window| window.available_permits())
+    /// Credit for what this stream may still send.
+    pub(crate) fn send_credit_available(&self) -> usize {
+        self.shared.receive_buffer.send_window().available_permits()
     }
 
     /// Bytes received and not yet read.
@@ -138,8 +127,8 @@ impl TcpGatewayProxyForwardStream {
     }
 
     #[cfg(test)]
-    pub fn send_window_for_tests(&self) -> Option<std::sync::Arc<tokio::sync::Semaphore>> {
-        self.shared.receive_buffer.send_window().cloned()
+    pub fn send_window_for_tests(&self) -> std::sync::Arc<tokio::sync::Semaphore> {
+        self.shared.receive_buffer.send_window().clone()
     }
 
     /// Splits into a read and a write half; dropping either one closes the connection.
@@ -159,8 +148,7 @@ impl TcpGatewayProxyForwardStream {
     }
 
     /// Sends `payload` to the peer as frames of at most [`MAX_PAYLOAD_CHUNK`], each waiting for
-    /// the peer's credit on a flow-controlled connection, then for room in the gateway write
-    /// budget.
+    /// the peer's credit, then for room in the gateway write budget.
     pub async fn send_payload(&self, payload: &[u8]) -> bool {
         let closed = self.shared.receive_buffer.closed_token();
         let window = self.shared.receive_buffer.send_window();
@@ -179,13 +167,10 @@ impl TcpGatewayProxyForwardStream {
 
             let send = async {
                 // Credit first, budget second: waiting for the peer's reader never holds budget.
-                let credit = match window {
-                    Some(window) => match window.acquire_many(chunk.len() as u32).await {
-                        Ok(permit) => Some(permit),
-                        // Closed together with the connection.
-                        Err(_) => return false,
-                    },
-                    None => None,
+                let credit = match window.acquire_many(chunk.len() as u32).await {
+                    Ok(permit) => permit,
+                    // Closed together with the connection.
+                    Err(_) => return false,
                 };
 
                 let sent = self
@@ -196,9 +181,7 @@ impl TcpGatewayProxyForwardStream {
 
                 // Spent once queued. A future dropped before - the close below, the caller's
                 // write timeout - gives the credit back.
-                if let Some(credit) = credit {
-                    credit.forget();
-                }
+                credit.forget();
 
                 sent
             };
@@ -313,10 +296,7 @@ impl ProxyStreamShared {
         // We ended the connection locally — notify the peer so it ends the matching forward
         // connection the same way. Queued behind the payloads sent before: the target gets them
         // all ahead of the end.
-        let fin_rst = self.gateway_connection_inner.peer_takes(CAP_FIN_RST);
-        let frame = end
-            .to_contract(self.connection_id, fin_rst, "")
-            .to_plain_frame();
+        let frame = end.to_contract(self.connection_id).to_plain_frame();
 
         self.gateway_connection_inner.send_payload(frame);
 
@@ -412,8 +392,8 @@ impl AsyncRead for TcpGatewayProxyForwardStream {
 
 impl AsyncWrite for TcpGatewayProxyForwardStream {
     /// Takes at most one frame's payload ([`MAX_PAYLOAD_CHUNK`]) per call, and only once the
-    /// peer's credit for it (on a flow-controlled connection) and then its share of the write
-    /// budget are acquired - until then it is `Pending` and nothing is taken, which is what
+    /// peer's credit for it and then its share of the write budget are acquired - until then it
+    /// is `Pending` and nothing is taken, which is what
     /// backpressures the caller to the speed of the peer's reader and of the gateway link.
     fn poll_write(
         self: Pin<&mut Self>,
@@ -436,28 +416,27 @@ impl AsyncWrite for TcpGatewayProxyForwardStream {
         // Credit first. Not sticky, unlike the budget: only this connection's writers wait on its
         // window. Budget is asked for only while credit is held, so waiting for credit never
         // holds budget.
-        if let Some(window) = this.shared.receive_buffer.send_window().cloned() {
-            if this.held_credit.is_none() {
-                let acquired = this
-                    .window_wait
-                    .get_or_insert_with(|| PollSemaphore::new(window))
-                    .poll_acquire_many(cx, want as u32);
+        if this.held_credit.is_none() {
+            let window = this.shared.receive_buffer.send_window().clone();
+            let acquired = this
+                .window_wait
+                .get_or_insert_with(|| PollSemaphore::new(window))
+                .poll_acquire_many(cx, want as u32);
 
-                match acquired {
-                    Poll::Ready(Some(credit)) => this.held_credit = Some(credit),
-                    // The window is closed together with the connection.
-                    Poll::Ready(None) => {
-                        this.stop_waiting();
-                        return Poll::Ready(Err(not_connected()));
-                    }
-                    // Woken by the peer's credit, or by the window closing with the connection.
-                    Poll::Pending => return Poll::Pending,
+            match acquired {
+                Poll::Ready(Some(credit)) => this.held_credit = Some(credit),
+                // The window is closed together with the connection.
+                Poll::Ready(None) => {
+                    this.stop_waiting();
+                    return Poll::Ready(Err(not_connected()));
                 }
+                // Woken by the peer's credit, or by the window closing with the connection.
+                Poll::Pending => return Poll::Pending,
             }
-
-            // A buffer which grew since the credit was taken gets a short write.
-            want = want.min(this.held_credit.as_ref().map_or(0, |c| c.num_permits()));
         }
+
+        // A buffer which grew since the credit was taken gets a short write.
+        want = want.min(this.held_credit.as_ref().map_or(0, |c| c.num_permits()));
 
         let Some(semaphore) = this.shared.gateway_connection_inner.write_budget() else {
             // Not a gateway peer writer: there is no budget to wait for.

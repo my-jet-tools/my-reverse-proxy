@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    utils::{create_err_response, RejectedRequest},
+    utils::{create_bad_request_response, create_err_response, BadRequestReason, RejectedRequest},
     LiveEndpointCache,
 };
 
@@ -69,9 +69,11 @@ impl HttpsRequestsHandler {
                     req.headers()
                 ),
             );
-            return Err(create_err_response(
-                StatusCode::BAD_REQUEST,
-                "Unknown host".to_string().into_bytes(),
+            return Err(create_bad_request_response(
+                &self.connection_ip,
+                req,
+                &listen_port_config,
+                BadRequestReason::HostNotDetected,
             ));
         };
 
@@ -91,9 +93,12 @@ impl HttpsRequestsHandler {
                     host
                 ),
             );
-            let content =
-                crate::error_templates::generate_layout(400, "No configuration found", None);
-            return Err(create_err_response(StatusCode::BAD_REQUEST, content));
+            return Err(create_bad_request_response(
+                &self.connection_ip,
+                req,
+                &listen_port_config,
+                BadRequestReason::NoConfigurationForHost(host.as_str()),
+            ));
         };
 
         // mTLS is enforced only during the TLS handshake, which is bound to the

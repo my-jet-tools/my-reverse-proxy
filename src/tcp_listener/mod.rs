@@ -15,3 +15,6 @@ mod listen_unix_server;
 pub mod mcp;
 mod tcp_port_forward;
 pub use listen_unix_server::*;
+
+#[cfg(test)]
+mod files_location_tests;

@@ -110,8 +110,8 @@ impl H1Writer for BodyChannelSink {
 pub const REQUEST_BODY_CHANNEL_CAPACITY: usize = 4;
 
 /// An [`H1Writer`] that discards everything. Used to DRAIN the request body off
-/// the client stream for responses synthesized without an upstream (static /
-/// local files), so the connection stays byte-synced for the next request.
+/// the client stream for responses synthesized without an upstream worker
+/// (static / files), so the connection stays byte-synced for the next request.
 pub struct NullSink;
 
 #[async_trait::async_trait]

@@ -6,6 +6,9 @@ use x509_parser::nom::AsBytes;
 pub static NOT_FOUND: LazyLock<Vec<u8>> =
     LazyLock::new(|| generate_layout(404, "Resource not found", None));
 
+pub static BAD_REQUEST: LazyLock<Vec<u8>> =
+    LazyLock::new(|| generate_layout(400, "Bad Request", None));
+
 pub static REMOTE_RESOURCE_IS_NOT_AVAILABLE: LazyLock<Vec<u8>> = LazyLock::new(|| {
     generate_layout(
         503,

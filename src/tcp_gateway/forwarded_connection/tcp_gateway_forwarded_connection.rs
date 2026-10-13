@@ -8,12 +8,11 @@ pub struct TcpGatewayForwardConnection {
     inner: Arc<TcpConnectionInner>,
     connection_id: u32,
     remote_endpoint: Arc<String>,
-    /// The initiator's credit for what the target sends back; `None` without flow control.
-    /// Closed when the connection is unregistered.
-    send_window: Option<Semaphore>,
-    /// This side's window for what the initiator sends to the target; `None` without flow
-    /// control.
-    receive_window: Option<Arc<ReceiveWindow>>,
+    /// The initiator's credit for what the target sends back. Closed when the connection is
+    /// unregistered.
+    send_window: Semaphore,
+    /// This side's window for what the initiator sends to the target.
+    receive_window: Arc<ReceiveWindow>,
 }
 
 impl TcpGatewayForwardConnection {
@@ -21,14 +20,14 @@ impl TcpGatewayForwardConnection {
     /// [`Self::start`] once the connection is registered: reading the upstream earlier could
     /// send its first bytes under a connection id the gateway connection does not know yet.
     ///
-    /// `peer_window`: the initiator's receive window from `CONNECT_FC` - `Some` makes the
-    /// connection flow controlled.
+    /// `peer_window`: the initiator's receive window from `CONNECT` - this side's credit for
+    /// what the target sends back.
     pub async fn connect(
         connection_id: u32,
         gateway_connection: &TcpGatewayConnection,
         remote_endpoint: Arc<String>,
         timeout: Duration,
-        peer_window: Option<u32>,
+        peer_window: u32,
     ) -> Result<(Self, MyOwnedReadHalf), String> {
         println!(
             "Gateway:[{}]. Establishing Forwarded connection to endpoint {} with id {}",
@@ -53,11 +52,9 @@ impl TcpGatewayForwardConnection {
 
         let (read, write) = tcp_stream.into_split();
 
-        let receive_window =
-            peer_window.map(|_| gateway_connection.new_receive_window(connection_id));
+        let receive_window = gateway_connection.new_receive_window(connection_id);
         let inner = TcpConnectionInner::new_raw_passthrough(write, receive_window.clone());
-        let send_window =
-            peer_window.map(|window| Semaphore::new((window as usize).min(MAX_SEND_CREDIT)));
+        let send_window = Semaphore::new((peer_window as usize).min(MAX_SEND_CREDIT));
 
         let result = Self {
             connection_id,
@@ -70,30 +67,24 @@ impl TcpGatewayForwardConnection {
         Ok((result, read))
     }
 
-    pub fn send_window(&self) -> Option<&Semaphore> {
-        self.send_window.as_ref()
+    pub fn send_window(&self) -> &Semaphore {
+        &self.send_window
     }
 
     /// A payload of `len` bytes for the target arrived. `false`: the initiator sent past this
     /// side's window.
     pub fn count_received(&self, len: usize) -> bool {
-        self.receive_window
-            .as_ref()
-            .is_none_or(|receive_window| receive_window.received(len))
+        self.receive_window.received(len)
     }
 
     pub fn add_send_credit(&self, credit: u32) {
-        if let Some(send_window) = self.send_window.as_ref() {
-            add_credit(send_window, credit);
-        }
+        add_credit(&self.send_window, credit);
     }
 
-    /// What is held for the target, not yet written; `None` without flow control.
+    /// What is held for the target, not yet written.
     #[cfg(test)]
-    pub fn buffered_for_tests(&self) -> Option<usize> {
-        self.receive_window
-            .as_ref()
-            .map(|receive_window| receive_window.held())
+    pub fn buffered_for_tests(&self) -> usize {
+        self.receive_window.held()
     }
 
     /// The state after a failed write to the target: the flag down, the writer stopped, the
@@ -130,10 +121,7 @@ impl TcpGatewayForwardConnection {
     /// the flag alone, so the forwarding after it still gets credit.
     pub fn disconnect(&self) {
         self.inner.disconnect();
-
-        if let Some(send_window) = self.send_window.as_ref() {
-            send_window.close();
-        }
+        self.send_window.close();
     }
 
     /// Resets the connection: what is queued for the downstream service is dropped and its
@@ -142,10 +130,7 @@ impl TcpGatewayForwardConnection {
     /// peer reset it, or the gateway connection is gone.
     pub fn reset(&self) {
         self.inner.reset();
-
-        if let Some(send_window) = self.send_window.as_ref() {
-            send_window.close();
-        }
+        self.send_window.close();
     }
 
     pub fn start(&self, read: MyOwnedReadHalf, gateway_connection: Arc<TcpGatewayConnection>) {
@@ -242,7 +227,6 @@ async fn read_loop(
                 crate::tcp_gateway::scripts::end_forward_connection(
                     gateway_connection.as_ref(),
                     connection_id,
-                    &remote_host,
                     ConnectionEnd::Reset(&err),
                 );
                 break false;
@@ -261,7 +245,6 @@ async fn read_loop(
             crate::tcp_gateway::scripts::end_forward_connection(
                 gateway_connection.as_ref(),
                 connection_id,
-                &remote_host,
                 ConnectionEnd::Closed,
             );
             break false;
@@ -364,7 +347,6 @@ fn close_after_write_failure(
     crate::tcp_gateway::scripts::end_forward_connection(
         gateway_connection,
         connection_id,
-        remote_host,
         ConnectionEnd::Reset(&err),
     );
 }
@@ -427,7 +409,12 @@ async fn connect_to_tcp_socket(
     };
 
     match result {
-        Ok(tcp_stream) => Ok(MyNetworkStream::Tcp(tcp_stream)),
+        Ok(tcp_stream) => {
+            // What the peer sent goes to the target as it comes: a request whose head and body
+            // came as two frames must not wait for the target to acknowledge the head.
+            let _ = tcp_stream.set_nodelay(true);
+            Ok(MyNetworkStream::Tcp(tcp_stream))
+        }
         Err(err) => Err(format!(
             "Can not connect to tcp-socket {} with id {}. Err: {:?}",
             remote_endpoint, connection_id, err

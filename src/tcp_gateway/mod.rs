@@ -1,8 +1,6 @@
 mod gateway_contracts;
 
 pub use gateway_contracts::*;
-mod capabilities;
-pub use capabilities::*;
 mod flow_control;
 pub use flow_control::*;
 mod tcp_connection_inner;

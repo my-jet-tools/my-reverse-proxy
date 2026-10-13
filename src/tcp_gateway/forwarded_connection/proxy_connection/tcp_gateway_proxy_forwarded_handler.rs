@@ -45,17 +45,15 @@ impl TcpGatewayProxyForwardConnectionHandler {
     /// resolves once the peer accepts or refuses the connection. Dropping the handler without
     /// an answer (the gateway connection went down) resolves it with a receive error.
     ///
-    /// `flow_control`: the connection is opened with `CONNECT_FC` - both its windows live in the
-    /// receive buffer, which carries the connection's close state.
+    /// Both windows of the connection live in the receive buffer, which carries the connection's
+    /// close state.
     pub fn new(
         connection_id: u32,
         connection_inner: Arc<TcpConnectionInner>,
         remote_host: Arc<String>,
         handlers_map: Weak<ForwardProxyHandlers>,
-        flow_control: bool,
     ) -> (Self, TcpGatewayProxyForwardStream, ConnectAcknowledgement) {
-        let receive_window =
-            flow_control.then(|| ReceiveWindow::new(connection_id, connection_inner.clone()));
+        let receive_window = ReceiveWindow::new(connection_id, connection_inner.clone());
         let receive_buffer = Arc::new(ProxyReceiveBuffer::new(receive_window));
         let (acknowledge, acknowledgement) = oneshot::channel();
 
@@ -84,9 +82,9 @@ impl TcpGatewayProxyForwardConnectionHandler {
         self.receive_buffer.clone()
     }
 
-    /// The peer's credit for what the stream sends; `None` without flow control.
-    pub fn send_window(&self) -> Option<Arc<Semaphore>> {
-        self.receive_buffer.send_window().cloned()
+    /// The peer's credit for what the stream sends.
+    pub fn send_window(&self) -> Arc<Semaphore> {
+        self.receive_buffer.send_window().clone()
     }
 
     pub fn set_connected(&mut self) {

@@ -247,17 +247,54 @@ caveat as `Http2`: only the legacy hyper path uses this, via
 
 ### `FilesPath(ProxyPassFilesPathModel)`
 
-Serves static files from a path. The path may itself be remote:
+Serves files from a folder. The folder may itself be remote:
 
-- `Direct { remote_host }` — path on the proxy's local filesystem;
-  `LocalPathContent` is used directly.
-- `OverSsh` — files are read over SSH (SFTP-like).
-- `Gateway` — files are read through a MyJetTools gateway.
+- `Direct { remote_host }` — a folder on the proxy's local filesystem. A
+  leading `~` is the home directory of the proxy.
+- `OverSsh` — files are read over SFTP. The ssh session is taken from the
+  pool per request, and a leading `~` is the home directory of the ssh user
+  on the remote host.
+- `Gateway` — files are read by the other end of a MyJetTools gateway
+  connection, one `GET_FILE_REQUEST` per file, so a file is at most
+  `MAX_FILE_RESPONSE_SIZE`.
 
-Per-request flow: `Upstream::connect` constructs an
-`UpstreamInner::LocalFiles(Arc<LocalPathContent>)` (no upstream TCP),
-and `read_http_response` spawns `execute_local_path` which reads the
-file and writes the HTTP response synthesized from the file contents.
+All three are behind one type, `FilesContentSource`
+(`src/http_content_source/files_content_source.rs`), and both serving
+paths go through it:
+
+- the h1 byte pipeline (`http` / `https` endpoints) answers in the reader
+  task, without an upstream worker: the request body is drained, then
+  `answer_files_request` (`src/h1_proxy_server/pipeline/files.rs`) builds
+  the response;
+- the hyper path (`http2` / `https2` endpoints) reaches it as
+  `HttpProxyPassContentSource::Files`, through
+  `FilesContentSource::execute`.
+
+Per request:
+
+1. The request path, without the query string, is checked by
+   `FileRequestPath::parse`
+   (`src/http_content_source/file_request_path.rs`). It has to start with
+   `/`, and to hold no `..` segment and no control character — written as
+   they are or percent-encoded: the check looks at the path after one pass
+   of percent-decoding, with `/` and `\` both taken for separators. Nor may
+   it hold a `.` segment, or an empty one which is not the last — `//x`,
+   `/./x`: to the file system those are the file `/x`, while the location
+   was picked by the path as it is written, so they would be served past
+   the location which guards `/x`. A path which does not pass is answered
+   `400 Bad Request`.
+2. `FileRequestPath::in_folder` glues the path to the folder. It is the
+   only function which does, and the three sources take a
+   `&FileRequestPath`, so no path gets to a source unchecked. The root
+   means `default_file`, and is a 404 without one. The path is glued as it
+   was received: file names are not percent-decoded.
+3. The source reads the file. Its content type comes from the extension
+   (`WebContentType::detect_by_extension`).
+
+A file which is not there is a 404. A gateway or an ssh host which can not
+be reached is a 503 on the h1 pipeline, written to the proxy logs, and a
+500 tech page on the hyper path. The h1 pipeline serves `GET` only — any
+other method is a 404 — and the hyper path does not look at the method.
 
 ### `Static(Arc<StaticContentConfig>)`
 

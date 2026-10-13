@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http::StatusCode;
 use http_body_util::combinators::BoxBody;
 
 use crate::{configurations::HttpListenPortConfiguration, http_proxy_pass::*, types::ConnectionIp};
 
 use super::{
-    utils::{create_err_response, RejectedRequest},
+    utils::{create_bad_request_response, BadRequestReason, RejectedRequest},
     LiveEndpointCache,
 };
 
@@ -58,9 +57,11 @@ impl HttpRequestHandler {
                     req.headers()
                 ),
             );
-            return Err(create_err_response(
-                StatusCode::BAD_REQUEST,
-                "Unknown host".to_string().into_bytes(),
+            return Err(create_bad_request_response(
+                &self.connection_ip,
+                req,
+                &listen_port_config,
+                BadRequestReason::HostNotDetected,
             ));
         };
 
@@ -80,9 +81,12 @@ impl HttpRequestHandler {
                     host
                 ),
             );
-            let content =
-                crate::error_templates::generate_layout(400, "No configuration found", None);
-            return Err(create_err_response(StatusCode::BAD_REQUEST, content));
+            return Err(create_bad_request_response(
+                &self.connection_ip,
+                req,
+                &listen_port_config,
+                BadRequestReason::NoConfigurationForHost(host.as_str()),
+            ));
         }
 
         let http_endpoint_info = http_endpoint_info.unwrap();

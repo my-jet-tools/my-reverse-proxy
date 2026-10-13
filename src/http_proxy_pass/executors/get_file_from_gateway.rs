@@ -1,24 +1,35 @@
-use bytes::Bytes;
-use http_body_util::Full;
 use my_http_server::WebContentType;
 
-use crate::{http_content_source::RequestExecutorResult, http_proxy_pass::*};
+use crate::{
+    http_content_source::{FileRequestPath, RequestExecutorResult},
+    http_proxy_pass::*,
+    tcp_gateway::{FileRequestError, TcpGatewayConnection},
+};
 
 pub async fn get_file_from_gateway(
     gateway_id: &str,
-    path: &str,
-    default_file: &Option<String>,
-    req: &hyper::Request<Full<Bytes>>,
+    files_path: &str,
+    default_file: Option<&str>,
+    path: &FileRequestPath<'_>,
 ) -> Result<RequestExecutorResult, ProxyPassError> {
-    let gateway = crate::app::APP_CTX.get_gateway_by_id(gateway_id);
-
-    if gateway.is_none() {
+    let Some(gateway) = crate::app::APP_CTX.get_gateway_by_id(gateway_id) else {
         return Err(ProxyPassError::GatewayError);
-    }
+    };
 
-    let gateway = gateway.unwrap();
+    get_file_from_gateway_connection(&gateway, files_path, default_file, path).await
+}
 
-    let full_path = super::merge_path_and_file(path, req.uri().path(), default_file);
+/// The file `path` means inside `files_path`, a folder on the other end of `gateway`. The other
+/// end reads whatever path it is sent: the folder and the checked path are put together here.
+pub async fn get_file_from_gateway_connection(
+    gateway: &TcpGatewayConnection,
+    files_path: &str,
+    default_file: Option<&str>,
+    path: &FileRequestPath<'_>,
+) -> Result<RequestExecutorResult, ProxyPassError> {
+    let Some(full_path) = path.in_folder(files_path, default_file) else {
+        return Ok(RequestExecutorResult::not_found());
+    };
 
     match gateway.request_file(full_path.as_str()).await {
         Ok(content) => Ok(RequestExecutorResult {
@@ -27,11 +38,10 @@ pub async fn get_file_from_gateway(
             body: content,
         }),
         Err(err) => match err {
-            crate::tcp_gateway::FileRequestError::FileNotFound => {
-                Err(ProxyPassError::NoLocationFound)
+            FileRequestError::FileNotFound => Err(ProxyPassError::NoLocationFound),
+            FileRequestError::GatewayDisconnected | FileRequestError::Timeout => {
+                Err(ProxyPassError::GatewayError)
             }
-            crate::tcp_gateway::FileRequestError::GatewayDisconnected
-            | crate::tcp_gateway::FileRequestError::Timeout => Err(ProxyPassError::GatewayError),
         },
     }
 }

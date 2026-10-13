@@ -69,10 +69,10 @@ impl TcpGatewayClientPacketHandler {
                     error
                 );
 
-                gateway_connection.end_tunnelled_connection(
-                    connection_id,
-                    ConnectionEnd::from_connection_error(error),
-                );
+                // A connect the peer refused, or a connection it does not know: a reset, whatever
+                // the text says.
+                gateway_connection
+                    .end_tunnelled_connection(connection_id, ConnectionEnd::Reset(error));
             }
             TcpGatewayContract::Fin { connection_id } => {
                 gateway_connection.end_tunnelled_connection(connection_id, ConnectionEnd::Closed);
@@ -112,14 +112,10 @@ impl TcpGatewayClientPacketHandler {
                 connection_id,
                 credit,
             } => gateway_connection.incoming_window_update(connection_id, credit),
-            TcpGatewayContract::Ping { capabilities } => {
-                gateway_connection.set_peer_capabilities(capabilities)
+            TcpGatewayContract::Ping => {
+                // The server does not ping.
             }
             TcpGatewayContract::Pong => {
-                // A server with capabilities sends its PING before any other frame: a PONG first
-                // means it has none.
-                gateway_connection.set_peer_capabilities(None);
-
                 gateway_connection.ping_stop_watch.pause();
                 let duration = gateway_connection
                     .ping_stop_watch

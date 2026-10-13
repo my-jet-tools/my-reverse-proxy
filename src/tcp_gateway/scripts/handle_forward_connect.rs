@@ -2,13 +2,12 @@ use std::{sync::Arc, time::Duration};
 
 use crate::tcp_gateway::{forwarded_connection::TcpGatewayForwardConnection, *};
 
-/// `peer_window`: the initiator's receive window - `Some` for a `CONNECT_FC`, which opens a
-/// flow-controlled connection.
+/// `peer_window`: the initiator's receive window, as its `CONNECT` says.
 pub async fn handle_forward_connect(
     connection_id: u32,
     remote_host: String,
     timeout: Duration,
-    peer_window: Option<u32>,
+    peer_window: u32,
     gateway_connection: Arc<TcpGatewayConnection>,
 ) {
     if gateway_connection.has_forward_connection(connection_id) {
@@ -26,7 +25,7 @@ pub async fn handle_forward_connect(
     }
 
     // Under the protocol floor a chunk might never fit, and our sender would stall without a word.
-    if peer_window.is_some_and(|window| (window as usize) < MIN_RECEIVE_WINDOW) {
+    if (peer_window as usize) < MIN_RECEIVE_WINDOW {
         crate::tcp_gateway::scripts::send_connection_error(
             gateway_connection.as_ref(),
             connection_id,
@@ -71,15 +70,13 @@ pub async fn handle_forward_connect(
         return;
     }
 
-    if peer_window.is_some() {
-        // The initiator's credit for what it sends - this side's window - right ahead of
-        // CONNECT_OK, so the stream handed out on CONNECT_OK can write at once. In order, not
-        // expedited: CONNECT_OK goes in order anyway, and must never overtake it.
-        gateway_connection.send_payload(&TcpGatewayContract::WindowUpdate {
-            connection_id,
-            credit: FLOW_CONTROL_WINDOW as u32,
-        });
-    }
+    // The initiator's credit for what it sends - this side's window - right ahead of CONNECT_OK,
+    // so the stream handed out on CONNECT_OK can write at once. In order, not expedited:
+    // CONNECT_OK goes in order anyway, and must never overtake it.
+    gateway_connection.send_payload(&TcpGatewayContract::WindowUpdate {
+        connection_id,
+        credit: FLOW_CONTROL_WINDOW as u32,
+    });
 
     let connected_payload = TcpGatewayContract::Connected { connection_id };
     gateway_connection.send_payload(&connected_payload);

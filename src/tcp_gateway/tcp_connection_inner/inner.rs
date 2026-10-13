@@ -1,14 +1,17 @@
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, OnceLock,
+    Arc,
 };
 
-use encryption::aes::AesKey;
 use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+use crate::metrics::PerSecondAccumulator;
 use crate::network_stream::{MyOwnedWriteHalf, NetworkError};
-use crate::tcp_gateway::ReceiveWindow;
+use crate::tcp_gateway::{
+    session::{BatchPacker, CompressionLevel, FrameSealer},
+    ReceiveWindow,
+};
 
 /// Bytes of data frames a gateway peer lets queue up ahead of its socket. A producer which
 /// finds the budget spent waits for the writer to catch up - that is what slows an upstream
@@ -30,8 +33,8 @@ pub struct OutgoingFrame {
 ///
 /// In **gateway peer** mode the writer treats `send_payload` items as
 /// plaintext inner frames (`[u32 LEN][u8 TYPE][PAYLOAD]`) and on each flush
-/// either encrypts each one individually (no compression) or wraps the
-/// batch into a `COMPRESSED_BATCH` frame and encrypts that.
+/// puts the queued ones into a batch, or two - packed when compression is on -
+/// and seals each as a frame.
 ///
 /// In **raw passthrough** mode the writer just concatenates whatever bytes
 /// it receives and writes them to the socket unmodified — used for the
@@ -55,17 +58,16 @@ pub struct TcpConnectionInner {
     /// a gateway peer.
     reset: CancellationToken,
     write_budget: Option<Arc<Semaphore>>,
-    aes_key_opt: Option<Arc<AesKey>>,
-    /// Gateway peer: the capabilities both ends have, once the peer's are known - which of the
-    /// extensions' frames may go to the peer. Fixed for the life of the gateway connection.
-    negotiated: OnceLock<u8>,
 }
 
 impl TcpConnectionInner {
+    /// `compression`: what the writer packs the batches with. `written_bytes` gets what the
+    /// writer hands to the socket: the frames as they are on the wire.
     pub fn new_gateway_peer(
         write_half: MyOwnedWriteHalf,
-        aes_key: Arc<AesKey>,
-        compress_outbound: bool,
+        sealer: FrameSealer,
+        compression: CompressionLevel,
+        written_bytes: Arc<PerSecondAccumulator>,
     ) -> Arc<Self> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let disconnected = CancellationToken::new();
@@ -79,8 +81,6 @@ impl TcpConnectionInner {
             write_failed: CancellationToken::new(),
             reset: CancellationToken::new(),
             write_budget: Some(write_budget.clone()),
-            aes_key_opt: Some(aes_key.clone()),
-            negotiated: OnceLock::new(),
         });
 
         crate::app::spawn_named(
@@ -88,10 +88,11 @@ impl TcpConnectionInner {
             crate::tcp_gateway::session::gateway_write_loop(
                 write_half,
                 receiver,
-                aes_key,
-                compress_outbound,
+                sealer,
+                BatchPacker::new(compression),
                 disconnected,
                 write_budget,
+                written_bytes,
             ),
         );
 
@@ -99,10 +100,10 @@ impl TcpConnectionInner {
     }
 
     /// `receive_window`: the connection's window for the payload the raw writer hands to the
-    /// target - `Some` on a flow-controlled connection, credited back as the target takes it.
+    /// target, credited back as the target takes it.
     pub fn new_raw_passthrough(
         write_half: MyOwnedWriteHalf,
-        receive_window: Option<Arc<ReceiveWindow>>,
+        receive_window: Arc<ReceiveWindow>,
     ) -> Arc<Self> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let disconnected = CancellationToken::new();
@@ -117,8 +118,6 @@ impl TcpConnectionInner {
             write_failed: write_failed.clone(),
             reset: reset.clone(),
             write_budget: None,
-            aes_key_opt: None,
-            negotiated: OnceLock::new(),
         });
 
         crate::app::spawn_named(
@@ -137,33 +136,6 @@ impl TcpConnectionInner {
         );
 
         result
-    }
-
-    /// Fixes the capabilities both ends have. Returns `false` when they were fixed already - by an
-    /// earlier PING or PONG - and are left as they are.
-    pub fn set_negotiated_capabilities(&self, capabilities: u8) -> bool {
-        self.negotiated.set(capabilities).is_ok()
-    }
-
-    /// The capabilities both ends have; `None` while the peer's are not known yet.
-    pub fn negotiated_capabilities(&self) -> Option<u8> {
-        self.negotiated.get().copied()
-    }
-
-    /// Whether the peer is known to take the frames of `capability`.
-    pub fn peer_takes(&self, capability: u8) -> bool {
-        self.negotiated
-            .get()
-            .is_some_and(|negotiated| negotiated & capability == capability)
-    }
-
-    /// Returns the gateway peer's AES key. Panics if invoked on a raw
-    /// passthrough writer (which is a programming error: only gateway peer
-    /// inners hold a key).
-    pub fn aes_key(&self) -> &Arc<AesKey> {
-        self.aes_key_opt
-            .as_ref()
-            .expect("aes_key() invoked on raw passthrough writer")
     }
 
     /// Queues a frame outside the write budget. Used for control frames - they are small, and

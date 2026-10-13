@@ -3,8 +3,8 @@ use std::time::Duration;
 use my_ssh::ssh_settings::OverSshConnectionSettings;
 
 use crate::{
-    app::APP_CTX, http_content_source::local_path::LocalPathContentSrc, http_content_source::*,
-    http_proxy_pass::content_source::*, settings::LocationSettings,
+    app::APP_CTX, http_content_source::*, http_proxy_pass::content_source::*,
+    settings::LocationSettings,
 };
 
 use super::*;
@@ -373,39 +373,9 @@ impl ProxyPassLocationConfig {
                     }
                 }
             }
-            ProxyPassToConfig::FilesPath(model) => match &model.files_path {
-                MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
-                    let model = PathOverGatewayContentSource {
-                        gateway_id: id.clone(),
-                        path: remote_host.clone(),
-                        default_file: model.default_file.clone(),
-                    };
-                    HttpProxyPassContentSource::PathOverGateway(model)
-                }
-                MyReverseProxyRemoteEndpoint::OverSsh {
-                    ssh_credentials,
-                    remote_host,
-                } => {
-                    let ssh_session = crate::scripts::ssh::get_ssh_session(ssh_credentials)
-                        .await
-                        .unwrap();
-                    let src = PathOverSshContentSource::new(
-                        ssh_session,
-                        remote_host.as_str().to_string(),
-                        model.default_file.clone(),
-                        timeout,
-                    );
-
-                    HttpProxyPassContentSource::PathOverSsh(src)
-                }
-                MyReverseProxyRemoteEndpoint::Direct { remote_host } => {
-                    let local_file_path = LocalFilePath::new(remote_host.as_str().to_string());
-                    HttpProxyPassContentSource::LocalPath(LocalPathContentSrc::new(
-                        &local_file_path,
-                        model.default_file.clone(),
-                    ))
-                }
-            },
+            ProxyPassToConfig::FilesPath(model) => {
+                HttpProxyPassContentSource::Files(FilesContentSource::new(model, timeout))
+            }
             ProxyPassToConfig::UnixHttp1(proxy_pass) => match &proxy_pass.remote_host {
                 // The gateway peer connects to a socket path itself: through a gateway a unix
                 // socket upstream is an ordinary one.

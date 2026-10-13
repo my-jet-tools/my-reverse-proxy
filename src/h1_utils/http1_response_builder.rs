@@ -5,10 +5,6 @@ pub struct Http1ResponseBuilder {
 }
 
 impl Http1ResponseBuilder {
-    pub fn new_as_ok_result() -> Self {
-        Self::new(200)
-    }
-
     pub fn new_as_html() -> Self {
         Self::new(200).add_content_type("text/html; charset=UTF-8")
     }

@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use rust_extensions::remote_endpoint::RemoteEndpointOwned;
 
+use crate::http_content_source::{FileRequestPath, RequestExecutorResult};
 use crate::http_proxy_pass::ProxyPassError;
-
-use super::*;
 
 pub struct PathOverGatewayContentSource {
     pub gateway_id: Arc<String>,
@@ -13,18 +12,16 @@ pub struct PathOverGatewayContentSource {
 }
 
 impl PathOverGatewayContentSource {
-    pub async fn execute(
+    pub async fn get_file(
         &self,
-        req: http::Request<http_body_util::Full<bytes::Bytes>>,
-    ) -> Result<HttpResponse, ProxyPassError> {
-        let result = crate::http_proxy_pass::executors::get_file_from_gateway(
+        path: &FileRequestPath<'_>,
+    ) -> Result<RequestExecutorResult, ProxyPassError> {
+        crate::http_proxy_pass::executors::get_file_from_gateway(
             self.gateway_id.as_str(),
             self.path.as_str(),
-            &self.default_file,
-            &req,
+            self.default_file.as_deref(),
+            path,
         )
-        .await?;
-
-        Ok(HttpResponse::Response(result.into()))
+        .await
     }
 }

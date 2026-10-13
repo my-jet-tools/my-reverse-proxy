@@ -1,13 +1,9 @@
 use std::time::Duration;
 
-use encryption::aes::AesKey;
 use rust_extensions::SliceOrVec;
-
-use super::{CAP_FIN_RST, CAP_FLOW_CONTROL};
 
 const PING: u8 = 0;
 const PONG: u8 = 1;
-const CONNECT_PACKET_ID: u8 = 3;
 const CONNECT_OK_PACKET_ID: u8 = 4;
 const CONNECTION_ERROR_PACKET_ID: u8 = 5;
 const SEND_PAYLOAD_PACKET_ID: u8 = 6;
@@ -18,21 +14,20 @@ const GET_FILE_RESPONSE_PACKET_ID: u8 = 10;
 const SYNC_SSL_CERTIFICATES_PACKET_ID: u8 = 11;
 const SYNC_SSL_CERTIFICATES_REQUEST_PACKET_ID: u8 = 12;
 const SYNC_SSL_CERTIFICATE_NOT_FOUND_PACKET_ID: u8 = 13;
-/// Flow control: sent only to a peer which advertised [`CAP_FLOW_CONTROL`] - one which predates
-/// them takes these for unknown types and closes the gateway connection.
-const CONNECT_FC_PACKET_ID: u8 = 14;
+/// `CONNECT` carries the initiator's receive window. Code 3 - `CONNECT` without one, of protocol
+/// version 1 - is not a frame type any more.
+const CONNECT_PACKET_ID: u8 = 14;
 const WINDOW_UPDATE_PACKET_ID: u8 = 15;
-/// Explicit ends of a tunnelled connection: sent only to a peer which advertised [`CAP_FIN_RST`].
+/// Explicit ends of a tunnelled connection.
 const FIN_PACKET_ID: u8 = 16;
 const RST_PACKET_ID: u8 = 17;
-pub const COMPRESSED_BATCH_PACKET_ID: u8 = 20;
 
-pub const COMPRESSION_ALGO_ZSTD: u8 = 0;
-
-/// Largest encrypted frame body a peer accepts - a bigger one closes the gateway connection.
+/// Largest frame a peer accepts - what follows a frame length on the wire. A bigger one closes
+/// the gateway connection.
 pub const MAX_PAYLOAD_SIZE: usize = 5 * 1024 * 1024;
 
-/// Largest `COMPRESSED_BATCH` a peer decompresses.
+/// Largest batch a peer unpacks: a packed batch which says it is bigger closes the gateway
+/// connection.
 pub const MAX_DECOMPRESSED_BATCH_SIZE: usize = 16 * 1024 * 1024;
 
 /// Largest payload a sender puts into one `SEND_PAYLOAD` / `RECEIVE_PAYLOAD` frame. A bigger
@@ -40,9 +35,10 @@ pub const MAX_DECOMPRESSED_BATCH_SIZE: usize = 16 * 1024 * 1024;
 /// for long between other connections' frames.
 pub const MAX_PAYLOAD_CHUNK: usize = 256 * 1024;
 
-/// Largest file a `GET_FILE_RESPONSE` carries. The response is a single frame, so it has to fit
-/// [`MAX_PAYLOAD_SIZE`] with room left for the frame header, the AES padding and zstd's
-/// worst-case expansion of an incompressible file.
+/// Largest file a `GET_FILE_RESPONSE` carries. The response is a single inner frame, and a
+/// sealed frame of its own - what is queued ahead of it goes in the frame before - so it has
+/// to fit [`MAX_PAYLOAD_SIZE`] with the header of its inner frame, the kind of the batch and
+/// the tag: 27 bytes of the 64 KiB left here, the rest is spare.
 pub const MAX_FILE_RESPONSE_SIZE: usize = MAX_PAYLOAD_SIZE - 64 * 1024;
 
 /// Bit set in every connection id the gateway server allocates and in none a client allocates.
@@ -50,20 +46,6 @@ pub const MAX_FILE_RESPONSE_SIZE: usize = MAX_PAYLOAD_SIZE - 64 * 1024;
 /// `CONNECTION_ERROR` names a connection by id alone - with overlapping numbering, closing a
 /// connection opened from one end would also close the one with the same id from the other.
 pub const SERVER_CONNECTION_ID_FLAG: u32 = 0x8000_0000;
-
-/// The `CONNECTION_ERROR` text an acceptor sends a peer without `FIN` when the target closed the
-/// connection cleanly - the text earlier versions send too. With it, or with an empty text (the
-/// initiator closing the connection itself), the connection ends as with `FIN`. Any other text ends
-/// it as with `RST`; see [`ConnectionEnd`].
-pub fn target_closed_message(remote_host: &str, connection_id: u32) -> String {
-    format!("ReadLoop. Connection to {remote_host} with id:{connection_id} is disconnected")
-}
-
-/// Whether a `CONNECTION_ERROR` text reports a clean close; see [`target_closed_message`].
-pub fn is_clean_close(error: &str) -> bool {
-    error.is_empty()
-        || (error.starts_with("ReadLoop. Connection to ") && error.ends_with(" is disconnected"))
-}
 
 /// How one end of a tunnelled connection tells the other that the connection ended. Either way
 /// the receiving end first delivers what arrived before.
@@ -78,45 +60,14 @@ pub enum ConnectionEnd<'s> {
 }
 
 impl<'s> ConnectionEnd<'s> {
-    /// How a `CONNECTION_ERROR` with `error` ends a connection - from a peer without `FIN` and
-    /// `RST`, or one refusing a connect or naming a connection it does not know.
-    pub fn from_connection_error(error: &'s str) -> Self {
-        if is_clean_close(error) {
-            Self::Closed
-        } else {
-            Self::Reset(error)
-        }
-    }
-
-    /// The frame which tells the peer: `FIN` or `RST` when it takes them (`fin_rst`), otherwise
-    /// `CONNECTION_ERROR` - with `closed_text`, a clean-close text, for a clean close, and with the
-    /// reason for a reset. An older peer ends the connection on any of them.
-    pub fn to_contract(
-        self,
-        connection_id: u32,
-        fin_rst: bool,
-        closed_text: &'s str,
-    ) -> TcpGatewayContract<'s> {
-        debug_assert!(is_clean_close(closed_text));
-
-        match (self, fin_rst) {
-            (Self::Closed, true) => TcpGatewayContract::Fin { connection_id },
-            (Self::Reset(reason), true) => TcpGatewayContract::Rst {
+    /// The frame which tells the peer: `FIN` for a clean close, `RST` with the reason for a
+    /// reset.
+    pub fn to_contract(self, connection_id: u32) -> TcpGatewayContract<'s> {
+        match self {
+            Self::Closed => TcpGatewayContract::Fin { connection_id },
+            Self::Reset(reason) => TcpGatewayContract::Rst {
                 connection_id,
                 reason,
-            },
-            (Self::Closed, false) => TcpGatewayContract::ConnectionError {
-                connection_id,
-                error: closed_text,
-            },
-            // A reason which read as a clean close would end the connection as one.
-            (Self::Reset(reason), false) => TcpGatewayContract::ConnectionError {
-                connection_id,
-                error: if is_clean_close(reason) {
-                    "Connection is reset"
-                } else {
-                    reason
-                },
             },
         }
     }
@@ -150,9 +101,8 @@ pub enum TcpGatewayContract<'s> {
         connection_id: u32,
         timeout: Duration,
         remote_host: &'s str,
-        /// The initiator's receive window: `Some` opens a flow-controlled connection with
-        /// `CONNECT_FC`, `None` a plain one with `CONNECT`.
-        receive_window: Option<u32>,
+        /// The initiator's receive window: the acceptor's credit for what it sends back.
+        receive_window: u32,
     },
     /// The sender of this frame lets the other end send `credit` more payload bytes of
     /// `connection_id` towards it.
@@ -184,11 +134,8 @@ pub enum TcpGatewayContract<'s> {
         connection_id: u32,
         payload: SliceOrVec<'s, u8>,
     },
-    /// `capabilities`: the sender's capability bits, `None` for the bare frame of a peer which
-    /// predates them.
-    Ping {
-        capabilities: Option<u8>,
-    },
+    /// The client's keepalive, which the server answers with `Pong`.
+    Ping,
     Pong,
     UpdatePingTime {
         duration: Duration,
@@ -216,10 +163,8 @@ pub enum TcpGatewayContract<'s> {
 }
 
 impl<'s> TcpGatewayContract<'s> {
-    /// Parse a single inner frame body: `[u8 TYPE][PAYLOAD]`. The caller has
-    /// already decrypted and (if needed) decompressed the bytes. Frames of
-    /// type `COMPRESSED_BATCH` must be unwrapped by the caller before being
-    /// passed here.
+    /// Parse a single inner frame body: `[u8 TYPE][PAYLOAD]` - one of those a batch carries.
+    /// The caller has already opened the frame and unpacked its batch.
     pub fn parse(payload: &'s [u8]) -> Result<Self, String> {
         if payload.is_empty() {
             return Err("Empty packet".to_string());
@@ -229,21 +174,16 @@ impl<'s> TcpGatewayContract<'s> {
         match packet_type {
             // Every fixed-size field is read through `read_u8` / `read_u32` / `read_u64`, which
             // turn a short frame into an error. Slicing past the fields afterwards is in bounds.
-            CONNECT_PACKET_ID | CONNECT_FC_PACKET_ID => {
+            CONNECT_PACKET_ID => {
                 let connection_id = read_u32(payload, 0)?;
 
-                // An older peer encodes a sub-second timeout as 0 - give the connect a second
-                // instead of failing it on the spot.
+                // A sender never sends 0: it is taken as a second, not as a connect which fails
+                // on the spot.
                 let timeout = read_u8(payload, 4)?.max(1);
 
-                // CONNECT_FC is CONNECT with the initiator's receive window before the host.
-                let (receive_window, host_at) = if packet_type == CONNECT_FC_PACKET_ID {
-                    (Some(read_u32(payload, 5)?), 9)
-                } else {
-                    (None, 5)
-                };
+                let receive_window = read_u32(payload, 5)?;
 
-                let remote_host = convert_to_string(&payload[host_at..], "CONNECT")?;
+                let remote_host = convert_to_string(&payload[9..], "CONNECT")?;
 
                 Ok(Self::Connect {
                     connection_id,
@@ -412,47 +352,17 @@ impl<'s> TcpGatewayContract<'s> {
                 })
             }
 
-            // Every byte after the type is optional: a peer which predates capabilities sends
-            // none, and reads its PINGs and PONGs by the type alone.
-            PING => Ok(Self::Ping {
-                capabilities: payload.first().copied(),
-            }),
+            // Both are read by the type alone.
+            PING => Ok(Self::Ping),
             PONG => Ok(Self::Pong),
-
-            COMPRESSED_BATCH_PACKET_ID => Err(
-                "COMPRESSED_BATCH must be unwrapped by the read loop, not by parse()".to_string(),
-            ),
 
             _ => Err(format!("Unknown packet type: {}", packet_type)),
         }
     }
 
-    /// [`Self::parse`], except that a side built without an extension takes its frame types for
-    /// unknown ones - as a peer which predates the extension does. With capabilities 0 a side
-    /// behaves on the wire like a peer which predates them all.
-    pub fn parse_with_capabilities(
-        payload: &'s [u8],
-        own_capabilities: u8,
-    ) -> Result<Self, String> {
-        if let Some(&packet_type) = payload.first() {
-            let extension = match packet_type {
-                CONNECT_FC_PACKET_ID | WINDOW_UPDATE_PACKET_ID => CAP_FLOW_CONTROL,
-                FIN_PACKET_ID | RST_PACKET_ID => CAP_FIN_RST,
-                _ => 0,
-            };
-
-            if own_capabilities & extension != extension {
-                return Err(format!("Unknown packet type: {}", packet_type));
-            }
-        }
-
-        Self::parse(payload)
-    }
-
     /// Serialize the contract into its plaintext inner-frame form:
-    /// `[u32 LEN][u8 TYPE][PAYLOAD]`. Encryption and outer framing happen at
-    /// the writer task on flush, after deciding whether to wrap multiple
-    /// frames into a `COMPRESSED_BATCH`.
+    /// `[u32 LEN][u8 TYPE][PAYLOAD]`. The writer task puts the inner frames
+    /// queued by a flush into a batch, or two, and seals each as a frame.
     pub fn to_plain_frame(&self) -> Vec<u8> {
         let mut body = Vec::new();
 
@@ -463,15 +373,10 @@ impl<'s> TcpGatewayContract<'s> {
                 remote_host,
                 receive_window,
             } => {
-                body.push(match receive_window {
-                    Some(_) => CONNECT_FC_PACKET_ID,
-                    None => CONNECT_PACKET_ID,
-                });
+                body.push(CONNECT_PACKET_ID);
                 push_u32(&mut body, *connection_id);
                 body.push(connect_timeout_to_wire(*timeout));
-                if let Some(receive_window) = receive_window {
-                    push_u32(&mut body, *receive_window);
-                }
+                push_u32(&mut body, *receive_window);
                 body.extend_from_slice(remote_host.as_bytes());
             }
             Self::WindowUpdate {
@@ -579,11 +484,8 @@ impl<'s> TcpGatewayContract<'s> {
                 push_u32(&mut body, bytes.len() as u32);
                 body.extend_from_slice(bytes);
             }
-            Self::Ping { capabilities } => {
+            Self::Ping => {
                 body.push(PING);
-                if let Some(capabilities) = capabilities {
-                    body.push(*capabilities);
-                }
             }
             Self::Pong => {
                 body.push(PONG);
@@ -596,18 +498,6 @@ impl<'s> TcpGatewayContract<'s> {
         result.extend_from_slice(&body);
         result
     }
-}
-
-/// Encrypt a plaintext inner-frame body and frame it for the wire.
-/// `body` is `[u8 TYPE][PAYLOAD]` (without the length prefix).
-pub fn encrypt_frame(body: &[u8], aes: &AesKey) -> Vec<u8> {
-    let encrypted = aes.encrypt(body);
-    let encrypted = encrypted.as_slice();
-    let len = (encrypted.len() as u32).to_le_bytes();
-    let mut out = Vec::with_capacity(4 + encrypted.len());
-    out.extend_from_slice(&len);
-    out.extend_from_slice(encrypted);
-    out
 }
 
 fn push_u32(result: &mut Vec<u8>, value: u32) {

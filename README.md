@@ -29,6 +29,7 @@ global_settings:
     session_key: # key to encrypt session data. Not having this field means that key is going to be randomly generated
     show_error_description_on_error_page: true # Show error description on error page
   default_h2_livness_url: /health # Optional: HTTP path used by the h2 upstream pool supervisor as an active liveness probe (see "HTTP/2 upstream pool" section)
+  debug_ip: 10.0.0.5 # Optional: source ip (or a list of them) shown a detailed page instead of a bare 400 (see "Debug ip" section)
   
 hosts:
   localhost:8000:
@@ -511,6 +512,37 @@ hosts:
     - proxy_pass_to: ssh:user@10.0.0.5:22->~/web_content
       default_file: index.html
 ```
+
+### Serving from a folder behind a gateway
+
+```yaml
+hosts:
+  localhost:8001:
+    endpoint:
+      type: http
+    locations:
+    - proxy_pass_to: gateway:gateway_name->/home/user/web_content
+      default_file: index.html
+```
+
+The folder is one on the other end of the gateway `gateway_name`. Through a gateway a file travels as a single frame, so it can be at most about 4.9 MiB: a bigger one is answered 404.
+
+### How a request picks a file
+
+Whatever the folder is - local, behind ssh or behind a gateway:
+
+- The request path is the path of the file inside the folder. The query string is not a part of it: `/index.html?v=1` serves `index.html`.
+- `default_file` is served for the root: `/`, and `/?utm=x` as well. Without `default_file` the root is answered 404.
+- A path with a `..` segment is answered `400 Bad Request`, written as it is or percent-encoded - `/../x`, `/%2e%2e/x`, `/..%2fx`. So is a path with a control character in it - percent-encoded, or as it is where a request line can carry one. A request path does not get out of the folder.
+- A path with an empty segment or a `.` segment - `//x`, `/./x` - is answered `400 Bad Request` as well. To the file system it is the file `/x`, and a location is picked by the path as it is written: served, it would get the file past the location which guards `/x` - its `drop`, its `auth_header`. A file has one path.
+- It is the request path which is checked. A symbolic link inside the folder is followed wherever it points, a file whose name begins with a dot is served like any other, and `default_file` and the folder are taken from the settings as they are.
+- A file name is not percent-decoded: `/my%20file.txt` is a file named `my%20file.txt`, not `my file.txt`.
+- A file which is not there is answered 404.
+
+Two things depend on the type of the endpoint:
+
+- On `http` and `https` endpoints only `GET` is served, any other method is answered 404. `http2` and `https2` endpoints do not look at the method.
+- When the ssh host or the gateway can not be reached, the answer is 503 on `http` and `https` endpoints, and 500 on `http2` and `https2` endpoints.
 
 
 ### Serving static content
@@ -1097,6 +1129,34 @@ hosts:
       debug: true
 ```       
 
+### Debug ip
+
+A request the proxy can not match to a configured host (unknown `Host` / `:authority`, or no host at
+all) is answered with a bare `400 Bad Request` - it says nothing about the proxy or what it serves.
+
+`debug_ip` in `global_settings` names the source ips that get a detailed html page instead: the host
+that was looked up, the request (method, uri, headers), the listener it arrived on and the hosts
+configured on that listener.
+
+```yaml
+global_settings:
+  debug_ip: 10.0.0.5
+
+# or several of them
+global_settings:
+  debug_ip:
+  - 10.0.0.5
+  - 192.168.1.20
+```
+
+- Exact addresses only (IPv4 or IPv6) - no ranges. An entry that is not an ip address fails the
+  settings load.
+- It is matched against the address of the tcp connection, the same way `whitelisted_ip` is - behind
+  a CDN or another proxy that is the address of that proxy, not of the browser.
+- Applied on start and on every full settings reload (`reload_settings`).
+- Covers `http2` and `https2` endpoints - the ones that answer such a request with `400`. `http` and
+  `https` endpoints close the connection silently on an unknown host, for everybody.
+
 ## Auto-injected request headers
 
 Regardless of `modify_http_headers` configuration, the reverse-proxy always injects
@@ -1520,7 +1580,7 @@ gateway_clients:
     remote_host: 10.0.0.0:30000
     ssh_credentials: gateway_identity   # id of the ssh: registry entry above
     connect_timeout: 5000 # ms, optional, default 5000
-    compress: true
+    compress: 2 # compression level, optional, default 0 - no compression
     allow_incoming_forward_connections: true
     sync_ssl_certificates:
       - my_ssl_cert
@@ -1528,6 +1588,7 @@ gateway_clients:
 ```
 
 - `ssh_credentials` - mandatory. Id of an entry in the `ssh:` registry that points to the client's private key (`private_key_file`). The key must be Ed25519; password-only ssh entries are not supported for gateway.
+- `compress` - is optional: the compression level of this gateway connection. `0`, the default, is no compression; `1` is LZ4, the fastest; `2`, `3`, `4` and `5` are Zstandard of its levels 1, 3, 6 and 9 - they pack better than LZ4 and slower, the higher the level the slower. Everything that travels over the connection is packed with the level, in both directions: the client says it in its handshake, and the server packs what it sends to it with the same. The server has no setting of its own. What can not be made smaller - TLS, media, what is packed already - travels as it is. A level which is not in the table fails the startup. How much every level saves and how fast it is - measured on real data - and which one suits which link: [docs/gateway-compression.md](docs/gateway-compression.md).
 - allow_incoming_forward_connections - is optional. Without this parameters - no Forward connections are allowed through gateway from Client side to Server side.
 - sync_ssl_certificates - is optional. List of SSL certificate ids to pull from the remote Gateway Server. See the `SSL Certificate Sync via Gateway` section below.
 
@@ -1673,10 +1734,9 @@ What else holds under failures, without any configuration:
   client of a tunnelled connection resets, a byte pump fails or a write times
   out, the target's connection is reset, and when the target resets, so is the
   client's; a gateway connection going down resets the targets behind it. A
-  clean close still arrives as the end of the stream. Between peers of this
-  version the gateway says which it was (`FIN` / `RST`); an end reported by a
-  peer of an older version reaches the target as a clean close, as before. A
-  unix-socket target can not be reset - it sees the end of the stream.
+  clean close still arrives as the end of the stream: the gateway says which
+  it was (`FIN` / `RST`). A unix-socket target can not be reset - it sees the
+  end of the stream.
 - If any part of a tunnelled connection fails - either direction of its byte
   pumps, the write to the target, the peer - the whole connection is closed on
   both ends, and every loop working for it stops as soon as it has delivered
@@ -1685,11 +1745,10 @@ What else holds under failures, without any configuration:
   stream is not cut by the silence of its other direction, a connection silent
   both ways for `read_timeout` is closed.
 - A reader or target slower than the gateway link slows down only its own
-  connection: between peers of this version each tunnelled connection holds
-  at most 8 MiB per direction in memory, a connection waiting for its reader
-  takes nothing from the others, and the credit which lets it go on never
-  waits behind other connections' data. A peer of an older version keeps
-  working as before, without the bound.
+  connection: each tunnelled connection holds at most 8 MiB per direction in
+  memory, a connection waiting for its reader takes nothing from the others,
+  and the credit which lets it go on never waits behind other connections'
+  data.
 - A client which leaves in the middle of a streaming response (SSE) takes the
   upstream connection with it - through a gateway or directly - instead of
   handing it back to the pool while it is still busy with that response.

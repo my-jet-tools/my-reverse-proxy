@@ -57,8 +57,7 @@ impl TcpGatewayPacketHandler for TcpGatewayServerPacketHandler {
                 gateway_connection
                     .incoming_payload_for_proxy_connection(connection_id, payload.as_slice());
             }
-            TcpGatewayContract::Ping { capabilities } => {
-                gateway_connection.set_peer_capabilities(capabilities);
+            TcpGatewayContract::Ping => {
                 gateway_connection.send_payload(&TcpGatewayContract::Pong);
             }
             TcpGatewayContract::Pong => {}
@@ -76,10 +75,10 @@ impl TcpGatewayPacketHandler for TcpGatewayServerPacketHandler {
                     error
                 );
 
-                gateway_connection.end_tunnelled_connection(
-                    connection_id,
-                    ConnectionEnd::from_connection_error(error),
-                );
+                // A connect the peer refused, or a connection it does not know: a reset, whatever
+                // the text says.
+                gateway_connection
+                    .end_tunnelled_connection(connection_id, ConnectionEnd::Reset(error));
             }
             TcpGatewayContract::Fin { connection_id } => {
                 gateway_connection.end_tunnelled_connection(connection_id, ConnectionEnd::Closed);

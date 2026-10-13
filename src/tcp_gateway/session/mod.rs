@@ -1,4 +1,10 @@
+mod batch;
+mod compression;
+mod frame_cipher;
 mod raw_write_loop;
 mod write_loop;
+pub use batch::*;
+pub use compression::*;
+pub use frame_cipher::*;
 pub use raw_write_loop::*;
 pub use write_loop::*;

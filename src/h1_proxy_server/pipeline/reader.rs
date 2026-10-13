@@ -486,7 +486,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         }
     };
 
-    // Static / local-files: synthesize the response without an upstream. Drain
+    // Static / files: synthesize the response without an upstream worker. Drain
     // the request body first so the connection stays byte-synced for reuse.
     if let ProxyPassToConfig::Static(cfg) = &location.proxy_pass_to {
         let mut builder = crate::h1_utils::Http1ResponseBuilder::new(cfg.status_code);
@@ -503,19 +503,46 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
     }
     if let ProxyPassToConfig::FilesPath(model) = &location.proxy_pass_to {
         // Serve a file from the configured folder (README "Serving the folder
-        // with files"): the request path picks the file; default_file is served
-        // for "/". get_content returns a full HTTP response (or NOT_FOUND /
-        // non-GET 404). Drain the request body so the connection stays synced.
-        let content_source = crate::http_content_source::local_path::LocalPathContent::new(
-            model.files_path.to_string().as_str(),
-            model.default_file.clone(),
+        // with files") — a local one, or one behind a gateway or ssh. Built per
+        // request: the source holds no connection, and the location is resolved
+        // per request anyway, so a settings reload applies at once.
+        let source = crate::http_content_source::FilesContentSource::new(
+            model,
+            crate::consts::DEFAULT_HTTP_CONNECT_TIMEOUT,
         );
-        content_source.send_headers(0, &h1_reader.h1_headers_builder);
-        let response = content_source.get_content(0).await;
-        let bytes = response.as_slice().to_vec();
+        let location_id = location.id;
+
+        // Whatever the answer is, the request body comes off the connection
+        // first. One that can not be read to the end leaves the connection out
+        // of sync — close it.
         let mut null = super::NullSink;
-        let _ = h1_reader.transfer_body(0, &mut null, content_length).await;
-        return match emit_single_response(queue_tx, write_timeout, bytes).await {
+        if h1_reader
+            .transfer_body(0, &mut null, content_length)
+            .await
+            .is_err()
+        {
+            return ReaderStep::Close;
+        }
+
+        // The request line sits in the compiled head, which draining the body
+        // did not touch. The query string is not a part of the file name.
+        let first_line = h1_reader.h1_headers_builder.get_first_line();
+        let (method, path, _query) = first_line.get_verb_path_and_query();
+
+        let answer = super::answer_files_request(&source, method, path).await;
+        if let Some((status, failure)) = answer.returned_5xx {
+            crate::app::APP_CTX.proxy_logs.write_returned_5xx(
+                &endpoint_for_error,
+                Some(location_id),
+                http_connection_info.connection_ip.get_ip_log(),
+                status,
+                failure,
+            );
+        }
+        // An ordinary response, a refused path included: the request was read in
+        // full, so the connection goes on and nothing is counted against the
+        // source IP.
+        return match emit_single_response(queue_tx, write_timeout, answer.bytes).await {
             ReaderStep::Continue if !keep_alive => ReaderStep::Close,
             other => other,
         };

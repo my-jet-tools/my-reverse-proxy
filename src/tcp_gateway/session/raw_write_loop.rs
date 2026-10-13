@@ -9,8 +9,8 @@ use crate::tcp_gateway::{OutgoingFrame, ReceiveWindow};
 /// How long a closing connection may take to hand its last bytes to the downstream service.
 const CLOSE_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The most bytes handed to the downstream service in one write. A flow-controlled connection's
-/// credit goes back after each write, so it returns in steps of this size, not once per backlog.
+/// The most bytes handed to the downstream service in one write. The connection's credit goes
+/// back after each write, so it returns in steps of this size, not once per backlog.
 const RAW_WRITE_BATCH: usize = 256 * 1024;
 
 type WriteFuture = Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>;
@@ -46,13 +46,13 @@ pub struct RawWriterSignals {
 /// flag: the upstream read loop of the same connection sees it, stops, and the
 /// peer is told.
 ///
-/// On a flow-controlled connection `receive_window` gets the bytes each write
-/// handed to the service: the peer may send as many more.
+/// `receive_window` gets the bytes each write handed to the service: the peer
+/// may send as many more.
 pub async fn raw_write_loop(
     write_half: MyOwnedWriteHalf,
     mut rx: mpsc::UnboundedReceiver<OutgoingFrame>,
     signals: RawWriterSignals,
-    receive_window: Option<Arc<ReceiveWindow>>,
+    receive_window: Arc<ReceiveWindow>,
 ) {
     let RawWriterSignals {
         disconnected,
@@ -107,9 +107,7 @@ pub async fn raw_write_loop(
                 }
 
                 // The service took these bytes: the peer may send as many more.
-                if let Some(receive_window) = receive_window.as_ref() {
-                    receive_window.consumed(std::mem::take(&mut in_flight));
-                }
+                receive_window.consumed(std::mem::take(&mut in_flight));
             }
         }
     }

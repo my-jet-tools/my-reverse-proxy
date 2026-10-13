@@ -22,25 +22,25 @@ pub struct TcpGatewayServer {
 }
 
 impl TcpGatewayServer {
+    /// Listens at `listen` by the time it returns. A port which can not be had is the error of
+    /// this call - the startup ends on it - and not a panic of the accept loop's task, which
+    /// would end the task alone and leave the process running with no gateway listener.
     pub fn new(
         listen: String,
         authorized_keys: Vec<VerifyingKey>,
         allowed_ip: Option<WhiteListedIpList>,
-        compress_outbound: bool,
-        protocol_extensions: bool,
         debug: bool,
-    ) -> Self {
+    ) -> Result<Self, String> {
         println!("Starting TCP Gateway Server at address: {}", listen);
+
+        let listener = bind(listen.as_str())?;
+
+        println!("GATEWAY bind happened to {}", listen);
+
         let inner = Arc::new(TcpGatewayInner::new_server(
             "ServerGateway".to_string(),
             listen,
             authorized_keys,
-            compress_outbound,
-            if protocol_extensions {
-                OWN_CAPABILITIES
-            } else {
-                0
-            },
         ));
         let result = Self {
             inner: inner.clone(),
@@ -54,9 +54,9 @@ impl TcpGatewayServer {
         // initializer. spawn_named touches APP_CTX (prometheus counter), and
         // that re-entrant deref of the still-initializing APP_CTX would prevent
         // the accept loop from ever being scheduled.
-        tokio::spawn(connection_loop(inner, allowed_ip, debug));
+        tokio::spawn(connection_loop(inner, listener, allowed_ip, debug));
 
-        result
+        Ok(result)
     }
 
     /// Ids of the connections the server opens carry [`SERVER_CONNECTION_ID_FLAG`], so they
@@ -94,30 +94,27 @@ impl Drop for TcpGatewayServer {
     }
 }
 
+/// `TcpListener::bind` without the `await`: [`TcpGatewayServer::new`] runs inside the `APP_CTX`
+/// initializer, which is not async. Nothing here waits - `listen` is a literal address, so
+/// nothing is resolved - and the socket is the one tokio's bind makes: std sets `SO_REUSEADDR`
+/// and the same backlog. Like the `tokio::spawn` next to it, it needs the runtime entered.
+fn bind(listen: &str) -> Result<TcpListener, String> {
+    std::net::TcpListener::bind(listen)
+        .and_then(|listener| {
+            // `from_std` takes the socket as it is, and a blocking one would park a runtime
+            // thread in `accept`.
+            listener.set_nonblocking(true)?;
+            TcpListener::from_std(listener)
+        })
+        .map_err(|err| format!("Gateway server: can not listen at '{listen}': {err}"))
+}
+
 async fn connection_loop(
     tcp_gateway: Arc<TcpGatewayInner>,
+    listener: TcpListener,
     allowed_ip: Option<WhiteListedIpList>,
     debug: bool,
 ) {
-    println!("GATEWAY binding to {}", tcp_gateway.gateway_host.as_str(),);
-
-    let listener = TcpListener::bind(tcp_gateway.gateway_host.as_str()).await;
-
-    let listener = match listener {
-        Ok(listener) => listener,
-        Err(err) => {
-            panic!(
-                "Failed to start listening socket to serve TCP Gateway at address: {}. Err: {:?}",
-                tcp_gateway.gateway_host, err
-            );
-        }
-    };
-
-    println!(
-        "GATEWAY bind happened to {}",
-        tcp_gateway.gateway_host.as_str(),
-    );
-
     while tcp_gateway.is_running() {
         let accept_result = listener.accept().await;
 
@@ -177,6 +174,9 @@ pub fn is_ip_allowed(allowed_ip: &WhiteListedIpList, ip: IpAddr) -> bool {
 }
 
 async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream, debug: bool) {
+    // Every frame is written whole: there is nothing for the kernel to wait for.
+    let _ = stream.set_nodelay(true);
+
     let authorized_keys = match tcp_gateway.authorized_keys.as_ref() {
         Some(keys) => keys.clone(),
         None => {
@@ -212,35 +212,31 @@ async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream
 
     if debug {
         println!(
-            "Gateway server handshake ok with client '{}' (timestamp_us={})",
-            outcome.gateway_name, outcome.timestamp_us
+            "Gateway server handshake ok with client '{}' (timestamp_us={}, compress={}: {})",
+            outcome.gateway_name,
+            outcome.timestamp_us,
+            outcome.compression.as_u8(),
+            outcome.compression
         );
     }
 
     let (read, write) = stream.into_split();
+    let (sealer, opener) = outcome.session_keys.into_server_ends();
 
+    // Packed with the level the client has asked for: compression is the client's setting, and
+    // it is the same in both directions.
     let gateway_connection = TcpGatewayConnection::new(
         tcp_gateway.gateway_host.clone(),
         write.into(),
-        outcome.session_key.clone(),
-        tcp_gateway.compress_outbound,
+        sealer,
+        outcome.compression,
         true,
-        tcp_gateway.capabilities,
     );
 
     let gateway_connection = Arc::new(gateway_connection);
     let timestamp = DateTimeAsMicroseconds::new(outcome.timestamp_us);
     gateway_connection.set_connection_timestamp(timestamp);
     gateway_connection.set_gateway_id(outcome.gateway_name.as_str());
-
-    // The first frame on the connection, ahead of anything this side could open: the client
-    // knows this side's capabilities before it opens anything. A client which predates
-    // capabilities ignores PINGs.
-    if let Some(capabilities) = advertised(tcp_gateway.capabilities) {
-        gateway_connection.send_payload(&TcpGatewayContract::Ping {
-            capabilities: Some(capabilities),
-        });
-    }
 
     let displaced = tcp_gateway
         .register_gateway_connection(outcome.gateway_name.as_str(), gateway_connection.clone());
@@ -261,6 +257,7 @@ async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream
         crate::tcp_gateway::gateway_read_loop(
             tcp_gateway,
             read,
+            opener,
             gateway_connection,
             TcpGatewayServerPacketHandler,
             debug,
