@@ -42,10 +42,13 @@ fn mcp_key(protocol: &str, model: &ProxyPassToModel) -> String {
 
 fn remote_host_key(protocol: &str, model: &ProxyPassToModel) -> String {
     match &model.remote_host {
+        // The server name is a part of the key: a connection opened for one name is not
+        // handed to a location which asks the same address for another.
         MyReverseProxyRemoteEndpoint::Direct { remote_host } => format!(
-            "{protocol}|{:?}|{}",
+            "{protocol}|{:?}|{}|{}",
             remote_host.get_scheme(),
-            remote_host.get_host_port().as_str()
+            remote_host.get_host_port().as_str(),
+            model.server_name.as_deref().unwrap_or_default()
         ),
         MyReverseProxyRemoteEndpoint::OverSsh {
             ssh_credentials,
@@ -78,6 +81,7 @@ mod tests {
             remote_host: MyReverseProxyRemoteEndpoint::Direct {
                 remote_host: Arc::new(RemoteEndpointOwned::try_parse(url.to_string()).unwrap()),
             },
+            server_name: None,
             request_timeout: std::time::Duration::from_secs(1),
             connect_timeout: std::time::Duration::from_secs(1),
             pool_tuning: crate::configurations::PoolTuning::default(),
@@ -98,6 +102,21 @@ mod tests {
         )));
 
         assert_ne!(a, b);
+    }
+
+    /// `domain_name` of a location is the name the TLS connection is opened for: two
+    /// locations which ask one address for different names do not share a connection.
+    #[test]
+    fn locations_differing_by_the_server_name_are_different_upstreams() {
+        let named = |server_name: Option<&str>| {
+            let mut model = model("https://10.0.20.166:443");
+            model.server_name = server_name.map(str::to_string);
+            connection_key(&ProxyPassToConfig::Http1(model))
+        };
+
+        assert_ne!(named(Some("a.internal")), named(Some("b.internal")));
+        assert_ne!(named(Some("a.internal")), named(None));
+        assert_eq!(named(Some("a.internal")), named(Some("a.internal")));
     }
 
     /// An ordinary http1 location forwards the client's own path, so the same

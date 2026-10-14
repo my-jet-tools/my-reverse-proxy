@@ -186,6 +186,7 @@ after another, as they are or packed.
 [u8 KIND = 0][inner frames]                        stored
 [u8 KIND = 1][u32 RAW_LEN][LZ4 block]              packed with LZ4
 [u8 KIND = 2][u32 RAW_LEN][Zstandard frame]        packed with Zstandard
+[u8 KIND = 3][u32 RAW_LEN][piece of a stream]      packed with Zstandard, one stream
 ```
 
 - `KIND = 0` — the inner frames follow as they are.
@@ -194,6 +195,17 @@ after another, as they are or packed.
 - `KIND = 2` — the same, packed as one Zstandard frame. The frame carries
   neither its content size nor a checksum: the batch says its size, and the
   frame around it is sealed.
+- `KIND = 3` — the inner frames, `RAW_LEN` bytes of them, as the next piece
+  of one Zstandard stream which runs for a whole direction of the
+  connection. The stream starts with the first batch of this kind and ends
+  with the connection; a piece ends where the stream is flushed, so it
+  unpacks to the whole batch and to nothing else. A piece is packed with
+  every piece before it for a history, and is unpacked after them, in
+  their order — the order of the frames, which the sealing holds. The
+  stream carries neither a content size nor a checksum, and its window is
+  4 MiB at the most: a receiver takes no stream which asks for more. A
+  piece which unpacks to more or to fewer bytes than its `RAW_LEN` closes
+  the connection.
 - Any other kind closes the connection.
 - The inner frames are `(LEN, TYPE, PAYLOAD) × N`. A batch they do not fill
   exactly — a frame cut short, bytes left behind the last one — closes the
@@ -209,20 +221,31 @@ directions: the server packs what it sends over the connection of a client
 with the level that client asked for, and has no setting of its own.
 
 The level is what a writer packs with. A batch says itself what it is packed
-with — its `KIND` — so a receiver needs nothing but the batch to unpack it,
-and takes every kind at any time, whatever the level of the connection.
+with — its `KIND` — and a receiver takes every kind at any time, whatever
+the level of the connection. For the kinds 0 to 2 it needs nothing but the
+batch to unpack it; a piece of a stream it unpacks with the stream of the
+connection, which the pieces before it have gone through.
 
-With compression on, a writer packs every batch which is big enough for its
-algorithm to save anything — 64 bytes for LZ4, 128 for Zstandard — and sends
-it packed when that is smaller: what it is packed to and its `RAW_LEN`
-together shorter than the frames. Otherwise the batch goes stored: what can
-not be packed — TLS, media, what is packed already — costs the attempt,
-which both algorithms give up on early, and travels as it is. A batch never
-goes out bigger than its frames and a byte.
+At the levels which pack a batch on its own — LZ4 and a Zstandard frame — a
+writer packs every batch which is big enough for its algorithm to save
+anything — 64 bytes for LZ4, 128 for Zstandard — and sends it packed when
+that is smaller: what it is packed to and its `RAW_LEN` together shorter
+than the frames. Otherwise the batch goes stored: what can not be packed —
+TLS, media, what is packed already — costs the attempt, which both
+algorithms give up on early, and travels as it is. A batch never goes out
+bigger than its frames and a byte. Nothing of the batches before it is
+used, so a batch of many frames packs better than the same frames sent one
+by one — see the document for how much.
 
-A batch is packed by the writer task, between two writes, and on its own:
-nothing of the batches before it is used. So a batch of many frames packs
-better than the same frames sent one by one — see the document for how much.
+At the levels of one stream every batch of 32 bytes or more is a piece of
+the stream, whether it packs or not: it is what the batches after it are
+packed with. What does not pack Zstandard puts into the stream as it is, so
+such a piece is bigger than its frames — by its 5 bytes and 3 more for
+every 128 KiB. A batch under 32 bytes — a ping, a window update — goes
+stored: it is no part of the stream, and the receiver leaves its stream
+where it is for it.
+
+A batch is packed by the writer task, between two writes.
 
 ### Send-side algorithm
 

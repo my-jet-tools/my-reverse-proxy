@@ -22,7 +22,12 @@ pub fn start() {
         DEFAULT_PORT
     };
 
-    let mut http_server = MyHttpServer::new(SocketAddr::from(([0, 0, 0, 0], http_port)));
+    start_at(SocketAddr::from(([0, 0, 0, 0], http_port)));
+}
+
+/// The control port server at the address given.
+pub fn start_at(addr: SocketAddr) {
+    let mut http_server = MyHttpServer::new(addr);
 
     let controllers = Arc::new(super::builder::build_controllers());
 

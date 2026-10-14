@@ -108,6 +108,16 @@ async fn handle_accepted_connection(
 
     let endpoint_type = endpoint_type.unwrap();
 
+    // A unix socket has no address: there is no list to check it against and it is no debug
+    // ip. A tcp endpoint which serves nobody does not serve it either.
+    if let ListenConfiguration::Tcp(configuration) = &endpoint_type {
+        if configuration.not_served_reason.is_some() {
+            use tokio::io::AsyncWriteExt;
+            let _ = accepted_connection.shutdown().await;
+            return;
+        }
+    }
+
     match endpoint_type {
         ListenConfiguration::Http(configuration) => match configuration.listen_endpoint_type {
             crate::configurations::ListenHttpEndpointType::Http1 => {

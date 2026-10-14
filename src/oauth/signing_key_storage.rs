@@ -163,8 +163,13 @@ pub fn default_signing_key_file(oauth_id: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A folder of this run of the tests: two runs at once - two checkouts, a watch and a
+    /// manual run - would remove the files of each other from one with a fixed name.
     fn temp_file(name: &str) -> PathBuf {
-        let folder = std::env::temp_dir().join("my-reverse-proxy-oauth-tests");
+        let folder = std::env::temp_dir().join(format!(
+            "my-reverse-proxy-oauth-tests-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&folder).unwrap();
         let path = folder.join(name);
         let _ = std::fs::remove_file(&path);

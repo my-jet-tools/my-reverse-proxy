@@ -239,9 +239,9 @@ consent screen.
   failure and it gives up instead of retrying.
 - **The token never reaches the upstream.** `Authorization` is added to the
   endpoint's request header remove-list whenever `oauth:` is set, which the MCP
-  authorization specification requires. (Endpoint level, because location-level
-  `modify_http_headers` is ignored on the h1 path.) If the upstream needs its own
-  credential, add it with endpoint-level `modify_http_headers.add`.
+  authorization specification requires. (Endpoint level, so it holds for every
+  location of the endpoint.) If the upstream needs its own credential, add it
+  with `modify_http_headers.add` - of the endpoint or of the location.
 - **Credential guessing feeds the IP block-list.** A wrong consent password or
   client secret is registered as a hard failure, so the existing fail2ban-style
   block-list picks it up after a handful of attempts.

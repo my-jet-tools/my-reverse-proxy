@@ -18,3 +18,12 @@ pub use listen_unix_server::*;
 
 #[cfg(test)]
 mod files_location_tests;
+
+#[cfg(test)]
+mod location_whitelist_tests;
+
+#[cfg(test)]
+mod ambiguous_path_tests;
+
+#[cfg(test)]
+mod h1_malformed_request_tests;

@@ -36,6 +36,8 @@ pub struct HttpEndpointInfo {
     /// Endpoint-scoped transport read/write idle timeouts (resolved cascade,
     /// global → endpoint). Used by every byte pump of this endpoint.
     pub timeouts: crate::types::HttpTimeouts,
+    /// `Some`: the endpoint was given an access setting it can not apply, and serves nobody.
+    pub not_served_reason: Option<NotServedReason>,
 }
 
 /// Everything an endpoint is compiled from.
@@ -63,6 +65,7 @@ pub struct HttpEndpointInfoParams {
     pub hsts: bool,
     pub mcp_settings: McpEndpointSettings,
     pub timeouts: crate::types::HttpTimeouts,
+    pub not_served_reason: Option<NotServedReason>,
 }
 
 impl HttpEndpointInfo {
@@ -86,6 +89,7 @@ impl HttpEndpointInfo {
             hsts,
             mcp_settings,
             timeouts,
+            not_served_reason,
         } = params;
 
         if debug {
@@ -96,9 +100,9 @@ impl HttpEndpointInfo {
             ModifyHeadersConfig::new_request(&mut modify_headers_settings);
 
         // The access token on an oauth-gated endpoint is one this proxy minted
-        // for itself. Stripping it here — at the endpoint level, since location
-        // level `modify_http_headers` is ignored on the h1 path — keeps it out
-        // of the upstream, which the MCP authorization spec requires.
+        // for itself. Stripping it here — at the endpoint level, so it holds for
+        // every location of the endpoint — keeps it out of the upstream, which
+        // the MCP authorization spec requires.
         if oauth.is_some() {
             modify_request_headers.add_to_remove("authorization");
         }
@@ -125,6 +129,7 @@ impl HttpEndpointInfo {
             hsts,
             mcp_settings,
             timeouts,
+            not_served_reason,
         }
     }
 
@@ -147,20 +152,11 @@ impl HttpEndpointInfo {
         self.host_endpoint.as_str()
     }
 
-    pub fn find_location(&self, path: &str) -> Option<&ProxyPassLocationConfig> {
-        for location in self.locations.iter() {
-            if location.path.len() > path.len() {
-                continue;
-            }
-
-            let path_prefix = &path[..location.path.len()];
-
-            if path_prefix.eq_ignore_ascii_case(&location.path) {
-                return Some(location);
-            }
-        }
-
-        None
+    /// `path`: the request target as received - with its query string, if it has one.
+    pub fn find_location(&self, path: &str) -> Option<&Arc<ProxyPassLocationConfig>> {
+        self.locations
+            .iter()
+            .find(|location| crate::types::is_path_of_location(path, &location.path))
     }
 
     /// Guards against HTTP/2 connection coalescing (and any cross-SNI

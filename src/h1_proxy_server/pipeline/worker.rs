@@ -37,6 +37,9 @@ pub struct UpstreamRequest {
     /// dynamic_proxy it is synthesized per request.
     pub proxy_pass_to: ProxyPassToConfig,
     pub end_point_info: Arc<HttpEndpointInfo>,
+    /// The location of the request: its `modify_http_headers` are applied to the
+    /// response head as well as those of the endpoint.
+    pub location: Arc<crate::configurations::ProxyPassLocationConfig>,
     pub http_connection_info: HttpConnectionInfo,
     pub location_id: i64,
     /// Compiled request head (status line + headers), ready to write to upstream.
@@ -182,6 +185,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
         pool,
         proxy_pass_to,
         end_point_info,
+        location,
         http_connection_info,
         location_id,
         head,
@@ -391,7 +395,7 @@ pub async fn run_upstream_request(req: UpstreamRequest) {
 
         let response_is_websocket = match resp_reader.compile_headers(
             resp_headers,
-            H1HeadersKind::Response(&end_point_info),
+            H1HeadersKind::Response(&end_point_info, &location),
             &http_connection_info,
             &None,
             None,

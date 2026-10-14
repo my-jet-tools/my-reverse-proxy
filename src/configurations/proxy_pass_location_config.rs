@@ -97,6 +97,28 @@ impl ProxyPassLocationConfig {
         }
     }
 
+    /// The location's own `whitelisted_ip`. Shared by the h1 byte pipeline and the hyper path so
+    /// both enforce the same rule. A connection without an address (a unix socket) is not
+    /// restricted - the same exemption the endpoint's list has.
+    pub async fn ip_is_allowed(&self, connection_ip: &crate::types::ConnectionIp) -> bool {
+        let Some(ip_list_id) = self.ip_white_list_id.as_ref() else {
+            return true;
+        };
+
+        let Some(client_ip) = connection_ip.get_ip_addr() else {
+            return true;
+        };
+
+        APP_CTX
+            .current_configuration
+            .get(|config| {
+                config
+                    .white_list_ip_list
+                    .is_white_listed(ip_list_id, &client_ip)
+            })
+            .await
+    }
+
     pub async fn create_data_source(
         &self,
         debug: bool,

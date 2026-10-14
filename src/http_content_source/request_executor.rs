@@ -20,7 +20,8 @@ impl RequestExecutorResult {
         }
     }
 
-    /// The path of a request to a files location did not pass the check.
+    /// The path of a request did not pass the check: the one every request passes before a
+    /// location is looked for, or the one of a files location.
     pub fn bad_request() -> Self {
         Self {
             status_code: 400,

@@ -73,9 +73,9 @@ pub async fn serve_file(
 
 fn report_dropped(gateway_connection: &TcpGatewayConnection, path: &str) {
     println!(
-        "Gateway:[{}]. File response for '{}' is dropped: it could not be sent in time",
+        "Gateway:[{}]. File response for {} is dropped: it could not be sent in time",
         gateway_connection.get_gateway_id(),
-        path,
+        crate::types::path_for_log(path),
     );
 }
 
@@ -92,8 +92,8 @@ async fn read_file_to_serve(path: &str) -> Result<Vec<u8>, ()> {
 
     if metadata.len() > MAX_FILE_RESPONSE_SIZE as u64 {
         println!(
-            "Gateway: file '{}' is {} bytes - more than the {} bytes a gateway file response carries",
-            path,
+            "Gateway: file {} is {} bytes - more than the {} bytes a gateway file response carries",
+            crate::types::path_for_log(path),
             metadata.len(),
             MAX_FILE_RESPONSE_SIZE
         );

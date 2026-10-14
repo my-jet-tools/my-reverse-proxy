@@ -363,7 +363,8 @@ pub(crate) async fn read_frame_for_tests(
 #[cfg(test)]
 mod tests {
     use super::super::{
-        BatchUnpacker, CompressionLevel, FrameOpener, BATCH_LZ4, BATCH_ZSTD, FRAME_TAG_LEN,
+        BatchUnpacker, CompressionLevel, FrameOpener, BATCH_LZ4, BATCH_ZSTD, BATCH_ZSTD_STREAM,
+        FRAME_TAG_LEN,
     };
     use super::*;
 
@@ -413,6 +414,10 @@ mod tests {
         )
         .unwrap();
 
+        // One unpacker for the write, as a connection has one: at a level of one stream the
+        // batch of the second frame is read with what the first one left.
+        let mut unpacker = BatchUnpacker::new();
+
         let mut batches = Vec::new();
         let mut kinds = Vec::new();
         let mut frame_lens = Vec::new();
@@ -426,12 +431,7 @@ mod tests {
             let mut sealed = sealed.to_vec();
             let batch_len = opener.open(&mut sealed).unwrap();
             kinds.push(sealed[0]);
-            batches.push(
-                BatchUnpacker::new()
-                    .read_batch(&sealed[..batch_len])
-                    .unwrap()
-                    .len(),
-            );
+            batches.push(unpacker.read_batch(&sealed[..batch_len]).unwrap().len());
         }
 
         Write {
@@ -533,9 +533,17 @@ mod tests {
             (text.clone(), OFF, BATCH_STORED),
             (text.clone(), level(1), BATCH_LZ4),
             (text.clone(), level(2), BATCH_ZSTD),
-            (text.clone(), level(CompressionLevel::MAX), BATCH_ZSTD),
+            (text.clone(), level(5), BATCH_ZSTD),
             (noise.clone(), level(1), BATCH_STORED),
-            (noise, level(2), BATCH_STORED),
+            (noise.clone(), level(2), BATCH_STORED),
+            // One stream: a batch is a piece of it whether it packs or not.
+            (text.clone(), level(6), BATCH_ZSTD_STREAM),
+            (
+                text.clone(),
+                level(CompressionLevel::MAX),
+                BATCH_ZSTD_STREAM,
+            ),
+            (noise, level(6), BATCH_ZSTD_STREAM),
         ] {
             let mut credits = VecDeque::new();
             let mut queue: VecDeque<_> = [OutgoingFrame {
@@ -550,8 +558,10 @@ mod tests {
             assert_eq!(write.budget, 5);
             assert_eq!(write.kinds, vec![kind]);
             assert_eq!(write.batches, vec![payload.len()]);
-            // Never bigger than its inner frames, the kind of the batch and the tag.
-            assert!(write.wire_len <= FRAME_LEN_SIZE + 1 + payload.len() + FRAME_TAG_LEN);
+            // Never bigger than its inner frames, the kind of the batch and the tag - and, for
+            // a piece of a stream, its size and the heads of the stream and of a block.
+            let head = if kind == BATCH_ZSTD_STREAM { 32 } else { 1 };
+            assert!(write.wire_len <= FRAME_LEN_SIZE + head + payload.len() + FRAME_TAG_LEN);
         }
     }
 
@@ -592,10 +602,21 @@ mod tests {
             // is a frame of its own, packed or not.
             assert_eq!(write.frame_lens.len(), 2);
             assert!(write.frame_lens[0] <= 1 + 85 * 13 + FRAME_TAG_LEN);
-            assert_eq!(
-                write.frame_lens[1],
-                1 + 10 + MAX_FILE_RESPONSE_SIZE + FRAME_TAG_LEN
-            );
+
+            let as_it_is = 1 + 10 + MAX_FILE_RESPONSE_SIZE + FRAME_TAG_LEN;
+
+            if matches!(
+                level.packing(),
+                Some(super::super::Packing::ZstdStream { .. })
+            ) {
+                // A piece of the stream all the same: what does not pack costs the size of
+                // the piece and the head of every block of it - 3 bytes for 128 KiB.
+                assert!(write.frame_lens[1] > as_it_is);
+                assert!(write.frame_lens[1] <= as_it_is + 256, "level {level}");
+            } else {
+                assert_eq!(write.frame_lens[1], as_it_is);
+            }
+
             assert!(write.frame_lens.iter().all(|len| *len <= MAX_PAYLOAD_SIZE));
         }
     }

@@ -66,6 +66,49 @@ impl HttpProxyPass {
             );
         }
 
+        // The endpoint's IP allow-list, for every request. An `https2` connection
+        // is checked when it is accepted and when its request handler resolves
+        // the vhost; an `http2` one is checked nowhere else.
+        if let Some(ip_list_id) = self.endpoint_info.whitelisted_ip_list_id.as_ref() {
+            if let Some(client_ip) = connection_ip.get_ip_addr() {
+                let is_whitelisted = crate::app::APP_CTX
+                    .current_configuration
+                    .get(|config| {
+                        config
+                            .white_list_ip_list
+                            .is_white_listed(ip_list_id, &client_ip)
+                    })
+                    .await;
+
+                if !is_whitelisted {
+                    return Err(ProxyPassError::IpRestricted(
+                        self.listening_port_info.listen_host.to_string(),
+                    ));
+                }
+            }
+        }
+
+        // An endpoint which was given an access setting it can not apply serves
+        // nobody. Everybody is refused without a word; a debug ip is told the reason.
+        if let Some(reason) = self.endpoint_info.not_served_reason.as_ref() {
+            let is_debug_ip = crate::app::APP_CTX.debug_ip.is_debug_ip(&connection_ip);
+
+            return Ok(Ok(crate::error_templates::not_served_hyper_response(
+                reason,
+                is_debug_ip,
+            )));
+        }
+
+        // A path with a `..`, a `.` or an empty segment is not matched to a
+        // location - the same rule as the h1 pipeline has. Answered as an ordinary
+        // response, not as an error: an error is written to the log, for every
+        // scanner which comes by.
+        if crate::types::has_ambiguous_segment(req.uri().path()) {
+            return Ok(Ok(
+                crate::http_content_source::RequestExecutorResult::bad_request().into(),
+            ));
+        }
+
         // The proxy's own OAuth 2.1 server, when this endpoint has an `oauth:`
         // block. Runs before the location is resolved because its own paths
         // (`/.well-known/…`, `/oauth/…`) match no configured location, and it
@@ -123,6 +166,18 @@ impl HttpProxyPass {
 
             let proxy_pass_location = inner.locations.find(&location_index);
 
+            // The location's own IP allow-list: before `auth_header`, and before
+            // anything of the request body is read.
+            if !proxy_pass_location
+                .config
+                .ip_is_allowed(&connection_ip)
+                .await
+            {
+                return Err(ProxyPassError::IpRestricted(
+                    self.listening_port_info.listen_host.to_string(),
+                ));
+            }
+
             // Per-location `auth_header` gate — same rule as the h1 pipeline's
             // `H1Reader::authorize`: refused before anything is sent upstream,
             // and an absent header is indistinguishable from a wrong one.
@@ -148,23 +203,6 @@ impl HttpProxyPass {
                     ip.clone(),
                     format!("Request parts: {:?}", request.req_parts),
                 );
-            }
-
-            if let Some(ip_addr) = connection_ip.get_ip_addr() {
-                if let Some(white_list_ip) = proxy_pass_location.config.ip_white_list_id.as_ref() {
-                    if !crate::app::APP_CTX
-                        .current_configuration
-                        .get(|itm| {
-                            itm.white_list_ip_list
-                                .is_white_listed(white_list_ip, &ip_addr)
-                        })
-                        .await
-                    {
-                        return Err(ProxyPassError::IpRestricted(
-                            self.listening_port_info.listen_host.to_string(),
-                        ));
-                    }
-                }
             }
 
             (

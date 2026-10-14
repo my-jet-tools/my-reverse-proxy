@@ -158,8 +158,13 @@ pub fn handle_connection(
             }
             ListenHttpEndpointType::Mcp => {
                 println!("New mcp connection {}", connection_id);
-                super::super::mcp::run_mcp_connection(tls_stream, &endpoint_info, connection_id)
-                    .await;
+                super::super::mcp::run_mcp_connection(
+                    tls_stream,
+                    &endpoint_info,
+                    &connection_ip,
+                    connection_id,
+                )
+                .await;
             }
         }
     });

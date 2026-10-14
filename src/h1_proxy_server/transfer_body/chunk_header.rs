@@ -11,18 +11,39 @@ impl ChunkHeader {
     }
 }
 
+/// 16 hex digits are a `u64`: a longer size line is not a size.
+const MAX_CHUNK_SIZE_DIGITS: usize = 16;
+
 fn get_chunk_size(chunk: &[u8], len: usize) -> Result<usize, ProxyServerError> {
-    let my_chunk = &chunk[..len];
+    let digits = &chunk[..len];
+
+    // The line comes straight off the wire. Without the limit and the checked steps a long
+    // one overflows the size: a panic in a debug build, and in a release build a size which
+    // is not the one that was sent - the body would be cut at the wrong byte.
+    if digits.is_empty() || digits.len() > MAX_CHUNK_SIZE_DIGITS {
+        return Err(ProxyServerError::ChunkHeaderParseError);
+    }
 
     let mut result: usize = 0;
-    let mut multiplier: usize = 1;
-    for c in my_chunk.iter().rev() {
+
+    for c in digits {
         let Some(digit) = parse_hex_digit(*c) else {
             return Err(ProxyServerError::ChunkHeaderParseError);
         };
 
-        result += digit * multiplier;
-        multiplier *= 16;
+        result = result
+            .checked_mul(16)
+            .and_then(|result| result.checked_add(digit))
+            .ok_or(ProxyServerError::ChunkHeaderParseError)?;
+    }
+
+    // A chunk is relayed whole - the size line, the data and both line ends: that has to be
+    // a number as well.
+    if result
+        .checked_add(len + crate::consts::HTTP_CR_LF.len() * 2)
+        .is_none()
+    {
+        return Err(ProxyServerError::ChunkHeaderParseError);
     }
 
     Ok(result)
@@ -76,6 +97,48 @@ mod test {
         let header = ChunkHeader::new(chunk.len(), chunk).unwrap();
 
         assert_eq!(8475, header.chunk_size);
+    }
+
+    #[test]
+    fn the_biggest_size_which_fits_is_read() {
+        let chunk = b"0000000000001000";
+        assert_eq!(
+            ChunkHeader::new(chunk.len(), chunk).unwrap().chunk_size,
+            4096
+        );
+
+        let chunk = b"0";
+        assert_eq!(ChunkHeader::new(chunk.len(), chunk).unwrap().chunk_size, 0);
+    }
+
+    #[test]
+    fn a_size_which_does_not_fit_is_refused() {
+        for chunk in [
+            // 17 digits: one more than a u64 has.
+            &b"10000000000000000"[..],
+            b"00000000000000001",
+            b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+            // Fits a u64, and the chunk around it does not.
+            b"FFFFFFFFFFFFFFFF",
+            b"FFFFFFFFFFFFFFF0",
+        ] {
+            assert!(
+                ChunkHeader::new(chunk.len(), chunk).is_err(),
+                "{}",
+                String::from_utf8_lossy(chunk)
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_which_is_not_hex_digits_is_refused() {
+        for chunk in [&b""[..], b"5;ext=1", b" 5", b"5 ", b"0x5", b"-5", b"5g"] {
+            assert!(
+                ChunkHeader::new(chunk.len(), chunk).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(chunk)
+            );
+        }
     }
 
     #[test]

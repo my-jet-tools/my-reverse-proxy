@@ -121,6 +121,7 @@ async fn compile_model(
             settings_model,
         )
         .await?,
+        server_name: location_settings.domain_name.clone(),
         request_timeout: resolved.request_timeout,
         connect_timeout: resolved.connect_timeout,
         pool_tuning: PoolTuning::from_resolved(resolved),

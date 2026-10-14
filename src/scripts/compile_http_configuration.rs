@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::{
     configurations::{
         EndpointHttpHostString, HttpEndpointInfo, HttpEndpointInfoParams, ListenHttpEndpointType,
+        NotServedReason,
     },
     settings::HostSettings,
     settings_compiled::SettingsCompiled,
@@ -59,6 +60,15 @@ pub async fn compile_http_configuration(
         (None, None, None::<super::ClientCaRequirement>)
     };
 
+    let not_served_reason = access_settings_the_endpoint_can_not_apply(
+        settings_model,
+        &host_endpoint,
+        host_settings,
+        http_type,
+        g_auth.is_some(),
+        allowed_user_list.is_some(),
+    )?;
+
     // Unlike google_auth this is resolved for plain-http endpoints too: an
     // endpoint behind a TLS-terminating proxy is still reached over https by the
     // client, and `public_url` is there to say so.
@@ -93,6 +103,12 @@ pub async fn compile_http_configuration(
 
         if location_index == 0 {
             mcp_resolved = resolved;
+        }
+
+        // A list a location names is loaded the same way as one the endpoint
+        // names - and has to be declared just the same. Nothing else loads it.
+        if let Some(ip_list_id) = location_settings.whitelisted_ip.as_ref() {
+            super::refresh_ip_list_from_settings(settings_model, ip_list_id).await?;
         }
 
         let proxy_pass_to = super::compile_location_proxy_pass_to(
@@ -182,9 +198,84 @@ pub async fn compile_http_configuration(
         hsts: host_settings.endpoint.hsts.unwrap_or(false),
         mcp_settings,
         timeouts: http_timeouts,
+        not_served_reason,
     });
 
     Ok(http_endpoint_info)
+}
+
+/// The access settings of the endpoint which its type has no way to apply. The settings load
+/// with them, and the endpoint serves nobody: see [`NotServedReason`].
+///
+/// - `type: mcp` is a TLS termination and a byte bridge to the first location. It parses no
+///   HTTP, so it can check neither a header nor a session: `auth_header` of a location,
+///   `google_auth` and `allowed_users`. (`whitelisted_ip` it can check, and does - by the
+///   address of the connection.)
+/// - `google_auth` is resolved for `https` and `https2` endpoints only: on `http` and `http2`
+///   it is not there, and the endpoint would serve everybody.
+fn access_settings_the_endpoint_can_not_apply(
+    settings_model: &SettingsCompiled,
+    host_endpoint: &EndpointHttpHostString,
+    host_settings: &HostSettings,
+    http_type: ListenHttpEndpointType,
+    has_google_auth: bool,
+    has_allowed_users: bool,
+) -> Result<Option<NotServedReason>, String> {
+    let result = match http_type {
+        ListenHttpEndpointType::Mcp => {
+            let mut settings = Vec::new();
+
+            if host_settings
+                .locations
+                .iter()
+                .any(|location| location.auth_header.is_some())
+            {
+                settings.push("auth_header");
+            }
+
+            if has_google_auth {
+                settings.push("google_auth");
+            }
+
+            if has_allowed_users {
+                settings.push("allowed_users");
+            }
+
+            NotServedReason::new(
+                host_endpoint.as_str(),
+                http_type.as_str(),
+                &settings,
+                "a raw bridge with no HTTP layer",
+                "remove the setting, or use 'type: https' on the endpoint with a location of \
+                 'type: mcp'",
+            )
+        }
+        ListenHttpEndpointType::Http1 | ListenHttpEndpointType::Http2 => {
+            let google_auth = super::get_from_host_or_templates(
+                settings_model,
+                host_settings,
+                |host_settings| host_settings.endpoint.google_auth.as_ref(),
+                |templates| templates.google_auth.as_ref(),
+            )?;
+
+            let settings: &[&str] = if google_auth.is_some() {
+                &["google_auth"]
+            } else {
+                &[]
+            };
+
+            NotServedReason::new(
+                host_endpoint.as_str(),
+                http_type.as_str(),
+                settings,
+                "which has no TLS layer",
+                "remove 'google_auth', or use 'type: https' / 'type: https2' on the endpoint",
+            )
+        }
+        ListenHttpEndpointType::Https1 | ListenHttpEndpointType::Https2 => None,
+    };
+
+    Ok(result)
 }
 
 #[cfg(test)]

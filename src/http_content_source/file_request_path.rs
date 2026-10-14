@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use crate::types::percent_decode_once;
 
 /// The path of a request to a files location which passed the check: it can be glued to the
 /// folder. [`FileRequestPath::parse`] is the only way to get one, and the sources of a files
@@ -36,7 +36,7 @@ impl<'s> FileRequestPath<'s> {
             return Err(BadFileRequestPath::NotAbsolute);
         }
 
-        let decoded = percent_decode(path.as_bytes());
+        let decoded = percent_decode_once(path.as_bytes());
 
         // NUL cuts a path short in the C strings behind SFTP; the other control characters
         // would get into the logs as they are.
@@ -104,43 +104,6 @@ impl<'s> FileRequestPath<'s> {
         result.push_str(file.strip_prefix('/').unwrap_or(file));
 
         Some(result)
-    }
-}
-
-/// One pass: `%XX` with two hex digits becomes the byte, anything else stays as it is - no `+`
-/// for a space, no second pass. `url_utils::decode_from_url_string` is not used on purpose: on
-/// an escape it can not read it gives the whole string back as it was, so one `%zz` would hide
-/// a `%2e%2e` next to it.
-fn percent_decode(src: &[u8]) -> Cow<'_, [u8]> {
-    if !src.contains(&b'%') {
-        return Cow::Borrowed(src);
-    }
-
-    let mut result = Vec::with_capacity(src.len());
-    let mut i = 0;
-
-    while i < src.len() {
-        if src[i] == b'%' && i + 2 < src.len() {
-            if let (Some(high), Some(low)) = (hex_digit(src[i + 1]), hex_digit(src[i + 2])) {
-                result.push(high << 4 | low);
-                i += 3;
-                continue;
-            }
-        }
-
-        result.push(src[i]);
-        i += 1;
-    }
-
-    Cow::Owned(result)
-}
-
-fn hex_digit(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
     }
 }
 

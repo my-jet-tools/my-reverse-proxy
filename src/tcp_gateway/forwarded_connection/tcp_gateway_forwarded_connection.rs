@@ -446,3 +446,26 @@ async fn connect_to_unix_socket(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the peer sent goes to the target as it comes: the connection to the target does
+    /// not hold a small write back until the one before it is acknowledged.
+    #[tokio::test]
+    async fn the_connection_to_a_target_sends_without_delay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = listener.local_addr().unwrap().to_string();
+
+        let stream = connect_to_tcp_socket(&target, 1, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let MyNetworkStream::Tcp(stream) = stream else {
+            panic!("a tcp target is reached over tcp");
+        };
+
+        assert!(stream.nodelay().unwrap());
+    }
+}

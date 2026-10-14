@@ -119,6 +119,12 @@ async fn handle_accepted_connection(
 
     let endpoint_type = endpoint_type.unwrap();
 
+    if let ListenConfiguration::Tcp(configuration) = &endpoint_type {
+        if !tcp_endpoint_takes(configuration, &mut accepted_connection, socket_addr).await {
+            return;
+        }
+    }
+
     match endpoint_type {
         ListenConfiguration::Http(configuration) => match configuration.listen_endpoint_type {
             crate::configurations::ListenHttpEndpointType::Http1 => {
@@ -209,4 +215,50 @@ async fn handle_accepted_connection(
             );
         }
     }
+}
+
+/// What a tcp endpoint checks before it forwards a connection - all it has is the address.
+/// `false`: the connection is not taken, and is closed here.
+///
+/// The list of the endpoint was checked when the endpoint was looked up; this is the list of
+/// its location, and the endpoint which serves nobody.
+async fn tcp_endpoint_takes(
+    configuration: &crate::configurations::TcpEndpointHostConfig,
+    connection: &mut tokio::net::TcpStream,
+    socket_addr: SocketAddr,
+) -> bool {
+    use tokio::io::AsyncWriteExt;
+
+    // There is no protocol to refuse in: the connection is closed, and a debug ip gets the
+    // reason as a line of text before that.
+    if let Some(reason) = configuration.not_served_reason.as_ref() {
+        if crate::app::APP_CTX
+            .debug_ip
+            .is_debug_ip(&socket_addr.into())
+        {
+            let text = crate::error_templates::not_served_text(reason);
+            let _ = connection.write_all(text.as_bytes()).await;
+        }
+
+        let _ = connection.shutdown().await;
+        return false;
+    }
+
+    if let Some(ip_list_id) = configuration.location_ip_white_list_id.as_ref() {
+        let is_whitelisted = crate::app::APP_CTX
+            .current_configuration
+            .get(|config| {
+                config
+                    .white_list_ip_list
+                    .is_white_listed(ip_list_id, &socket_addr.ip())
+            })
+            .await;
+
+        if !is_whitelisted {
+            let _ = connection.shutdown().await;
+            return false;
+        }
+    }
+
+    true
 }

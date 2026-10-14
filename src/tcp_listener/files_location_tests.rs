@@ -134,7 +134,8 @@ async fn http_a_request_body_is_drained_whatever_the_answer_is() {
         chunked
     };
 
-    // Only GET is served: a POST is not found. A path out of the folder is refused first.
+    // Only GET and HEAD are served: a POST is not found. A path out of the folder is refused
+    // first.
     for (target, status) in [("/index.html", 404), ("/../secret.txt", 400)] {
         let response = client.request("POST", target, &with_length, body).await;
         assert_eq!(response.status, status, "{target}, a body with a length");
@@ -154,22 +155,85 @@ async fn http_a_request_body_is_drained_whatever_the_answer_is() {
     }
 }
 
-/// A body which ends short of its length can not be taken off the connection: there is no
-/// telling where the next request starts, so the connection is closed with no answer.
+/// A body which can not be read to its end can not be taken off the connection: there is no
+/// telling where the next request starts. The request is answered, and the connection is closed
+/// behind the answer - by a files location and by a static one alike.
 #[tokio::test]
-async fn http_a_request_whose_body_ends_short_is_not_answered() {
+async fn http_a_request_whose_body_can_not_be_read_is_answered_and_the_connection_is_closed() {
     let site = TestSite::new();
-    let endpoint = start_endpoint(ListenHttpEndpointType::Http1, "", &site.root()).await;
+    let locations = format!(
+        "- path: /static\n  type: static\n  status_code: 200\n  content_type: text/html\n  body: <b>static-body</b>\n- proxy_pass_to: '{root}'\n  default_file: index.html\n",
+        root = site.root()
+    );
+    let endpoint = start_host(ListenHttpEndpointType::Http1, "", &locations).await;
+
+    for (target, body) in [
+        ("/index.html", INDEX_HTML),
+        ("/static", &b"<b>static-body</b>"[..]),
+    ] {
+        // Ends short of its length: the client says 100 bytes, sends 5 and stops.
+        let mut client = H1Client::connect(endpoint.port).await;
+        let request = format!(
+            "GET {target} HTTP/1.1\r\nHost: localhost:{}\r\nContent-Length: 100\r\n\r\nshort",
+            endpoint.port
+        );
+        client.stream.write_all(request.as_bytes()).await.unwrap();
+        client.stream.shutdown().await.unwrap();
+
+        let response = client.read_response().await;
+        assert_eq!(response.status, 200, "{target}, a body which ends short");
+        assert_eq!(response.body, body, "{target}, a body which ends short");
+        client.assert_closed().await;
+
+        // A chunk with an extension is a chunk this proxy does not read. Whatever stands
+        // behind the size line stays on the connection, and is not read as a request.
+        let mut client = H1Client::connect(endpoint.port).await;
+        let request = format!(
+            "GET {target} HTTP/1.1\r\nHost: localhost:{port}\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n0\r\n\r\nGET /css/site.css HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n",
+            port = endpoint.port
+        );
+        client.stream.write_all(request.as_bytes()).await.unwrap();
+
+        let response = client.read_response().await;
+        assert_eq!(response.status, 200, "{target}, a chunk with an extension");
+        assert_eq!(response.body, body, "{target}, a chunk with an extension");
+        client.assert_closed().await;
+    }
+}
+
+/// A `HEAD` is answered with the head of the response the same `GET` gets, and no body: by a
+/// files location, by a static one, and by the page of a file which is not there. A body behind
+/// the head would be read by the client as the start of the next response.
+#[tokio::test]
+async fn http_a_head_request_is_answered_without_a_body() {
+    let site = TestSite::new();
+    let locations = format!(
+        "- path: /static\n  type: static\n  status_code: 200\n  content_type: text/html\n  body: <b>static-body</b>\n- proxy_pass_to: '{root}'\n  default_file: index.html\n",
+        root = site.root()
+    );
+    let endpoint = start_host(ListenHttpEndpointType::Http1, "", &locations).await;
     let mut client = H1Client::connect(endpoint.port).await;
 
-    let request = format!(
-        "GET /index.html HTTP/1.1\r\nHost: localhost:{}\r\nContent-Length: 100\r\n\r\nshort",
-        endpoint.port
-    );
-    client.stream.write_all(request.as_bytes()).await.unwrap();
-    client.stream.shutdown().await.unwrap();
+    for (target, status) in [
+        ("/index.html", 200),
+        ("/", 200),
+        ("/css/site.css", 200),
+        ("/static", 200),
+        ("/missing.html", 404),
+        ("/../secret.txt", 400),
+    ] {
+        let get = client.get(target).await;
+        assert_eq!(get.status, status, "GET {target}");
 
-    client.assert_closed().await;
+        let (head_status, content_length) = client.head(target).await;
+        assert_eq!(head_status, status, "HEAD {target}");
+        assert_eq!(content_length, get.body.len(), "HEAD {target}");
+
+        // The next response starts where the head ended.
+        let response = client.get("/css/site.css").await;
+        assert_eq!(response.status, 200, "after HEAD {target}");
+        assert_eq!(response.body, SITE_CSS, "after HEAD {target}");
+    }
 }
 
 #[tokio::test]
@@ -231,7 +295,7 @@ async fn http_a_folder_behind_a_gateway_which_can_not_be_reached_is_a_503() {
     assert_eq!(log.len(), 1);
     assert_eq!(
         log[0].message,
-        "Returned 503 to client: upstream failure: can not get the file /index.html: GatewayError"
+        "Returned 503 to client: upstream failure: can not get the file \"/index.html\": GatewayError"
     );
 
     // The path is checked before the gateway is asked, and the connection goes on after both.
@@ -261,7 +325,7 @@ async fn http_a_folder_behind_ssh_which_can_not_be_reached_is_a_503() {
     assert_eq!(log.len(), 1);
     assert!(
         log[0].message.starts_with(
-            "Returned 503 to client: upstream failure: can not get the file /index.html: SshSessionError("
+            "Returned 503 to client: upstream failure: can not get the file \"/index.html\": SshSessionError("
         ),
         "{}",
         log[0].message
@@ -407,8 +471,9 @@ async fn a_file_is_not_served_past_the_location_which_guards_it() {
 
     for (target, status) in [
         ("/css/site.css", 401),
-        // Under the guard still, whatever comes behind its path.
-        ("/css//site.css", 401),
+        // An empty segment is refused before a location is looked for, under the guard as
+        // anywhere else.
+        ("/css//site.css", 400),
         ("/index.html", 200),
     ] {
         let mut client = H1Client::connect(endpoint.port).await;
@@ -426,7 +491,7 @@ async fn a_file_is_not_served_past_the_location_which_guards_it() {
     let mut client = H2Client::connect(endpoint.port).await;
 
     assert_eq!(client.get("/css/site.css").await.status, 401);
-    assert_eq!(client.get("/css//site.css").await.status, 401);
+    assert_eq!(client.get("/css//site.css").await.status, 400);
     assert_eq!(client.get("/index.html").await.status, 200);
 
     for target in PAST_THE_GUARD {
@@ -662,6 +727,39 @@ impl<S: AsyncRead + AsyncWrite + Unpin> H1Client<S> {
         self.stream.write_all(&request).await.unwrap();
 
         self.read_response().await
+    }
+
+    /// A `HEAD`: the status and the `content-length` of the response. Its head is all there
+    /// is to it, so nothing behind the head is read.
+    async fn head(&mut self, target: &str) -> (u16, usize) {
+        let request = format!(
+            "HEAD {target} HTTP/1.1\r\nHost: localhost:{}\r\n\r\n",
+            self.port
+        );
+        self.stream.write_all(request.as_bytes()).await.unwrap();
+
+        let head_end = loop {
+            if let Some(end) = find(&self.received, b"\r\n\r\n") {
+                break end + 4;
+            }
+
+            assert!(
+                self.read_more().await > 0,
+                "connection closed before the response head"
+            );
+        };
+
+        let head = String::from_utf8(self.received[..head_end].to_vec()).unwrap();
+        self.received.drain(..head_end);
+
+        let content_length = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .unwrap_or_else(|| panic!("no content-length in: {}", head))
+            .parse()
+            .unwrap();
+
+        (head[9..12].parse().unwrap(), content_length)
     }
 
     /// Every response of a files location has a `content-length`.

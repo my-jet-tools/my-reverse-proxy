@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
+use flurl::FlUrl;
 use http::Method;
 use my_http_client::http1::{MyHttpClient, MyHttpRequestBuilder, MyHttpResponse};
-use my_settings_reader::flurl::FlUrl;
 use my_ssh::{ssh_settings::OverSshConnectionSettings, SshCredentials};
 use rust_extensions::remote_endpoint::RemoteEndpoint;
 
@@ -156,4 +156,32 @@ async fn load_content_from_http_via_ssh<'s>(
         .into_vec(usize::MAX)
         .await
         .map_err(|err| format!("{:?}", err))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use my_ssh::ssh_settings::OverSshConnectionSettings;
+
+    /// A file is loaded from an `https://` source over TLS. Should the FlUrl this file uses ever
+    /// be a copy built without TLS - pulled by another dependency from another git url - an
+    /// https source fails with `UnsupportedScheme` before a socket is opened.
+    #[tokio::test]
+    async fn a_file_is_loaded_from_an_https_source_over_tls() {
+        let closed_port = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+
+        let source =
+            OverSshConnectionSettings::try_parse(&format!("https://127.0.0.1:{closed_port}/x"))
+                .unwrap();
+
+        let err = super::load_file(&source, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+
+        assert!(!err.contains("UnsupportedScheme"), "{err}");
+    }
 }

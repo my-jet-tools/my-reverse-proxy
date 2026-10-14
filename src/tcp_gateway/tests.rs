@@ -1534,6 +1534,86 @@ async fn connections_opened_right_after_registration_work() {
     }
 }
 
+/// A connect issued in the very instant an end has its gateway connection registered - each
+/// end spinning on its registry rather than polling it - from both ends, over and over: the
+/// handshake is all a connect needs, nothing which comes after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_connect_issued_the_instant_the_connection_is_registered_works() {
+    let upstream = start_upstream(|stream| echo(stream, None)).await;
+
+    for round in 0..10 {
+        let name = format!("first-instant-{round}");
+        let key = signing_key();
+        let (server, port) = start_server(&key, None).await;
+        let server = Arc::new(server);
+
+        let from_server = {
+            let (server, name) = (server.clone(), name.clone());
+            tokio::spawn(async move {
+                let connection = loop {
+                    if let Some(connection) = server.get_gateway_connection(&name) {
+                        break connection;
+                    }
+                    tokio::task::yield_now().await;
+                };
+
+                let mut stream = connection
+                    .connect_to_forward_proxy_connection(
+                        endpoint(upstream),
+                        CONNECT_TIMEOUT,
+                        server.get_next_connection_id(),
+                    )
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    stream.send_window_for_tests().available_permits(),
+                    FLOW_CONTROL_WINDOW
+                );
+                assert_echoes(&mut stream).await;
+            })
+        };
+
+        let client = Arc::new(start_client(&name, &key, port, round % 2 == 0));
+
+        let from_client = {
+            let (client, name) = (client.clone(), name.clone());
+            tokio::spawn(async move {
+                let connection = loop {
+                    if let Some(connection) = client.get_gateway_connection(&name) {
+                        break connection;
+                    }
+                    tokio::task::yield_now().await;
+                };
+
+                let mut stream = connection
+                    .connect_to_forward_proxy_connection(
+                        endpoint(upstream),
+                        CONNECT_TIMEOUT,
+                        client.get_next_connection_id(),
+                    )
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    stream.send_window_for_tests().available_permits(),
+                    FLOW_CONTROL_WINDOW
+                );
+                assert_echoes(&mut stream).await;
+            })
+        };
+
+        tokio::time::timeout(TIMEOUT, from_server)
+            .await
+            .expect("the connect from the server is stuck")
+            .unwrap();
+        tokio::time::timeout(TIMEOUT, from_client)
+            .await
+            .expect("the connect from the client is stuck")
+            .unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connections_open_again_after_a_reconnect() {
     let gateway = Gateway::start("fc-reconnect", false).await;
@@ -3105,6 +3185,143 @@ async fn the_compression_level_of_the_client_holds_for_both_directions() {
     }
 }
 
+/// The ping time is measured by the client - it sends the pings - and given to the server in
+/// `UPDATE_PING_TIME`: both ends show it, and it keeps being given.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_ping_time_measured_by_the_client_reaches_the_server() {
+    let gateway = Gateway::start("ping-time", false).await;
+    let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
+
+    let given = |side: &TcpGatewayConnection| side.last_ping_duration.to_duration();
+
+    // A ping goes every 3 seconds.
+    wait_until_within(Duration::from_secs(10), || {
+        given(&client_side) > Duration::ZERO && given(&server_side) > Duration::ZERO
+    })
+    .await;
+
+    // On loopback a ping takes well under a second.
+    assert!(given(&server_side) < Duration::from_secs(1));
+
+    // The next one is given as well: the server is told the time of every ping.
+    server_side
+        .last_ping_duration
+        .update(Duration::from_secs(1000));
+
+    wait_until_within(Duration::from_secs(10), || {
+        given(&server_side) < Duration::from_secs(1)
+    })
+    .await;
+}
+
+/// What one end counts as sent is what the other end counts as received, to the byte: the
+/// frames as they travel, sealed and packed, of every size - small writes and big ones, both
+/// directions, a ping among them - at the levels of every kind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_one_end_counts_as_sent_the_other_counts_as_received() {
+    let upstream = start_upstream(|stream| echo(stream, None)).await;
+    let text = compressible(300 * 1024, 7);
+
+    for level in [0, 1, 2, 6] {
+        let compression = CompressionLevel::new(level).unwrap();
+        let name = format!("wire-counts-{level}");
+        let gateway = Gateway::start_at(&name, compression).await;
+        let (server_side, client_side) = (gateway.server_side(), gateway.client_side());
+
+        // A frame on its way when the counts are taken from zero would be counted by one end
+        // and not by the other: then the round is made again.
+        let mut counted_alike = false;
+
+        for _attempt in 0..3 {
+            for side in [&server_side, &client_side] {
+                side.in_per_second.get_per_second();
+                side.out_per_second.get_per_second();
+            }
+
+            let mut streams = [
+                gateway.connect_from_client(upstream).await,
+                gateway.connect_from_server(upstream).await,
+            ];
+
+            for stream in streams.iter_mut() {
+                for size in [1, 17, 300, 4096, 70_000, text.len()] {
+                    stream.write_to_socket(&text[..size]).await.unwrap();
+
+                    let mut echoed = 0;
+                    let mut buf = vec![0u8; 64 * 1024];
+                    while echoed < size {
+                        let read = tokio::time::timeout(TIMEOUT, stream.read_from_socket(&mut buf))
+                            .await
+                            .expect("the echo did not come back")
+                            .unwrap();
+                        assert!(read > 0);
+                        echoed += read;
+                    }
+                }
+
+                stream.disconnect();
+            }
+
+            let (mut client_out, mut server_in, mut server_out, mut client_in) = (0, 0, 0, 0);
+            let started = Instant::now();
+
+            while started.elapsed() < Duration::from_secs(2) {
+                client_out += client_side.out_per_second.get_per_second();
+                server_in += server_side.in_per_second.get_per_second();
+                server_out += server_side.out_per_second.get_per_second();
+                client_in += client_side.in_per_second.get_per_second();
+
+                if client_out == server_in && server_out == client_in && client_out > 0 {
+                    counted_alike = true;
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            if counted_alike {
+                // Without compression every byte of the text crossed the wire, up and back.
+                if !compression.is_on() {
+                    assert!(client_out > 2 * text.len(), "{name}: {client_out}");
+                }
+                break;
+            }
+
+            println!(
+                "{name}: up {client_out} sent, {server_in} received; down {server_out} sent, \
+                 {client_in} received - once more"
+            );
+        }
+
+        assert!(counted_alike, "{name}: the two ends count the wire apart");
+    }
+}
+
+/// A server which is dropped closes its port: a connection to it is refused, not accepted by
+/// a listener nothing serves any more. (Its accept loop ends on the next connection it takes,
+/// too late for that one.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_server_closes_its_port() {
+    let key = signing_key();
+
+    // It listens once it is constructed. No connection is made to it first: the one it would
+    // accept after the drop is the one which ends its accept loop.
+    let (server, port) = start_server(&key, None).await;
+
+    // The accept loop is waiting for a connection: it would see the stop only after one.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    drop(server);
+
+    // The accept loop is stopped on its next turn of the runtime.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(
+        TcpStream::connect(("127.0.0.1", port)).await.is_err(),
+        "the port of a dropped server still takes connections"
+    );
+}
+
 /// What `side` has counted as sent. A writer counts a write right after it is done, which may be
 /// a moment after the peer has what was written: this waits for `at_least` bytes, for a second.
 async fn sent_by(side: &TcpGatewayConnection, at_least: usize) -> usize {
@@ -3705,9 +3922,10 @@ async fn round_trips() {
 }
 
 /// How much a level saves by the size of a batch: the bytes the batches take on the wire
-/// without compression for a byte they take with it, the sealing of a frame counted in both. A
-/// batch is packed on its own, so the frames of a busy connection - they travel in big batches -
-/// pack better than the same frames sent one by one. The data is the first megabytes of what
+/// without compression for a byte they take with it, the sealing of a frame counted in both. At
+/// the levels which pack a batch on its own the frames of a busy connection - they travel in big
+/// batches - pack better than the same frames sent one by one; at the levels of one stream a
+/// batch is packed with the ones before it, whatever its size. The data is the first megabytes of what
 /// [`throughput`] sends, cut into batches of every size:
 /// `cargo test --release --bin my-reverse-proxy batch_sizes -- --ignored --nocapture`
 #[test]
@@ -3725,11 +3943,13 @@ fn batch_sizes() {
         let sample = &sample[..sample.len().min(2 * 1024 * 1024)];
 
         for compression in CompressionLevel::all().filter(|level| level.is_on()) {
-            let mut packer = session::BatchPacker::new(compression);
             let mut wire = Vec::new();
             let mut ratios = String::new();
 
             for size in SIZES {
+                // A connection of its own for every size: at a level of one stream the sample
+                // sent once is what its second sending would be packed with.
+                let mut packer = session::BatchPacker::new(compression);
                 let (mut packed, mut not_packed) = (0usize, 0usize);
 
                 for batch in sample.chunks(size) {

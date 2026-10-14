@@ -3,18 +3,40 @@ use tokio::io::AsyncWriteExt;
 use crate::{
     configurations::{HttpEndpointInfo, McpEndpointSettings},
     network_stream::*,
+    types::ConnectionIp,
 };
 
 pub async fn run_mcp_connection(
     mut tls_stream: my_tls::tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     http_endpoint_info: &HttpEndpointInfo,
+    connection_ip: &ConnectionIp,
     connection_id: u64,
 ) {
     if http_endpoint_info.debug {
         println!("Accepted mcp connection",);
     }
 
+    // The bridge parses no HTTP: an endpoint which was told to check a header or a session
+    // can not, and serves nobody. The connection is closed without a word; a debug ip gets
+    // the reason first - as an HTTP response, which is what an MCP client reads.
+    if let Some(reason) = http_endpoint_info.not_served_reason.as_ref() {
+        if crate::app::APP_CTX.debug_ip.is_debug_ip(connection_ip) {
+            let response = crate::error_templates::not_served_h1_response(reason, true);
+            let _ = tls_stream.write_all(&response).await;
+        }
+
+        let _ = tls_stream.shutdown().await;
+        return;
+    }
+
     let location = http_endpoint_info.locations.first().unwrap();
+
+    // `whitelisted_ip` of the location is what the bridge can check: by the address of the
+    // connection, before anything is sent on.
+    if !location.ip_is_allowed(connection_ip).await {
+        let _ = tls_stream.shutdown().await;
+        return;
+    }
     let route_path = location.path.clone();
     let remote_host = location.proxy_pass_to.to_string();
 

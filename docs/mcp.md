@@ -163,8 +163,10 @@ MCP servers 404. Write the path explicitly.
 
 ### Compression
 
-`compress: true` gzips the response, which buffers SSE events until the window
-flushes. Do not enable it on MCP locations.
+`compress: true` gzips the body of a request on its way to the upstream (2048
+bytes and more, on `http2` / `https2` endpoints), holding it whole in memory
+first - the response is not touched. An MCP server is not made to take a
+gzipped JSON-RPC message. Do not enable it on MCP locations.
 
 ### Auth
 

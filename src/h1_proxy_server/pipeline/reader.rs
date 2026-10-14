@@ -8,7 +8,9 @@ use crate::configurations::{MyReverseProxyRemoteEndpoint, ProxyPassToConfig, Pro
 use crate::h1_remote_connection::{mcp_path, H1PoolHolder};
 use crate::network_stream::*;
 
-use super::super::{H1HeadersKind, H1Reader, HttpConnectionInfo, ProxyServerError};
+use super::super::{
+    H1HeadersKind, H1Reader, HttpConnectionInfo, HttpHeadersReader, ProxyServerError,
+};
 use super::{
     run_client_writer, run_oauth_gate, run_upstream_request, run_ws_tunnel, BodyChannelSink,
     OAuthGateOutcome, ResponseEvent, ResponseSlot, UpgradeContext, UpstreamRequest,
@@ -310,8 +312,61 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         }
     }
 
+    // An endpoint which was given an access setting it can not apply serves
+    // nobody. Everybody is refused without a word; a debug ip is told the reason.
+    if let Some(reason) = end_point_info.not_served_reason.as_ref() {
+        let is_debug_ip = crate::app::APP_CTX
+            .debug_ip
+            .is_debug_ip(&http_connection_info.connection_ip);
+
+        return respond_error(
+            queue_tx,
+            http_connection_info,
+            Some(&endpoint_for_error),
+            ProxyServerError::HttpResponse(crate::error_templates::not_served_h1_response(
+                reason,
+                is_debug_ip,
+            )),
+        )
+        .await;
+    }
+
     if let Some(domain) = end_point_info.tracked_domain(request_host_for_metric.as_deref()) {
         crate::app::APP_CTX.rps.inc_domain(domain);
+    }
+
+    // A path with a `..`, a `.` or an empty segment is not matched to a location:
+    // the location is picked by the path as it is written, and the upstream may
+    // resolve the segment and serve another one. Before the oauth gate too - it
+    // looks a location up by the path as well.
+    let (path_is_ambiguous, is_head) = {
+        let first_line = request_headers.get_first_line(h1_reader.loop_buffer.get_data());
+        let (method, path, _query) = first_line.get_verb_path_and_query();
+        (crate::types::has_ambiguous_segment(path), method == "HEAD")
+    };
+
+    if path_is_ambiguous {
+        // The head is still in the loop buffer: `compile_headers` drops it on the
+        // way to a location, and this request gets to none.
+        h1_reader.loop_buffer.commit_read(request_headers.end);
+
+        // The request body comes off the connection first.
+        let mut null = super::NullSink;
+        let request_was_read = h1_reader
+            .transfer_body(0, &mut null, request_headers.content_length)
+            .await
+            .is_ok();
+
+        // An ordinary response, as a files location gives to a path it refuses:
+        // the connection goes on and nothing is counted against the source IP.
+        return emit_own_response(
+            queue_tx,
+            write_timeout,
+            crate::error_templates::BAD_REQUEST.to_vec(),
+            is_head,
+            keep_alive && request_was_read,
+        )
+        .await;
     }
 
     // The proxy's own OAuth 2.1 server, when this endpoint has an `oauth:`
@@ -355,6 +410,22 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
 
     if location.proxy_pass_to.is_drop() {
         return ReaderStep::Close;
+    }
+
+    // The location's own IP allow-list - the same rule the hyper path has in
+    // `HttpProxyPass::send_payload`. Checked before `authorize`, so an address
+    // which is not listed can not even probe the location's `auth_header`.
+    if !location
+        .ip_is_allowed(&http_connection_info.connection_ip)
+        .await
+    {
+        return respond_error(
+            queue_tx,
+            http_connection_info,
+            Some(&endpoint_for_error),
+            ProxyServerError::NotAuthorized,
+        )
+        .await;
     }
 
     let identity = match h1_reader
@@ -451,6 +522,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
                 remote_host: MyReverseProxyRemoteEndpoint::Direct {
                     remote_host: Arc::new(endpoint),
                 },
+                server_name: None,
                 request_timeout: config.request_timeout,
                 connect_timeout: config.connect_timeout,
                 pool_tuning: crate::configurations::PoolTuning::default(),
@@ -465,9 +537,28 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
 
     let content_length = request_headers.content_length;
 
+    // A static or a files location answers itself, with no upstream response to
+    // put headers on. What `modify_http_headers` add to a response is taken here,
+    // while the request the values may be filled from is still in the buffer.
+    let own_response_headers = match &location.proxy_pass_to {
+        ProxyPassToConfig::Static(_) | ProxyPassToConfig::FilesPath(_) => {
+            headers_added_to_a_response(
+                HttpHeadersReader {
+                    http_headers: &request_headers,
+                    payload: h1_reader.loop_buffer.get_data(),
+                },
+                &end_point_info,
+                location,
+                http_connection_info,
+                &identity,
+            )
+        }
+        _ => Vec::new(),
+    };
+
     let compiled = h1_reader.compile_headers(
         request_headers,
-        H1HeadersKind::Request(&end_point_info),
+        H1HeadersKind::Request(&end_point_info, location),
         http_connection_info,
         &identity,
         mcp_path(&proxy_pass_to_owned),
@@ -493,13 +584,23 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         if let Some(content_type) = cfg.content_type.as_ref() {
             builder = builder.add_content_type(content_type);
         }
+        for (name, value) in &own_response_headers {
+            builder = builder.add_header(name, value);
+        }
         let bytes = builder.build_with_body(&cfg.body);
         let mut null = super::NullSink;
-        let _ = h1_reader.transfer_body(0, &mut null, content_length).await;
-        return match emit_single_response(queue_tx, write_timeout, bytes).await {
-            ReaderStep::Continue if !keep_alive => ReaderStep::Close,
-            other => other,
-        };
+        let request_was_read = h1_reader
+            .transfer_body(0, &mut null, content_length)
+            .await
+            .is_ok();
+        return emit_own_response(
+            queue_tx,
+            write_timeout,
+            bytes,
+            is_head,
+            keep_alive && request_was_read,
+        )
+        .await;
     }
     if let ProxyPassToConfig::FilesPath(model) = &location.proxy_pass_to {
         // Serve a file from the configured folder (README "Serving the folder
@@ -513,23 +614,20 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         let location_id = location.id;
 
         // Whatever the answer is, the request body comes off the connection
-        // first. One that can not be read to the end leaves the connection out
-        // of sync — close it.
+        // first.
         let mut null = super::NullSink;
-        if h1_reader
+        let request_was_read = h1_reader
             .transfer_body(0, &mut null, content_length)
             .await
-            .is_err()
-        {
-            return ReaderStep::Close;
-        }
+            .is_ok();
 
         // The request line sits in the compiled head, which draining the body
         // did not touch. The query string is not a part of the file name.
         let first_line = h1_reader.h1_headers_builder.get_first_line();
         let (method, path, _query) = first_line.get_verb_path_and_query();
 
-        let answer = super::answer_files_request(&source, method, path).await;
+        let answer =
+            super::answer_files_request(&source, method, path, &own_response_headers).await;
         if let Some((status, failure)) = answer.returned_5xx {
             crate::app::APP_CTX.proxy_logs.write_returned_5xx(
                 &endpoint_for_error,
@@ -539,19 +637,23 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
                 failure,
             );
         }
-        // An ordinary response, a refused path included: the request was read in
-        // full, so the connection goes on and nothing is counted against the
-        // source IP.
-        return match emit_single_response(queue_tx, write_timeout, answer.bytes).await {
-            ReaderStep::Continue if !keep_alive => ReaderStep::Close,
-            other => other,
-        };
+        // An ordinary response, a refused path included: the connection goes on
+        // and nothing is counted against the source IP.
+        return emit_own_response(
+            queue_tx,
+            write_timeout,
+            answer.bytes,
+            is_head,
+            keep_alive && request_was_read,
+        )
+        .await;
     }
 
     let head = h1_reader.h1_headers_builder.as_slice().to_vec();
 
     // Clone the owned context before the borrows end.
     let location_id = location.id;
+    let location = location.clone();
     let conn_info = http_connection_info.clone();
 
     if is_websocket {
@@ -561,6 +663,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         return ReaderStep::Upgrade(Box::new(UpgradeContext {
             proxy_pass_to: proxy_pass_to_owned,
             end_point_info,
+            location,
             http_connection_info: conn_info,
             location_id,
             head,
@@ -590,6 +693,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             pool: pool.clone(),
             proxy_pass_to: proxy_pass_to_owned,
             end_point_info,
+            location,
             http_connection_info: conn_info,
             location_id,
             head,
@@ -611,6 +715,78 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         // Worker gone or client body read failed → connection desynced, close.
         Err(_) => ReaderStep::Close,
     }
+}
+
+/// Sends a response the proxy made itself - of a static or a files location, the
+/// 400 of a refused path - and says what becomes of the connection.
+///
+/// `is_head`: the request was a `HEAD`. Its response is the head alone, with the
+/// `content-length` the same request with `GET` would get: a body sent after it
+/// would be read by the client as the start of the next response.
+///
+/// `connection_goes_on`: `false` when the endpoint does not keep connections
+/// alive, or when the body of the request could not be read to its end - what is
+/// left of it on the connection would be read as the next request. The response
+/// is sent all the same, and the connection is closed behind it.
+async fn emit_own_response(
+    queue_tx: &mpsc::Sender<ResponseSlot>,
+    write_timeout: Duration,
+    mut response: Vec<u8>,
+    is_head: bool,
+    connection_goes_on: bool,
+) -> ReaderStep {
+    if is_head {
+        cut_the_body_off(&mut response);
+    }
+
+    match emit_single_response(queue_tx, write_timeout, response).await {
+        ReaderStep::Continue if !connection_goes_on => ReaderStep::Close,
+        other => other,
+    }
+}
+
+/// Leaves the head of an HTTP/1.1 response - the status line, the headers and the
+/// empty line behind them.
+fn cut_the_body_off(response: &mut Vec<u8>) {
+    const END_OF_HEAD: &[u8] = b"\r\n\r\n";
+
+    if let Some(end) = response
+        .windows(END_OF_HEAD.len())
+        .position(|window| window == END_OF_HEAD)
+    {
+        response.truncate(end + END_OF_HEAD.len());
+    }
+}
+
+/// The headers `modify_http_headers` of the endpoint and of the location add to a
+/// response, with their values filled from the request - for a response the proxy
+/// makes itself. The headers of the endpoint first, as on a proxied response.
+fn headers_added_to_a_response(
+    request: HttpHeadersReader<'_>,
+    end_point_info: &crate::configurations::HttpEndpointInfo,
+    location: &crate::configurations::ProxyPassLocationConfig,
+    http_connection_info: &HttpConnectionInfo,
+    identity: &Option<crate::http_proxy_pass::HttpProxyPassIdentity>,
+) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+
+    for rules in [
+        &end_point_info.modify_response_headers,
+        &location.modify_response_headers,
+    ] {
+        for (name, value) in rules.iter_add() {
+            let value =
+                crate::scripts::populate_value(request, http_connection_info, identity, value);
+
+            if value.as_str().is_empty() {
+                continue;
+            }
+
+            result.push((name.to_string(), value.as_str().to_string()));
+        }
+    }
+
+    result
 }
 
 /// Push a single fully-formed response (already-built bytes) as one ordered

@@ -27,12 +27,7 @@ impl ProxyPassLocation {
     }
 
     pub fn is_my_uri(&self, uri: &Uri) -> bool {
-        let result = rust_extensions::str_utils::starts_with_case_insensitive(
-            uri.path(),
-            self.config.path.as_str(),
-        );
-
-        result
+        crate::types::is_path_of_location(uri.path(), self.config.path.as_str())
     }
 
     pub fn is_http1(&self) -> Option<bool> {

@@ -111,18 +111,19 @@ impl Upstream {
                 MyReverseProxyRemoteEndpoint::Direct { remote_host } => {
                     if let Some(scheme) = remote_host.get_scheme() {
                         if scheme.is_https() {
-                            let (result, read_part, ssh_handler) =
-                                Http1ConnectionInner::connect::<
-                                    tokio::io::ReadHalf<
-                                        my_tls::tokio_rustls::client::TlsStream<
-                                            tokio::net::TcpStream,
-                                        >,
-                                    >,
+                            let (result, read_part, ssh_handler) = Http1ConnectionInner::connect::<
+                                tokio::io::ReadHalf<
                                     my_tls::tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
-                                >(
-                                    None, None, None, remote_host, proxy_pass_to.connect_timeout
-                                )
-                                .await?;
+                                >,
+                                my_tls::tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+                            >(
+                                None,
+                                None,
+                                proxy_pass_to.server_name.as_deref(),
+                                remote_host,
+                                proxy_pass_to.connect_timeout,
+                            )
+                            .await?;
                             owned!(
                                 UpstreamInner::Https1Direct(result),
                                 result,

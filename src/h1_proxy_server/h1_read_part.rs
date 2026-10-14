@@ -14,15 +14,24 @@ use crate::{
 };
 
 pub enum H1HeadersKind<'a> {
-    Request(&'a HttpEndpointInfo),
-    Response(&'a HttpEndpointInfo),
+    Request(&'a HttpEndpointInfo, &'a ProxyPassLocationConfig),
+    Response(&'a HttpEndpointInfo, &'a ProxyPassLocationConfig),
 }
 
 impl<'a> H1HeadersKind<'a> {
-    fn modify_headers(&self) -> &ModifyHeadersConfig {
+    /// `modify_http_headers` of the endpoint and of the location - the same two the hyper path
+    /// applies. A header is removed when either of them removes it, and what both add is added:
+    /// the headers of the endpoint first.
+    fn modify_headers(&self) -> [&'a ModifyHeadersConfig; 2] {
         match self {
-            H1HeadersKind::Request(info) => &info.modify_request_headers,
-            H1HeadersKind::Response(info) => &info.modify_response_headers,
+            H1HeadersKind::Request(endpoint, location) => [
+                &endpoint.modify_request_headers,
+                &location.modify_request_headers,
+            ],
+            H1HeadersKind::Response(endpoint, location) => [
+                &endpoint.modify_response_headers,
+                &location.modify_response_headers,
+            ],
         }
     }
 }
@@ -52,10 +61,11 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
                 let buf = self.loop_buffer.get_data();
 
                 if !buf.is_empty() {
-                    let headers = Http1Headers::parse(buf);
-
-                    if let Some(headers) = headers {
-                        return Ok(headers);
+                    match Http1Headers::try_parse(buf) {
+                        Ok(Some(headers)) => return Ok(headers),
+                        Ok(None) => {}
+                        // Reading on would not make the line a valid one.
+                        Err(reason) => return Err(ProxyServerError::HeadersParseError(reason)),
                     }
                 }
             }
@@ -109,7 +119,8 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
         &self,
         http_headers: &Http1Headers,
         connection_info: &'s HttpConnectionInfo,
-    ) -> Result<(&'s ProxyPassLocationConfig, &'s Arc<HttpEndpointInfo>), ProxyServerError> {
+    ) -> Result<(&'s Arc<ProxyPassLocationConfig>, &'s Arc<HttpEndpointInfo>), ProxyServerError>
+    {
         let Some(endpoint_info) = &connection_info.endpoint_info else {
             crate::app::APP_CTX.proxy_logs.write_port(
                 connection_info
@@ -146,8 +157,8 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
     ) -> Result<bool, ProxyServerError> {
         let modify_headers = kind.modify_headers();
         let request_endpoint = match &kind {
-            H1HeadersKind::Request(info) => Some(*info),
-            H1HeadersKind::Response(_) => None,
+            H1HeadersKind::Request(info, _) => Some(*info),
+            H1HeadersKind::Response(..) => None,
         };
         self.h1_headers_builder.clear();
         let data = self.loop_buffer.get_data();
@@ -194,14 +205,21 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
                 ));
             };
 
-            let header_name =
-                unsafe { std::str::from_utf8_unchecked(&header[..header_name_end_pos]) };
+            let Ok(header_name) = std::str::from_utf8(&header[..header_name_end_pos]) else {
+                return Err(ProxyServerError::HeadersParseError(
+                    "Header name is not valid UTF-8",
+                ));
+            };
 
             let skip_for_dynamic_proxy = dynamic_proxy_host_override.is_some()
                 && (header_name.eq_ignore_ascii_case("host")
                     || header_name.eq_ignore_ascii_case("proxy-to"));
 
-            if !skip_for_dynamic_proxy && !modify_headers.has_to_be_removed(header_name) {
+            let has_to_be_removed = modify_headers
+                .iter()
+                .any(|rules| rules.has_to_be_removed(header_name));
+
+            if !skip_for_dynamic_proxy && !has_to_be_removed {
                 if header_name.eq_ignore_ascii_case("x-forwarded-for") {
                     if let Some(ip) = client_ip {
                         let value_bytes = &header[header_name_end_pos + 1..];
@@ -255,7 +273,7 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
             payload: self.loop_buffer.get_data(),
         };
 
-        for add_header in modify_headers.iter_add() {
+        for add_header in modify_headers.iter().flat_map(|rules| rules.iter_add()) {
             if add_header.1.is_empty() {
                 continue;
             }
@@ -272,16 +290,14 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
                 .push_header(add_header.0, value.as_str());
         }
 
-        if let H1HeadersKind::Response(info) = &kind {
+        if let H1HeadersKind::Response(info, _) = &kind {
             if !info.keep_alive {
                 self.h1_headers_builder.push_header("Connection", "close");
             }
 
             if info.hsts && info.listen_endpoint_type.is_https() {
-                self.h1_headers_builder.push_header(
-                    "Strict-Transport-Security",
-                    "max-age=31536000; includeSubDomains; preload",
-                );
+                self.h1_headers_builder
+                    .push_header("Strict-Transport-Security", crate::consts::HSTS_VALUE);
             }
         }
 

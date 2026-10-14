@@ -42,20 +42,32 @@ impl Http1Headers {
             .ok()
     }
 
+    /// `None`: there is no whole head yet, or it does not parse.
+    #[cfg(test)]
     pub fn parse(src: &[u8]) -> Option<Self> {
+        Self::try_parse(src).ok().flatten()
+    }
+
+    /// `Ok(None)`: there is no whole head yet - more has to be read. `Err`: the first line is
+    /// there and is not one of HTTP/1.1, and nothing which comes after it can change that.
+    pub fn try_parse(src: &[u8]) -> Result<Option<Self>, &'static str> {
+        let Some(first_line_end) = src.find_sequence_pos(crate::consts::HTTP_CR_LF, 0) else {
+            return Ok(None);
+        };
+
+        if verify_http11_first_line(&src[..first_line_end]).is_err() {
+            return Err("Invalid HTTP/1.1 first line");
+        }
+
+        Ok(Self::parse_after_first_line(src, first_line_end))
+    }
+
+    fn parse_after_first_line(src: &[u8], first_line_end: usize) -> Option<Self> {
         const HOST_HEADER: &[u8] = b"host";
         const COOKIE_HEADER: &[u8] = b"cookie";
         const CONTENT_LEN_HEADER: &[u8] = b"content-length";
         const TRANSFER_ENCODING_HEADER: &[u8] = b"transfer-encoding";
         const UPGRADE_HEADER: &[u8] = b"upgrade";
-
-        let first_line_end = src.find_sequence_pos(crate::consts::HTTP_CR_LF, 0)?;
-
-        // Verify HTTP/1.1 first line
-        if let Err(err) = verify_http11_first_line(&src[..first_line_end]) {
-            eprintln!("Invalid HTTP/1.1 first line: {}", err);
-            return None;
-        }
 
         let mut host_value = None;
         let mut cookie_value = None;

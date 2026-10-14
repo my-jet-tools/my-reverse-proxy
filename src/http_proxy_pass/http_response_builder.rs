@@ -42,6 +42,16 @@ pub fn modify_resp_headers(
         headers,
         &proxy_pass_location.config.modify_response_headers,
     );
+
+    // `hsts` of the endpoint - the same header, on the same condition, as the h1
+    // pipeline sends.
+    let endpoint_info = &proxy_pass.endpoint_info;
+    if endpoint_info.hsts && endpoint_info.listen_endpoint_type.is_https() {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static(crate::consts::HSTS_VALUE),
+        );
+    }
 }
 
 fn modify_headers(

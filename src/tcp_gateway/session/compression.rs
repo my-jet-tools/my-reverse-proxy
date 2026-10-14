@@ -11,6 +11,11 @@ pub enum Packing {
     Lz4 { acceleration: i32 },
     /// A Zstandard frame, of the Zstandard level.
     Zstd { level: i32 },
+    /// One Zstandard stream for the whole direction, of the Zstandard level: a batch is a piece
+    /// of it, packed with everything sent before it for a history. A batch of a few hundred
+    /// bytes - a request, an answer - has nothing in itself to be packed with; in the stream
+    /// it has the requests and the answers before it.
+    ZstdStream { level: i32 },
 }
 
 /// The table: what the levels from 1 on pack with. Level 0 is no compression.
@@ -21,12 +26,16 @@ pub enum Packing {
 ///
 /// The rows are what packs fast enough to be done by the writer of the connection between two
 /// writes: see "What is not in the table" in the document.
-const LEVELS: [Packing; 5] = [
+const LEVELS: [Packing; 9] = [
     /* 1 */ Packing::Lz4 { acceleration: 1 },
     /* 2 */ Packing::Zstd { level: 1 },
     /* 3 */ Packing::Zstd { level: 3 },
     /* 4 */ Packing::Zstd { level: 6 },
     /* 5 */ Packing::Zstd { level: 9 },
+    /* 6 */ Packing::ZstdStream { level: 1 },
+    /* 7 */ Packing::ZstdStream { level: 3 },
+    /* 8 */ Packing::ZstdStream { level: 6 },
+    /* 9 */ Packing::ZstdStream { level: 9 },
 ];
 
 /// A level of the table, or 0: no compression.
@@ -82,6 +91,7 @@ impl fmt::Display for CompressionLevel {
             Some(Packing::Lz4 { acceleration: 1 }) => f.write_str("lz4"),
             Some(Packing::Lz4 { acceleration }) => write!(f, "lz4, acceleration {acceleration}"),
             Some(Packing::Zstd { level }) => write!(f, "zstd {level}"),
+            Some(Packing::ZstdStream { level }) => write!(f, "zstd {level}, one stream"),
         }
     }
 }
@@ -128,5 +138,9 @@ mod tests {
         assert_eq!(named(3), "zstd 3");
         assert_eq!(named(4), "zstd 6");
         assert_eq!(named(5), "zstd 9");
+        assert_eq!(named(6), "zstd 1, one stream");
+        assert_eq!(named(7), "zstd 3, one stream");
+        assert_eq!(named(8), "zstd 6, one stream");
+        assert_eq!(named(9), "zstd 9, one stream");
     }
 }

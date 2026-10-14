@@ -69,3 +69,6 @@ pub mod location_type {
     pub const STATIC: &str = "static";
     pub const DYNAMIC: &str = "dynamic";
 }
+
+/// `Strict-Transport-Security` of an https endpoint with `hsts: true`, on both http paths.
+pub const HSTS_VALUE: &str = "max-age=31536000; includeSubDomains; preload";

@@ -81,7 +81,7 @@ For TLS listeners (`Https1` / `Https2` / `Mcp`):
 
 1. TLS accept reads SNI from the ClientHello.
 2. `HttpListenPortConfiguration::get_http_endpoint_info(Some(sni))`
-   (`src/configurations/http_listen_port_configuration.rs:63`) walks
+   (`src/configurations/http_listen_port_configuration.rs:61`) walks
    `endpoints: Vec<Arc<HttpEndpointInfo>>` and returns the first whose
    `host_endpoint.is_my_server_name(sni)` is true.
 3. The chosen `HttpEndpointInfo` carries the SSL cert id, allowed user
@@ -92,21 +92,30 @@ For plain HTTP/1 listeners (`Http1`):
 1. There is no SNI, so endpoint resolution is deferred until the first
    request's `Host` header is read.
 2. `H1Reader::try_find_endpoint_info`
-   (`src/h1_proxy_server/h1_read_part.rs:76`) extracts the `Host` header
+   (`src/h1_proxy_server/h1_read_part.rs:95`) extracts the `Host` header
    value and calls the same `get_http_endpoint_info`.
-3. The result is cached on `HttpConnectionInfo.endpoint_info` for the
-   lifetime of the client TCP — subsequent requests on the same TCP do
-   not re-resolve.
+3. The result is kept on `HttpConnectionInfo.endpoint_info`. A later
+   request on the same connection resolves the endpoint again when its
+   `Host` is not that endpoint's (`is_my_endpoint`), or after a settings
+   reload (`pick_up_reload`)
+   (`src/h1_proxy_server/pipeline/reader.rs:194-228`). This holds for
+   h1 connections accepted over TLS as well: they start with the SNI
+   endpoint.
 
 ### Special case: single-endpoint port without server name
 
 If the port hosts exactly one endpoint and that endpoint's
 `host_endpoint` was configured **without** a server name (e.g. just
 `":443"`), resolution succeeds with `server_name = None` and returns that
-single endpoint. This supports configs like "all HTTPS traffic on port
-443 goes to the same backend regardless of SNI".
+single endpoint. Such an endpoint also matches any server name
+(`is_my_server_name`), which supports configs like "all HTTPS traffic on
+port 443 goes to the same backend regardless of SNI". A TLS ClientHello
+with no SNI at all is refused before any endpoint is looked up
+(`TlsAcceptError::UnknownServerName`,
+`src/tcp_listener/https/utils.rs:141-147`), so the `None` case comes from
+a request without a usable `Host`.
 
-If multiple endpoints are configured on a port and SNI/Host is missing,
+If multiple endpoints are configured on a port and the `Host` is missing,
 resolution returns `None` → request fails with
 `ProxyServerError::HttpConfigurationIsNotFound`.
 
@@ -116,7 +125,9 @@ Once the endpoint is resolved, the request stream is gated by:
 
 - `whitelisted_ip_list_id` — client IP must be in the allowed list, or
   the connection is dropped immediately
-  (`tcp_listener/https/handle_connection.rs:37`).
+  (`tcp_listener/https/handle_connection.rs:77`). The h1 pipeline checks
+  it again per request, for the endpoint the request's `Host` resolved to
+  (`src/h1_proxy_server/pipeline/reader.rs:289-313`, 401).
 - `g_auth` (Google login) and/or `client_certificate_id` — checked at
   request time via `must_be_authorized` and the authorize step in
   `H1Reader::authorize`. Failures return 401/redirect responses, not
@@ -129,22 +140,18 @@ Once the endpoint is resolved, the request stream is gated by:
 ## Stage 3: `HttpEndpointInfo` → `ProxyPassLocationConfig`
 
 Per request. The endpoint's `locations: Vec<Arc<ProxyPassLocationConfig>>`
-is searched by `find_location` (`src/configurations/http_endpoint_info.rs:70`):
+is searched by `find_location` (`src/configurations/http_endpoint_info.rs:156`):
 
 ```rust
-pub fn find_location(&self, path: &str) -> Option<&ProxyPassLocationConfig> {
-    for location in self.locations.iter() {
-        if location.path.len() > path.len() {
-            continue;
-        }
-        let path_prefix = &path[..location.path.len()];
-        if path_prefix.eq_ignore_ascii_case(&location.path) {
-            return Some(&location);
-        }
-    }
-    None
+pub fn find_location(&self, path: &str) -> Option<&Arc<ProxyPassLocationConfig>> {
+    self.locations
+        .iter()
+        .find(|location| crate::types::is_path_of_location(path, &location.path))
 }
 ```
+
+The hyper path (`http2` / `https2` endpoints) matches with the same
+`is_path_of_location` (`src/http_proxy_pass/proxy_pass_location.rs:30`).
 
 Important properties:
 
@@ -153,14 +160,22 @@ Important properties:
   the config; otherwise a generic `/` match will shadow more specific
   ones.
 - **Case-insensitive** prefix match.
-- The path-and-query split is done before matching: only the path part
-  is compared, query string is ignored
-  (`H1HeadersFirstLine::get_path_and_query` returns the full
-  path-and-query from the request line; matching is by prefix on this
-  combined string, so a query never affects routing — `?foo=bar` cannot
-  start with a configured path).
-- A request on `/` matches a location with `path: "/"` only; an empty
-  request path or no path is normalized upstream of this code.
+- Only the path is compared: `is_path_of_location`
+  (`src/types/request_path.rs:63`) cuts the request target at the first
+  `?` or `#`, so a query never affects routing.
+- **Percent-decoded**: the path and the location's `path` are both
+  decoded once before they are compared, so `/%73ecure/x` is a request
+  of the location `/secure`. The path sent upstream stays as received.
+- A path with a `..`, a `.` or an empty segment (an empty last segment,
+  `/api/`, is fine) — written as it is or percent-encoded — is answered
+  `400 Bad Request` before a location is looked for, on both HTTP paths
+  (`has_ambiguous_segment`, `src/types/request_path.rs:21`;
+  `src/h1_proxy_server/pipeline/reader.rs:338-370`,
+  `src/http_proxy_pass/http_proxy_pass.rs:102-110`).
+- A request on `/` matches a location with `path: "/"` only. On the h1
+  pipeline an empty request target is refused when the request line is
+  parsed (`verify_http11_first_line`); a target that does not start with
+  `/` (`*`, `host:443`) matches no location whose `path` starts with `/`.
 
 If no location matches, the request fails with
 `ProxyServerError::LocationIsNotFound` and the configured "location not
@@ -174,22 +189,43 @@ After match, the request is filtered/transformed by:
   endpoint-level `whitelisted_ip_list_id`).
 - `modify_request_headers` / `modify_response_headers` — add/remove/
   rewrite headers on request and response.
-- `domain_name` — used for upstream TLS SNI when forwarding to an HTTPS
-  upstream, overriding the request's `Host`.
-- `compress` — enables gzip on responses (do not enable for
-  `type: mcp` — see `docs/mcp.md`).
-- `trace_payload` — debug logging.
+- `domain_name` — the TLS server name (SNI) used when forwarding to an
+  HTTPS upstream, instead of the host of `proxy_pass_to`
+  (`connect_tls`, `src/http_client_connectors/http_tls_connector.rs:74-78`).
+  The request's `Host` header is not changed. Applied on both HTTP paths;
+  on the h1 pipeline it is also a part of the pool key.
+- `compress` — gzips the request body sent to the upstream, when it is
+  2048 bytes or more (`src/http_proxy_pass/http_request_builder.rs:618`).
+  The hyper path only: the h1 pipeline does not read it. Do not enable
+  for `type: mcp` — see `docs/mcp.md`.
+- `trace_payload` — read from the settings, but not used: the hyper
+  path's websocket pump traces payloads when the location's runtime debug
+  flag is on (`src/http_proxy_pass/http_proxy_pass.rs:297`).
 
 ---
 
 ## What happens after location resolution: per-variant
 
 The resolved location's `proxy_pass_to: ProxyPassToConfig` decides the
-upstream behavior. All variants are dispatched through `Upstream::connect`
-(`src/h1_remote_connection/upstream.rs`), which builds the right
-`UpstreamInner` and spawns the response read loop. The wrapping
-`UpstreamState` (per client TCP) decides whether to reuse or open fresh
-based on the variant — see "Upstream lifecycle per variant" below.
+upstream behavior.
+
+On the h1 pipeline (`http` / `https` endpoints) the reader
+(`src/h1_proxy_server/pipeline/reader.rs`) closes the connection for
+`Drop`, answers `Static` and `FilesPath` itself, and turns
+`DynamicProxy` into a per-request `Http1` upstream built from the
+`proxy-to` header. Every other request goes to a per-request worker,
+`run_upstream_request` (`src/h1_proxy_server/pipeline/worker.rs`), which
+takes a connection from the pool (`H1PoolHolder::acquire`,
+`src/h1_remote_connection/h1_pool_holder.rs`), sends the head and the
+body, and reads the response itself. A connection the pool does not have
+is dialled by `Upstream::connect_owned`
+(`src/h1_remote_connection/upstream.rs:47`), which builds the right
+`UpstreamInner` and handles network upstreams only. See "Upstream
+lifecycle per variant" below.
+
+The hyper path (`http2` / `https2` endpoints, `src/http_proxy_pass/`)
+builds a content source per location instead
+(`ProxyPassLocationConfig::create_data_source`).
 
 ### `Http1(ProxyPassToModel)`
 
@@ -207,43 +243,68 @@ Plain HTTP/1 reverse proxy. Sub-cases by `remote_host`:
   `UpstreamInner::Http1OverGateway` (HTTP/1 forwarded through a
   pre-existing MyJetTools gateway connection).
 
-The request is forwarded as-is: first line, headers, body. Response is
-streamed back via the per-upstream `response_read_loop` task.
+The first line is forwarded as received; the headers go through
+`H1Reader::compile_headers` (`modify_http_headers` of the endpoint and
+the location, `X-Forwarded-For`); the body is streamed. The worker reads
+the response and streams it to the client-writer task as
+`ResponseEvent`s.
 
 ### `McpHttp1(ProxyPassToModel)`
 
-Same wire transports as `Http1` (Direct/OverSsh/Gateway, http or https),
-but with one difference: on every request the first line of the HTTP
-request is rewritten so the upstream sees the path-and-query of the
-configured `proxy_pass_to`, not the path the client sent. Method, HTTP
-version, and headers are preserved.
+Same wire transports as `Http1` (Direct/OverSsh, http or https; MCP
+through a gateway is refused at load time,
+`src/scripts/compile_http_configuration.rs:122-132`), with three
+differences (`ProxyPassToConfig::is_mcp`):
 
-The path-and-query is captured once when the upstream is opened and
-stored on `UpstreamState::Mcp { mcp_path, .. }`; it is read by
-`H1Reader::compile_headers` via the `UpstreamAccess::mcp_path` field on
-each request. See `docs/mcp.md` for the full rationale.
+- on every request the first line of the HTTP request is rewritten so
+  the upstream sees the path-and-query of the configured
+  `proxy_pass_to`, not the path the client sent. Method, HTTP version,
+  and headers are preserved;
+- the response is read with the long MCP read timeout
+  (`DEFAULT_MCP_READ_TIMEOUT`), since an SSE stream may idle;
+- an upstream failure closes the client connection instead of sending an
+  HTML error page.
+
+The path-and-query comes from the config, per request:
+`mcp_path(&proxy_pass_to)` (`src/h1_remote_connection/upstream_state.rs:5`)
+is passed to `H1Reader::compile_headers` by the reader. See `docs/mcp.md`
+for the full rationale.
 
 ### `Http2(ProxyPassToModel)`
 
-HTTP/2 upstream. **Currently not active** in the new h1 server path —
-`Upstream::connect`'s `Http2 ⇒ todo!()` arm panics if reached. h2
-upstream lives only in the legacy hyper-based pipeline
-(`ProxyPassLocationConfig::create_data_source`), which is wired to the
-HTTPS/2 listener via `tcp_listener::https::kick_off_https2`.
+HTTP/2 upstream. Served by the hyper path only
+(`ProxyPassLocationConfig::create_data_source`), which runs for `http2`
+endpoints (`tcp_listener::http2::handle_connection`) and `https2`
+endpoints (`serve_https2` in `src/tcp_listener/https/handle_connection.rs`).
+The h1 pipeline has no h2 upstream: under an `http` / `https` endpoint
+`Upstream::connect_owned` returns an error for it
+(`src/h1_remote_connection/upstream.rs:193-202`), and the worker answers
+503 "remote resource is not available". Nothing refuses an `http2`
+location under an http/1 endpoint at load time.
+
+`McpHttp2` (`type: mcp-h2`) is the same on the wire, and is refused at
+load time under an `http`, `https` or `mcp` endpoint
+(`src/scripts/compile_http_configuration.rs:134-155`).
 
 ### `UnixHttp1(ProxyPassToModel)`
 
-HTTP/1 over a unix domain socket. Only `Direct { remote_host }` is
-implemented; `Gateway` and `OverSsh` panic in
-`Upstream::connect` with `todo!()` because they are nonsensical
-combinations on a local socket transport. Reaching those is a config
-error, not a runtime expectation.
+HTTP/1 over a unix domain socket. `Direct { remote_host }` connects to
+the socket (`UpstreamInner::Http1UnixSocket`). `Gateway` is an ordinary
+gateway upstream (`UpstreamInner::Http1OverGateway`): the peer connects
+to the socket path itself. `OverSsh` is not supported: `connect_owned`
+returns an error for it (`src/h1_remote_connection/upstream.rs:189-191`),
+which the worker answers with a 503, and on the hyper path
+`create_data_source` panics on it
+(`src/configurations/proxy_pass_location_config.rs:412-422`).
 
 ### `UnixHttp2(ProxyPassToModel)`
 
-HTTP/2 over unix socket — currently `todo!("Not Implemented")`. Same
-caveat as `Http2`: only the legacy hyper path uses this, via
-`HttpProxyPassContentSource::UnixHttp2`.
+HTTP/2 over a unix socket. Hyper path only, like `Http2`:
+`HttpProxyPassContentSource::UnixHttp2` for `Direct`, `Http2OverGateway`
+for `Gateway` (the peer connects to the socket path itself), and a panic
+in `create_data_source` for `OverSsh`
+(`src/configurations/proxy_pass_location_config.rs:450-459`). On the h1
+pipeline `connect_owned` returns an error for it, as for `Http2`.
 
 ### `FilesPath(ProxyPassFilesPathModel)`
 
@@ -293,51 +354,64 @@ Per request:
 
 A file which is not there is a 404. A gateway or an ssh host which can not
 be reached is a 503 on the h1 pipeline, written to the proxy logs, and a
-500 tech page on the hyper path. The h1 pipeline serves `GET` only — any
-other method is a 404 — and the hyper path does not look at the method.
+500 tech page on the hyper path. The h1 pipeline serves `GET` and `HEAD`
+— a `HEAD` gets the head of the `GET` response and no body, any other
+method is a 404 (`src/h1_proxy_server/pipeline/files.rs:83`) — and the
+hyper path does not look at the method.
 
 ### `Static(Arc<StaticContentConfig>)`
 
 Returns a configured static body (status code, content-type, body
-bytes). No upstream connection at all. `Upstream::connect` builds
-`UpstreamInner::StaticContent(...)`; `read_http_response` spawns
-`execute_static_content` which writes the canned response.
+bytes). No upstream connection at all. On the h1 pipeline the reader
+builds the response itself (`Http1ResponseBuilder`, plus what
+`modify_http_headers` of the endpoint and the location add to a
+response), drains the request body and queues the response — no worker,
+no pool (`src/h1_proxy_server/pipeline/reader.rs:580-604`). A `HEAD` gets
+the head only. On the hyper path it is `HttpProxyPassContentSource::Static`.
 
 ---
 
 ## Upstream lifecycle per variant
 
-How the upstream is held inside `UpstreamState`
-(`src/h1_remote_connection/upstream_state.rs`):
+How upstream connections are held on the h1 pipeline: in a pool per
+client connection, `H1PoolHolder::new_local()`
+(`src/h1_proxy_server/pipeline/reader.rs:121`), keyed by
+`connection_key` (`src/h1_remote_connection/upstream_state.rs:23`) and
+keeping at most one idle connection per key. A worker takes a connection
+out (`acquire`) for one request and gives it back (`release`) only when
+the response was self-delimiting (`Content-Length` or chunked), nothing
+was left over and the socket is alive
+(`src/h1_proxy_server/pipeline/worker.rs:475-493`); any other connection
+is closed.
 
-| Variant | State holding the connection | Reuse behavior |
+| Variant | Pool key (`connection_key`) | Reuse behavior |
 |---|---|---|
-| `Http1` (any sub-variant) | `UpstreamState::Http(HashMap<location.id, Upstream>)` | Reused across requests on the same client TCP for the same location.id. New location.id → new entry. |
-| `McpHttp1` | `UpstreamState::Mcp { location_id, upstream, mcp_path }` | Reused for same `location.id`. Different `location.id` (multi-mcp-service config) drops and replaces. |
-| `UnixHttp1` | Same as `Http1`. | Same as `Http1`. |
-| `Http2` / `UnixHttp2` | (Goes through legacy hyper path; this state machine is not used.) | n/a |
-| `FilesPath` / `Static` | Same as `Http1` (held by `location.id` in `Http` variant). | Reused — but these have no real connection, so reuse is essentially free. |
+| `Http1` (any sub-variant) | `h1` + scheme, `host:port` and `domain_name` (Direct) / ssh credentials and `host:port` (OverSsh) / gateway id and `host:port` (Gateway) | Reused across requests on the same client connection by every location with the same key — the path of `proxy_pass_to` is not a part of it. |
+| `McpHttp1` | `mcp-h1` + the same, + the path-and-query of `proxy_pass_to` | Two MCP servers on one `host:port` under different paths get different connections. An SSE response is not self-delimiting, so its connection is never given back. |
+| `UnixHttp1` | `uds-h1` + the same | Same as `Http1`. |
+| `DynamicProxy` | the `h1` key of the per-request upstream built from `proxy-to` | Same as `Http1`. |
+| `Http2` / `McpHttp2` / `UnixHttp2` | — | Not on this pipeline: `connect_owned` returns an error. The hyper path keeps its own per-location pools. |
+| `FilesPath` / `Static` / `Drop` | — | Never reach the pool: answered (or, for `Drop`, closed) by the reader. |
 
-State transitions when the request type doesn't match the current
-`UpstreamState` variant are silently allowed (drop previous contents,
-build fresh state) but in practice never trigger: HTTP/1 framing on
-the client side plus normal client behavior keeps a client TCP on
-exactly one protocol family for its lifetime.
+While nothing has reached the client, a request is replayed once on a
+fresh connection when writing it fails, or when reading the response
+head fails on a reused connection (a timeout excepted) — as long as the
+part of the body already sent fits `REPLAY_WINDOW`
+(`run_upstream_request`, `src/h1_proxy_server/pipeline/worker.rs:163-183`).
 
 ### WebSocket upgrade
 
-Only http (non-mcp) requests can perform a WebSocket upgrade. When the
-request handshake completes, `serve_reverse_proxy` calls
-`UpstreamState::take_http(location_id)` to extract the underlying
-upstream out of the `Http` variant; the upstream is handed to
-`H1ServerWritePart::add_web_socket_upgrade` along with the client read
-half, and `serve_reverse_proxy` returns. From then on the WebSocket
-frames flow as raw bytes between the two halves
-(`response_read_loop` continues pumping bytes; `H1ServerWritePart`
-no longer mediates).
-
-`take_http` returns `None` if the state is `Mcp` or `Unknown`, which
-matches reality — MCP upstreams never WebSocket-upgrade.
+A request whose head carries `Upgrade: websocket` ends the reader loop:
+the reader hands an `UpgradeContext` back to the connection entry
+(`serve_reverse_proxy_pipelined`), which closes the response queue, takes
+the client write half back from the writer task and runs `run_ws_tunnel`
+(`src/h1_proxy_server/pipeline/ws_tunnel.rs`). The tunnel dials a fresh
+upstream with `Upstream::connect_owned` — an upgrade never takes a
+connection from the pool nor gives one back — and sends the head. On an
+upgrade response the four halves are wired into two `copy_streams`
+pumps, and from then on the WebSocket frames flow as raw bytes; a refused
+upgrade is relayed to the client as an ordinary response and the
+connection closed.
 
 ---
 
@@ -355,11 +429,14 @@ matches reality — MCP upstreams never WebSocket-upgrade.
    - (The next location, e.g. `path: "/"`, is skipped because the search
      stopped.)
 5. Location's `proxy_pass_to: Http1(http://users-svc:8080/)`.
-6. `UpstreamState::get_or_connect` is called; state is `Unknown` → opens
-   a fresh upstream, transitions to
-   `Http(HashMap { location.id → upstream })`.
-7. Request first line and headers are forwarded as-is. Response streams
-   back through `response_read_loop` → `H1ServerWritePart` → client.
+6. The reader compiles the head and spawns a worker
+   (`run_upstream_request`). Its `pool.acquire` finds no idle connection
+   under the key `h1|…` of `users-svc:8080` and dials one
+   (`Upstream::connect_owned` → `UpstreamInner::Http1Direct`).
+7. The first line is forwarded as received, the headers as compiled. The
+   worker reads the response and streams it to the client-writer task →
+   client; on a self-delimiting response the connection goes back to the
+   pool for the next request on this client connection.
 
 ### Example 2: `https://mcp.example.com/service-a` (POST, MCP)
 
@@ -368,27 +445,27 @@ matches reality — MCP upstreams never WebSocket-upgrade.
 3. h1 reader reads `POST /service-a HTTP/1.1`.
 4. `find_location("/service-a")` matches the location with
    `path: "/service-a"`, `proxy_pass_to: McpHttp1(http://upstream-a/mcp)`.
-5. `UpstreamState::get_or_connect` opens a fresh upstream, transitions to
-   `Mcp { location_id, upstream, mcp_path: "/mcp" }`.
-6. `H1Reader::compile_headers` sees `mcp_path: Some("/mcp")` — rewrites
-   the first line to `POST /mcp HTTP/1.1`. Headers (including
-   `Mcp-Session-Id`) and body are forwarded unchanged.
-7. Response streams back. If it's an SSE stream, the `response_read_loop`
-   keeps pumping until upstream closes or client disconnects.
+5. `H1Reader::compile_headers` gets `mcp_path(&proxy_pass_to)` =
+   `Some("/mcp")` and rewrites the first line to `POST /mcp HTTP/1.1`.
+   `Mcp-Session-Id` and the body are forwarded unchanged.
+6. The worker's `pool.acquire` dials a connection under the key
+   `mcp-h1|…|/mcp`.
+7. Response streams back. If it's an SSE stream, the worker keeps pumping
+   (with the long MCP read timeout) until the upstream closes or the
+   client disconnects; that connection is not given back to the pool.
 
 ### Example 3: TLS-only endpoint without SNI
 
 Config: port 443 has one endpoint with `host_endpoint: ":443"` (no
 server name).
 
-1. Client connects without SNI.
-2. `get_http_endpoint_info(None)` succeeds because `endpoints.len() == 1`
-   and the single endpoint has no server name — returns it directly.
-3. Resolution proceeds normally.
-
-If the same port had two endpoints (one with SNI, one without), a
-no-SNI client would get `None` and the connection would be dropped after
-TLS handshake.
+1. A client connecting with any SNI gets that endpoint:
+   `get_http_endpoint_info(Some(sni))` matches it, because an endpoint
+   without a server name matches every name (`is_my_server_name`).
+2. A client connecting without SNI is refused at the ClientHello, before
+   the handshake (`TlsAcceptError::UnknownServerName`,
+   `src/tcp_listener/https/utils.rs:141-147`), whatever endpoints the
+   port has.
 
 ### Example 4: Plain HTTP with `Host` header missing
 
@@ -397,8 +474,9 @@ Config: port 80 with multiple HTTP/1 endpoints.
 1. `get_http_endpoint_info(None)` is called because the request had no
    `Host` header.
 2. Multiple endpoints exist → returns `None`.
-3. Request fails with `HttpConfigurationIsNotFound` → "configuration not
-   found" error template returned.
+3. Request fails with `HttpConfigurationIsNotFound` → the connection is
+   closed without a response, and the source IP is not penalised
+   (`src/h1_proxy_server/rev_proxy_error.rs:72`).
 
 If the port has exactly one endpoint without a server name, the
 fallback applies and the request resolves to that single endpoint.
@@ -418,12 +496,28 @@ fallback applies and the request resolves to that single endpoint.
 - `src/configurations/http_endpoint_info.rs` — `find_location` (Stage 3).
 - `src/h1_proxy_server/h1_read_part.rs` — Stage 2/3 plumbing for h1
   (`try_find_endpoint_info`, `find_location`).
-- `src/h1_proxy_server/server_loop.rs` — request loop, owns
-  `UpstreamState`.
-- `src/h1_remote_connection/upstream.rs` — `Upstream::connect`,
-  per-variant connect logic.
-- `src/h1_remote_connection/upstream_state.rs` — per-client-TCP state
-  machine.
+- `src/types/request_path.rs` — `is_path_of_location`,
+  `has_ambiguous_segment`.
+- `src/h1_proxy_server/pipeline/reader.rs` — request loop: endpoint and
+  location, `Drop` / `Static` / `FilesPath` / refused paths answered in
+  place, a worker spawned for the rest; owns the connection's pool.
+- `src/h1_proxy_server/pipeline/worker.rs` — `run_upstream_request`:
+  pool, head and body, response.
+- `src/h1_proxy_server/pipeline/ws_tunnel.rs` — WebSocket upgrade on a
+  fresh upstream.
+- `src/h1_proxy_server/pipeline/files.rs` — `FilesPath` on the h1
+  pipeline.
+- `src/h1_remote_connection/h1_pool_holder.rs` — `H1PoolHolder`, the
+  upstream pool.
+- `src/h1_remote_connection/upstream.rs` — `Upstream::connect_owned`,
+  per-variant connect logic for network upstreams.
+- `src/h1_remote_connection/upstream_state.rs` — `connection_key` (the
+  pool key) and `mcp_path`.
+- `src/http_proxy_pass/` — the hyper path of `http2` / `https2`
+  endpoints.
+- `src/scripts/compile_http_configuration.rs` — location combinations
+  refused at load time (MCP through a gateway, `mcp-h2` under an http/1
+  endpoint).
 - `src/configurations/proxy_pass_to_config.rs` — the `ProxyPassToConfig`
   enum itself.
 - `src/scripts/merge_http_configuration_with_existing_port.rs` —

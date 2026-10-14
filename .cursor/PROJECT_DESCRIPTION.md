@@ -16,7 +16,7 @@ This is a **high-performance, feature-rich reverse proxy server** written in Rus
 - Proxy pass to remote HTTP endpoints
 - SSH tunnel forwarding (`ssh:user@host:port->remote:port`)
 - Gateway-based forwarding between proxy instances
-- Static file serving (local and remote via SSH)
+- Static file serving (local, remote via SSH, and from a folder behind a gateway)
 - Custom static content with headers and redirects
 
 ### 3. Security & Authentication
@@ -97,8 +97,8 @@ The proxy is configured via a YAML file at `~/.my-reverse-proxy` with support fo
 global_settings:
   connection_settings:
     buffer_size: 512Kb
-    connect_to_remote_timeout: 5s
-    show_error_description_on_error_page: true
+    connect_to_remote_timeout: 5000  # ms
+  show_error_description_on_error_page: true
 
 hosts:
   localhost:8000:
@@ -138,22 +138,27 @@ client_certificate_ca:
 ## Features in Detail
 
 ### Gateway System
-Two or more instances of the reverse proxy can be connected as a network and forward traffic through encrypted gateways:
+Two or more instances of the reverse proxy can be connected as a network and forward traffic through encrypted gateways. A gateway client authenticates with an SSH Ed25519 key; the server lists the public keys it accepts:
 
 ```yaml
 # Server Gateway
 gateway_server:
   port: 30000
-  encryption_key: 12345678901234567890
+  authorized_keys:
+    - ~/gateway_keys/client_identity.pub
 
 # Client Gateway
+ssh:
+  gateway_identity:
+    private_key_file: ~/gateway_keys/client_identity
+
 gateway_clients:
   gateway_name:
     remote_host: 10.0.0.0:30000
-    encryption_key: 12345678901234567890
-    connect_timeout_seconds: 5
-    compress: true
-    allow_incoming_forward_connections: true
+    ssh_credentials: gateway_identity  # id of the ssh: entry above
+    connect_timeout: 5000  # ms
+    compress: 2  # compression level, 0 - off
+    allow_incoming_forward_connections: true  # let the server side open connections through this client
 ```
 
 ### Authentication Options
@@ -189,23 +194,16 @@ hosts:
   localhost:8000:
     endpoint:
       type: mcp
-      debug: true  # Enables detailed MCP protocol logging
+      debug: true  # Adds a log line for every accepted connection
     locations:
     - proxy_pass_to: remote_mcp_server:5123
 ```
 
 **MCP Endpoint Features:**
-- **TCP Connection Forwarding**: Direct TCP passthrough to MCP servers
-- **Debug Logging**: Detailed protocol message logging when `debug: true`
-- **SSH Tunneling**: Support for SSH-based MCP connections
-- **Bidirectional Streaming**: Full duplex data forwarding with monitoring
-- **Connection Management**: Automatic connection pooling and timeout handling
-
-**Debug Mode Benefits:**
-- Monitor MCP protocol handshakes
-- Track bidirectional message flow
-- Troubleshoot connection issues
-- Analyze protocol compliance
+- **TLS termination and TCP forwarding**: TLS on the listening side (a self-signed certificate when `ssl_certificate` is not set), then a byte bridge to the first location over a plain TCP connection - a fresh one per client connection, no pooling
+- **Remote host**: `host:port` or `http://host:port` only - no `https://`, `ssh:` or `gateway:`; for those use `type: https` with a location of `type: mcp`
+- **Timeouts and buffer**: `read_timeout`, `write_timeout`, `mcp_buffer_size`
+- **Logging**: the route of every connection and how each direction ended, with the bytes forwarded; `debug: true` adds a line per accepted connection. Message content is not logged
 
 ### System Variables
 Built-in variables for dynamic configuration:

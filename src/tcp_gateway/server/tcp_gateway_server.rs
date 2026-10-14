@@ -19,6 +19,8 @@ const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(100);
 pub struct TcpGatewayServer {
     inner: Arc<TcpGatewayInner>,
     next_connection_id: AtomicU32,
+    /// The accept loop: it owns the listener, which is closed when the loop is aborted.
+    listener_task: tokio::task::AbortHandle,
 }
 
 impl TcpGatewayServer {
@@ -42,11 +44,6 @@ impl TcpGatewayServer {
             listen,
             authorized_keys,
         ));
-        let result = Self {
-            inner: inner.clone(),
-            next_connection_id: AtomicU32::new(0),
-        };
-
         println!("GATEWAY spawning {}", inner.gateway_host.as_str(),);
 
         // Plain tokio::spawn here (not spawn_named): this runs inside
@@ -54,9 +51,15 @@ impl TcpGatewayServer {
         // initializer. spawn_named touches APP_CTX (prometheus counter), and
         // that re-entrant deref of the still-initializing APP_CTX would prevent
         // the accept loop from ever being scheduled.
-        tokio::spawn(connection_loop(inner, listener, allowed_ip, debug));
+        let listener_task =
+            tokio::spawn(connection_loop(inner.clone(), listener, allowed_ip, debug))
+                .abort_handle();
 
-        Ok(result)
+        Ok(Self {
+            inner,
+            next_connection_id: AtomicU32::new(0),
+            listener_task,
+        })
     }
 
     /// Ids of the connections the server opens carry [`SERVER_CONNECTION_ID_FLAG`], so they
@@ -91,6 +94,10 @@ impl Drop for TcpGatewayServer {
             self.inner.gateway_host
         );
         self.inner.stop();
+
+        // A server which is gone takes no connection: the port is closed, not left accepting
+        // connections nothing will serve.
+        self.listener_task.abort();
     }
 }
 

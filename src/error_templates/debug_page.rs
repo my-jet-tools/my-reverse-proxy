@@ -72,7 +72,7 @@ td {{ font-family: monospace; word-break: break-all; }}
     )
 }
 
-fn html_escape(src: &str) -> String {
+pub(super) fn html_escape(src: &str) -> String {
     let mut result = String::with_capacity(src.len());
     for c in src.chars() {
         match c {

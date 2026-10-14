@@ -13,6 +13,7 @@ use super::super::{H1HeadersKind, H1Reader, H1Writer, HttpConnectionInfo};
 pub struct UpgradeContext {
     pub proxy_pass_to: ProxyPassToConfig,
     pub end_point_info: Arc<HttpEndpointInfo>,
+    pub location: Arc<crate::configurations::ProxyPassLocationConfig>,
     pub http_connection_info: HttpConnectionInfo,
     pub location_id: i64,
     /// Compiled request head (with the Upgrade headers).
@@ -71,7 +72,7 @@ pub async fn run_ws_tunnel<
 
     let response_is_upgrade = match resp_reader.compile_headers(
         resp_headers,
-        H1HeadersKind::Response(&ctx.end_point_info),
+        H1HeadersKind::Response(&ctx.end_point_info, &ctx.location),
         &ctx.http_connection_info,
         &None,
         None,

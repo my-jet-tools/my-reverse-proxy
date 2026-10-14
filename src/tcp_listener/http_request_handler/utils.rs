@@ -193,7 +193,8 @@ pub fn generate_tech_page(
     match err {
         ProxyPassError::Timeout => {
             let body: Bytes =
-                crate::error_templates::generate_layout(504, "Timeout", second_line_error).into();
+                crate::error_templates::generate_layout_body(504, "Timeout", second_line_error)
+                    .into();
             let body = Full::new(body).map_err(crate::to_hyper_error).boxed();
             hyper::Response::builder()
                 .status(hyper::StatusCode::GATEWAY_TIMEOUT)
@@ -202,7 +203,8 @@ pub fn generate_tech_page(
         }
         ProxyPassError::NoLocationFound => {
             let body: Bytes =
-                crate::error_templates::generate_layout(404, "Not found", second_line_error).into();
+                crate::error_templates::generate_layout_body(404, "Not found", second_line_error)
+                    .into();
 
             hyper::Response::builder()
                 .status(hyper::StatusCode::NOT_FOUND)
@@ -213,7 +215,7 @@ pub fn generate_tech_page(
         ProxyPassError::Unauthorized => hyper::Response::builder()
             .status(hyper::StatusCode::UNAUTHORIZED)
             .body(
-                Full::from(crate::error_templates::generate_layout(
+                Full::from(crate::error_templates::generate_layout_body(
                     401,
                     "Unauthorized request",
                     second_line_error,
@@ -226,7 +228,7 @@ pub fn generate_tech_page(
         ProxyPassError::UserIsForbidden => hyper::Response::builder()
             .status(hyper::StatusCode::FORBIDDEN)
             .body(
-                Full::from(crate::error_templates::generate_layout(
+                Full::from(crate::error_templates::generate_layout_body(
                     403,
                     "Access is forbidden",
                     second_line_error,
@@ -239,7 +241,7 @@ pub fn generate_tech_page(
         ProxyPassError::IpRestricted(ip) => hyper::Response::builder()
             .status(hyper::StatusCode::UNAUTHORIZED)
             .body(
-                Full::from(crate::error_templates::generate_layout(
+                Full::from(crate::error_templates::generate_layout_body(
                     401,
                     "Restricted by IP",
                     Some(ip.as_str().into()),
@@ -251,7 +253,7 @@ pub fn generate_tech_page(
         ProxyPassError::UpstreamUnavailable => hyper::Response::builder()
             .status(hyper::StatusCode::SERVICE_UNAVAILABLE)
             .body(
-                Full::from(crate::error_templates::generate_layout(
+                Full::from(crate::error_templates::generate_layout_body(
                     503,
                     "Upstream unavailable",
                     second_line_error,
@@ -264,7 +266,7 @@ pub fn generate_tech_page(
             hyper::Response::builder()
                 .status(hyper::StatusCode::MISDIRECTED_REQUEST)
                 .body(
-                    Full::from(crate::error_templates::generate_layout(
+                    Full::from(crate::error_templates::generate_layout_body(
                         421,
                         "Missing or invalid proxy-to header",
                         second_line_error,
@@ -277,7 +279,7 @@ pub fn generate_tech_page(
         ProxyPassError::ProxyToHostNotAllowed => hyper::Response::builder()
             .status(hyper::StatusCode::FORBIDDEN)
             .body(
-                Full::from(crate::error_templates::generate_layout(
+                Full::from(crate::error_templates::generate_layout_body(
                     403,
                     "Upstream host not allowed",
                     second_line_error,
@@ -298,7 +300,7 @@ pub fn generate_tech_page(
             hyper::Response::builder()
                 .status(status)
                 .body(
-                    Full::from(crate::error_templates::generate_layout(
+                    Full::from(crate::error_templates::generate_layout_body(
                         code,
                         title,
                         second_line_error,
@@ -311,7 +313,7 @@ pub fn generate_tech_page(
         _ => hyper::Response::builder()
             .status(hyper::StatusCode::INTERNAL_SERVER_ERROR)
             .body(
-                Full::from(crate::error_templates::generate_layout(
+                Full::from(crate::error_templates::generate_layout_body(
                     500,
                     "Internal Server Error",
                     second_line_error,

@@ -1,5 +1,3 @@
-use rust_extensions::slice_of_u8_utils::SliceOfU8Ext;
-
 use crate::h1_utils::*;
 
 #[derive(Clone, Copy)]
@@ -12,44 +10,31 @@ impl<'l> crate::types::HttpRequestReader for HttpHeadersReader<'l> {
     fn get_cookie<'s>(&'s self, cookie_name: &str) -> Option<&'s str> {
         let cookie = self.http_headers.cookie_value.as_ref()?;
 
-        let host = &self.payload[cookie.start..cookie.end];
-
-        let cookie_string = unsafe { std::str::from_utf8_unchecked(host) };
+        // The bytes are off the wire: a value which is not UTF-8 is no cookie.
+        let cookie_string = std::str::from_utf8(&self.payload[cookie.start..cookie.end]).ok()?;
 
         crate::utils::get_cookie(cookie_string, cookie_name)
     }
 
     fn get_query_string(&self) -> Option<&str> {
-        let index_start = self.payload.find_byte_pos(b' ', 0).unwrap() + 1;
-        let index_end = self.payload.find_byte_pos(b' ', index_start).unwrap();
+        let path_and_query = self.get_path_and_query()?;
 
-        let path_and_query =
-            unsafe { std::str::from_utf8_unchecked(&self.payload[index_start..index_end]) };
-
-        match path_and_query.find('?') {
-            Some(index) => Some(&path_and_query[index + 1..]),
-            None => None,
-        }
+        path_and_query
+            .find('?')
+            .map(|index| &path_and_query[index + 1..])
     }
 
     fn get_host(&self) -> Option<&str> {
         let host_value = self.http_headers.host_value.as_ref()?;
 
-        let host = &self.payload[host_value.start..host_value.end];
-
-        let host = unsafe { std::str::from_utf8_unchecked(host) };
-
-        Some(host)
+        std::str::from_utf8(&self.payload[host_value.start..host_value.end]).ok()
     }
 
+    /// `None`: the first line is not a request line.
     fn get_path_and_query(&self) -> Option<&str> {
-        let index_start = self.payload.find_byte_pos(b' ', 0).unwrap() + 1;
-        let index_end = self.payload.find_byte_pos(b' ', index_start).unwrap();
+        let first_line = self.http_headers.get_first_line(self.payload);
 
-        let path_and_query =
-            unsafe { std::str::from_utf8_unchecked(&self.payload[index_start..index_end]) };
-
-        Some(path_and_query)
+        split_request_line(first_line.data).map(|(_method, target)| target)
     }
 
     fn get_path(&self) -> &str {

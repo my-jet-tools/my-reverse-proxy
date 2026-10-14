@@ -39,11 +39,18 @@ pub fn verify_http11_first_line(first_line: &[u8]) -> Result<(), String> {
             return Err(format!("Invalid HTTP status code: '{}'", status_code));
         }
     } else {
-        // Request format: METHOD URI HTTP/1.1
+        // Request format: METHOD SP URI SP HTTP/1.1 - one space between the three and no other
+        // whitespace anywhere. What reads the line after this check cuts it by these two
+        // spaces, and so does an upstream it is sent on to: `GET\t/\tHTTP/1.1` is three tokens
+        // to `split_whitespace` and one to them.
+        let parts: Vec<&str> = line_str.split(' ').collect();
+
         if parts.len() != 3 {
-            return Err(
-                "Request line must contain exactly 3 tokens: METHOD URI HTTP/1.1".to_string(),
-            );
+            return Err("Request line must be exactly: METHOD SP URI SP HTTP/1.1".to_string());
+        }
+
+        if line_str.bytes().any(|b| b < 0x20 || b == 0x7F) {
+            return Err("Request line contains a control character".to_string());
         }
 
         // Validate HTTP version
@@ -146,6 +153,37 @@ mod tests {
         assert!(verify_http11_first_line(b"GET / HTTP/2.0").is_err()); // Wrong version
         assert!(verify_http11_first_line(b"GET /").is_err()); // Missing version
         assert!(verify_http11_first_line(b"GET  HTTP/1.1").is_err()); // Empty URI
+    }
+
+    /// A request line is `METHOD SP URI SP HTTP/1.1`, with one space at each place: the line
+    /// is cut by these two spaces by everything which reads it after the check.
+    #[test]
+    fn test_verify_http11_first_line_takes_single_spaces_only() {
+        for line in [
+            &b"GET\t/\tHTTP/1.1"[..],
+            b"GET\t/ HTTP/1.1",
+            b"GET /\tHTTP/1.1",
+            b"GET  / HTTP/1.1",
+            b"GET /  HTTP/1.1",
+            b" GET / HTTP/1.1",
+            b"GET / HTTP/1.1 ",
+            b"GET / HTTP/1.1\t",
+            b"GET /a b HTTP/1.1",
+            b"GET /a\tb HTTP/1.1",
+            b"GET /a\rb HTTP/1.1",
+            b"GET /a\0b HTTP/1.1",
+            b"GET /a\x7fb HTTP/1.1",
+            b"GET\x0b/\x0cHTTP/1.1",
+        ] {
+            assert!(
+                verify_http11_first_line(line).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(line)
+            );
+        }
+
+        // A path which is not ASCII is a path.
+        assert!(verify_http11_first_line("GET /\u{20ac} HTTP/1.1".as_bytes()).is_ok());
     }
 
     #[test]

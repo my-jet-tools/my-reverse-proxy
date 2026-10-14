@@ -27,7 +27,7 @@ global_settings:
     buffer_size: 512Kb # Buffer, which is allocated twice (read/write) per connection to pass traffic by
     connect_to_remote_timeout: 5000 # ms — timeout to connect to remote host (type: tcp endpoints)
     session_key: # key to encrypt session data. Not having this field means that key is going to be randomly generated
-    show_error_description_on_error_page: true # Show error description on error page
+  show_error_description_on_error_page: true # Show error description on error page
   default_h2_livness_url: /health # Optional: HTTP path used by the h2 upstream pool supervisor as an active liveness probe (see "HTTP/2 upstream pool" section)
   debug_ip: 10.0.0.5 # Optional: source ip (or a list of them) shown a detailed page instead of a bare 400 (see "Debug ip" section)
   
@@ -537,11 +537,11 @@ Whatever the folder is - local, behind ssh or behind a gateway:
 - A path with an empty segment or a `.` segment - `//x`, `/./x` - is answered `400 Bad Request` as well. To the file system it is the file `/x`, and a location is picked by the path as it is written: served, it would get the file past the location which guards `/x` - its `drop`, its `auth_header`. A file has one path.
 - It is the request path which is checked. A symbolic link inside the folder is followed wherever it points, a file whose name begins with a dot is served like any other, and `default_file` and the folder are taken from the settings as they are.
 - A file name is not percent-decoded: `/my%20file.txt` is a file named `my%20file.txt`, not `my file.txt`.
-- A file which is not there is answered 404.
+- A file which is not there is answered 404. So is a path which is there and is not a file - a directory - and a name longer than the file system takes, behind ssh the same as in a local folder.
 
 Two things depend on the type of the endpoint:
 
-- On `http` and `https` endpoints only `GET` is served, any other method is answered 404. `http2` and `https2` endpoints do not look at the method.
+- On `http` and `https` endpoints only `GET` and `HEAD` are served, any other method is answered 404. A `HEAD` is answered with the head of the response the same `GET` gets, and no body. `http2` and `https2` endpoints do not look at the method.
 - When the ssh host or the gateway can not be reached, the answer is 503 on `http` and `https` endpoints, and 500 on `http2` and `https2` endpoints.
 
 
@@ -692,6 +692,8 @@ hosts:
       type: tcp
 ```
 
+A tcp endpoint forwards bytes to its location - it has one. `whitelisted_ip`, of the endpoint and of the location, is checked by the address of the connection. `auth_header`, `google_auth` and `allowed_users` can not be checked on it: see "An endpoint which can not apply an access setting".
+
 ### Mcp (Model Context Protocol)
 MCP endpoints provide TCP forwarding with enhanced debugging capabilities for Model Context Protocol connections. They forward raw TCP traffic to remote MCP servers.
 
@@ -714,13 +716,16 @@ hosts:
     endpoint:
       type: mcp
     locations:
-    - path: /mcp_service_1
-      proxy_pass_to: http://internal_mcp_server:8100/internal_path
-
-    - path: /mcp_service_2
-      proxy_pass_to: http://internal_mcp_server:8101/internal_path_2
-
+    - proxy_pass_to: http://internal_mcp_server:8100
 ```
+
+A `type: mcp` endpoint bridges to its **first** location and reads no request, so it does not look at a `path`: one endpoint is one MCP server. To serve several MCP servers under the paths of one host, use `type: https` on the endpoint with locations of `type: mcp` (see "Location types").
+
+**Access settings:**
+
+- `whitelisted_ip` - of the endpoint and of the location - is checked by the address of the connection.
+- `auth_header` of a location, `google_auth` and `allowed_users` can not be checked: the bridge reads no header and no session. Settings with one of them load, and the endpoint serves nobody - see "An endpoint which can not apply an access setting". To guard an MCP server with them, use `type: https` on the endpoint with a location of `type: mcp`.
+- `oauth` on a `type: mcp` endpoint is refused when the settings load.
 
 
 **Remote Host Configuration:**
@@ -738,31 +743,15 @@ locations:
 - proxy_pass_to: http://remote_host:5123
 ```
 
-3. **SSH tunneling:**
-```yaml
-locations:
-- proxy_pass_to: ssh:username@ssh_host:22->remote_host:5123
-```
-
-**Note:** HTTPS (`https://`) is not supported as a remote host format for MCP endpoints.
+**Note:** HTTPS (`https://`), `ssh:` and `gateway:` are not supported as a remote host for MCP endpoints: the bridge opens a plain TCP connection to `host:port`. To reach an MCP server over ssh or a gateway, use `type: https` on the endpoint with a location of `type: mcp`.
 
 **MCP Endpoint Features:**
-- TCP connection forwarding to remote MCP servers
-- Debug logging to monitor MCP protocol traffic
-- Support for SSH tunneling: `ssh:user@host:port->remote_host:port`
-- Connection timeout and buffer management
-- Bidirectional data streaming with detailed logging
-- Optional TLS encryption when SSL certificate is provided
+- TLS on the listening side - with `ssl_certificate`, or a self-signed certificate when none is given - and a plain TCP connection to the MCP server, a fresh one for every client connection
+- Bidirectional byte forwarding, nothing of it parsed
+- Read/write timeouts and the buffer size of the connection (see "Connection Settings")
 
-**Debug Mode:**
-When `debug: true` is enabled, MCP endpoints will log:
-- Connection establishment details
-- Bidirectional data flow with markers:
-  - `->To MCP Server->` for client-to-server traffic
-  - `<-From MCP Server<-` for server-to-client traffic
-- Protocol message content (text messages shown as strings, binary as length)
-- Connection errors and graceful shutdowns
-- Connection ID tracking for multiple concurrent connections
+**Logging:**
+Every connection is logged with its id (`MCP[id]`): the route it took, and how each direction ended - which side closed, a timeout, an error - with the bytes forwarded before that (`->To MCP Server->` for client-to-server, `<-From MCP Server<-` for server-to-client). `debug: true` adds a line for every accepted connection; the content of the messages is not logged.
 
 **Connection Settings:**
 
@@ -787,30 +776,13 @@ hosts:
     - proxy_pass_to: mcp-server:5123
 ```
 
-**Example: MCP Endpoint with SSH Tunneling:**
-```yaml
-hosts:
-  localhost:8443:
-    endpoint:
-      type: mcp
-      ssl_certificate: my_ssl_cert  # Optional: for TLS encryption
-      debug: true
-    locations:
-    - proxy_pass_to: ssh:user@bastion.example.com:22->mcp-server.internal:5123
-
-ssh:
-  user@bastion.example.com:
-    private_key_file: ~/.ssh/id_rsa
-    passphrase: optional_passphrase
-```
-
 **Example: Multiple MCP Endpoints:**
 ```yaml
 hosts:
   localhost:8443:
     endpoint:
       type: mcp
-      ssl_certificate: mcp_cert  # Optional: for TLS encryption
+      ssl_certificate: mcp_cert  # Optional: without it the certificate is a self-signed one
       debug: true
     locations:
     - proxy_pass_to: mcp-server-1:5123
@@ -818,7 +790,7 @@ hosts:
   localhost:8444:
     endpoint:
       type: mcp
-      # No SSL certificate - plain TCP connection
+      # No ssl_certificate - TLS with a self-signed certificate
       debug: false  # Disable debug for production
     locations:
     - proxy_pass_to: mcp-server-2:5123
@@ -832,6 +804,20 @@ hosts:
 ## Location types
 
 None tls connections can not infer which type of HTTP protocol endpoint supports (HTTP/1.1 or HTTP2). For this reason it is possible to specify type of location explicitly.
+
+### How a request picks a location
+
+A request goes to the first location, in the order of the settings, whose `path` the request path starts with. The rules of that location - its `auth_header`, its `whitelisted_ip` - are the rules of the request, and the path goes on to the upstream as it was received.
+
+The paths are compared percent-decoded (one pass) and without the case of letters: `/%73ecure/x` is a request of the location `/secure`, the same as `/secure/x` and `/SECURE/x`. An upstream decodes a path, so a location picked by the path as it is written would let such a request past the rules of `/secure`. The query string is not a part of the path.
+
+So a request is taken only when its path names the resource in one way. A path with a `..`, a `.` or an empty segment is answered `400 Bad Request` before a location is looked for, on every http endpoint and for every type of location:
+
+- `/open/../secure/x`, `//secure/x`, `/./secure/x` - an upstream resolves such a segment, and would serve `/secure/x` to a request which was let in by another location;
+- the same segment percent-encoded or set apart by a backslash - `%2e%2e`, `.%2e`, `%2e`, `..%2f`, `%2f` in the place of an empty segment, `..\`, `..%5c`;
+- `..;` and `.;` - to an upstream which takes path parameters off first they are `..` and `.`.
+
+The last segment may be empty (`/api/`), dots inside a name are a part of the name (`/a..b`, `/.well-known/x`), and the query string is not looked at. The request is answered as an ordinary one: its body is read, the connection goes on, nothing is counted against the source ip.
 
 ### Http
 
@@ -959,8 +945,9 @@ Notes:
 - `mcp-h2` is served by the HTTP/2 request path, so it needs an endpoint of
   `type: http2` / `type: https2`. Under an `http` / `https` endpoint the config
   is refused at load time with an explicit message.
-- Do not set `compress: true` on an MCP location: gzip buffers the response
-  until the window flushes, which breaks SSE event delivery.
+- Do not set `compress: true` on an MCP location: it gzips the body of a
+  request on its way to the upstream - the JSON-RPC messages - which an MCP
+  server is not made to take, and holds every body whole in memory first.
 - `type: mcp` on a **location** has nothing to do with `type: mcp` on an
   **endpoint** (the latter is a raw TCP bridge, see [Mcp
   endpoints](#mcp-model-context-protocol)).
@@ -1156,6 +1143,24 @@ global_settings:
 - Applied on start and on every full settings reload (`reload_settings`).
 - Covers `http2` and `https2` endpoints - the ones that answer such a request with `400`. `http` and
   `https` endpoints close the connection silently on an unknown host, for everybody.
+- A debug ip is also told why an endpoint serves nobody - see the next section.
+
+### An endpoint which can not apply an access setting
+
+Some access settings can not be applied by a type of endpoint:
+
+| Endpoint type | Can not apply |
+|---|---|
+| `mcp` | `auth_header` of a location, `google_auth`, `allowed_users` |
+| `tcp` | `auth_header` of a location, `google_auth`, `allowed_users` |
+| `http`, `http2` | `google_auth` - it works on `https` and `https2` endpoints |
+
+Settings with one of these load: an endpoint written wrong does not take the others down with it. But the endpoint **serves nobody** until the setting is removed - otherwise it would be open to everybody while its settings say it is guarded.
+
+- Everybody is refused without a word: `403 Forbidden` on `http` and `http2` endpoints, a closed connection on `mcp` and `tcp` ones.
+- A source listed in `debug_ip` is told the reason - which setting, on which endpoint, and what to do about it: on the 403 page, as an HTTP response before the connection is closed on `mcp`, as a line of text before it is closed on `tcp`.
+
+`whitelisted_ip` is not one of them: every type of endpoint checks it, by the address of the connection - the list of the endpoint and the list of a location.
 
 ## Auto-injected request headers
 
@@ -1289,6 +1294,8 @@ g_auth:
 ```
 
 If 'whitelisted_domains' property is missing - any email from any domain passed thought google authentication is allowed.
+
+`google_auth` works on `https` and `https2` endpoints. An endpoint of another type which names it serves nobody: see "An endpoint which can not apply an access setting".
 
 
 
@@ -1493,6 +1500,8 @@ In this case - allowed_users configuration with id='list_id' must be located ins
 ### Compressing the http body
 Sometimes if proxy pass is done to remote endpoint by ssh - it would be wise to compress http body
 
+`compress: true` of a location gzips the body of a request on its way to the upstream - a body of 2048 bytes and more, held whole in memory for it - and the upstream has to take a gzipped body. It works on `http2` and `https2` endpoints; on `http` and `https` ones it is not applied.
+
 ```yaml
 
 
@@ -1588,8 +1597,8 @@ gateway_clients:
 ```
 
 - `ssh_credentials` - mandatory. Id of an entry in the `ssh:` registry that points to the client's private key (`private_key_file`). The key must be Ed25519; password-only ssh entries are not supported for gateway.
-- `compress` - is optional: the compression level of this gateway connection. `0`, the default, is no compression; `1` is LZ4, the fastest; `2`, `3`, `4` and `5` are Zstandard of its levels 1, 3, 6 and 9 - they pack better than LZ4 and slower, the higher the level the slower. Everything that travels over the connection is packed with the level, in both directions: the client says it in its handshake, and the server packs what it sends to it with the same. The server has no setting of its own. What can not be made smaller - TLS, media, what is packed already - travels as it is. A level which is not in the table fails the startup. How much every level saves and how fast it is - measured on real data - and which one suits which link: [docs/gateway-compression.md](docs/gateway-compression.md).
-- allow_incoming_forward_connections - is optional. Without this parameters - no Forward connections are allowed through gateway from Client side to Server side.
+- `compress` - is optional: the compression level of this gateway connection. `0`, the default, is no compression; `1` is LZ4, the fastest; `2`, `3`, `4` and `5` are Zstandard of its levels 1, 3, 6 and 9 - they pack better than LZ4 and slower, the higher the level the slower; `6`, `7`, `8` and `9` are the same Zstandard levels as one stream for the whole connection - every batch is packed with what went before it, so small requests and answers pack 3 to 5 times better than at `2`-`5`, at the cost of a stream kept on both ends. Everything that travels over the connection is packed with the level, in both directions: the client says it in its handshake, and the server packs what it sends to it with the same. The server has no setting of its own. What can not be made smaller - TLS, media, what is packed already - travels as it is. A level which is not in the table fails the startup. How much every level saves and how fast it is - measured on real data - and which one suits which link: [docs/gateway-compression.md](docs/gateway-compression.md).
+- allow_incoming_forward_connections - is optional. Without this parameters - no Forward connections are allowed through gateway from Server side to Client side. Forward connections from Client side to Server side need no setting.
 - sync_ssl_certificates - is optional. List of SSL certificate ids to pull from the remote Gateway Server. See the `SSL Certificate Sync via Gateway` section below.
 
 
@@ -1607,7 +1616,6 @@ hosts:
       type: http
     locations:
     - proxy_pass_to: gateway:gateway_name->http://localhost:8000
-      allow_incoming_forward_connections: true
 
   5204:
     endpoint:
@@ -1629,7 +1637,7 @@ gateway is refused at load time.
 
 
 
-allow_incoming_forward_connections  - is optional. Without this parameters - no Forward connections are allowed through gateway from Server side to Client side.
+allow_incoming_forward_connections  - is optional. It is a setting of the gateway client (`gateway_clients`, see "Client side" above), not of a location. Without this parameters - no Forward connections are allowed through gateway from Server side to Client side.
 
 
 

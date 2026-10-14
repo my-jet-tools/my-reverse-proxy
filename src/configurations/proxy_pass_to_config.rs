@@ -35,6 +35,9 @@ impl std::fmt::Display for ProxyPassFilesPathModel {
 #[derive(Debug, Clone)]
 pub struct ProxyPassToModel {
     pub remote_host: MyReverseProxyRemoteEndpoint,
+    /// `domain_name` of the location: the name an https upstream is asked for, when it is
+    /// not the host of `proxy_pass_to`.
+    pub server_name: Option<String>,
     pub request_timeout: Duration,
     pub connect_timeout: Duration,
     pub pool_tuning: super::PoolTuning,

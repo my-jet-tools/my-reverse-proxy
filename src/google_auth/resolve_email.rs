@@ -1,5 +1,5 @@
 use crate::types::*;
-use my_settings_reader::flurl::{body::HttpRequestBody, FlUrl};
+use flurl::{body::HttpRequestBody, FlUrl};
 use serde::*;
 
 use crate::{configurations::GoogleAuthCredentials, types::Email};

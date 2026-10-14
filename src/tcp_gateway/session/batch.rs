@@ -14,6 +14,27 @@ pub const BATCH_LZ4: u8 = 1;
 /// `[u32 RAW_LEN][Zstandard frame]`: the inner frames, `RAW_LEN` bytes of them, packed.
 pub const BATCH_ZSTD: u8 = 2;
 
+/// `[u32 RAW_LEN][a piece of the Zstandard stream of this direction]`: the inner frames,
+/// `RAW_LEN` bytes of them, packed with every batch of this kind sent before them for a
+/// history. The piece ends where the stream was flushed: it unpacks to the whole batch, and to
+/// nothing but it. It can be unpacked only after the pieces before it, in their order - which
+/// is the order of the frames, and a frame out of its order does not open.
+pub const BATCH_ZSTD_STREAM: u8 = 3;
+
+/// The window of the stream is at most 2 to this power: 4 MiB, what the Zstandard levels of
+/// the table ask for at the most. The unpacking end takes no stream which asks for more - a
+/// stream says the size of its window itself, and the memory for it is taken by the one who
+/// reads it.
+const STREAM_WINDOW_LOG_MAX: u32 = 22;
+
+/// What the end of a piece - a flush of the stream - may add to the bound of a packed batch.
+const STREAM_FLUSH_MARGIN: usize = 64;
+
+/// A batch under this size does not go into the stream: a ping, a window update. A piece costs
+/// 8 bytes before its first packed one - the kind, the size, the head of a block - and such a
+/// batch has less than that to save, and nothing the batches after it would be packed with.
+const MIN_SIZE_TO_PACK_STREAM: usize = 32;
+
 /// Under this size a batch is not worth packing: LZ4 finds nothing to save in so few bytes.
 const MIN_SIZE_TO_PACK_LZ4: usize = 64;
 
@@ -32,6 +53,12 @@ pub struct BatchPacker {
     /// Made for the first batch Zstandard packs and kept for the rest: making one costs more
     /// than packing a small batch.
     zstd: Option<zstd::bulk::Compressor<'static>>,
+    /// The stream of a `ZstdStream` level: one for the life of the connection.
+    stream: Option<zstd::stream::raw::Encoder<'static>>,
+    /// The stream could not take a batch and is left where it was: what it holds now is not
+    /// what the other end has. Every batch from then on goes as it is - such a batch is no
+    /// part of the stream, so the other end reads it whatever state the stream is in.
+    stream_is_broken: bool,
 }
 
 impl BatchPacker {
@@ -39,6 +66,8 @@ impl BatchPacker {
         Self {
             packing: level.packing(),
             zstd: None,
+            stream: None,
+            stream_is_broken: false,
         }
     }
 
@@ -68,6 +97,10 @@ impl BatchPacker {
             return false;
         };
 
+        if let Packing::ZstdStream { level } = packing {
+            return self.write_to_stream(level, frames, raw_len, wire);
+        }
+
         let (kind, min_size, bound) = match packing {
             Packing::Lz4 { .. } => {
                 let Ok(bound) = lz4::block::compress_bound(frames.len()) else {
@@ -80,6 +113,7 @@ impl BatchPacker {
                 MIN_SIZE_TO_PACK_ZSTD,
                 zstd::zstd_safe::compress_bound(frames.len()),
             ),
+            Packing::ZstdStream { .. } => return false,
         };
 
         if frames.len() < min_size {
@@ -104,6 +138,7 @@ impl BatchPacker {
             Packing::Zstd { level } => self
                 .zstd_compressor(level)
                 .and_then(|zstd| zstd.compress_to_buffer(frames, packed).ok()),
+            Packing::ZstdStream { .. } => None,
         };
 
         match packed_len {
@@ -113,6 +148,90 @@ impl BatchPacker {
                 true
             }
             _ => {
+                wire.truncate(batch_at);
+                false
+            }
+        }
+    }
+
+    /// Packs `frames` as the next piece of the stream. A batch goes this way whether it packs
+    /// or not: it is what the next ones are packed with, and what does not pack Zstandard puts
+    /// into the stream as it is, at a few bytes for it. So a piece can be bigger than its
+    /// frames - by its 5 bytes and 3 more for every 128 KiB.
+    ///
+    /// `false`: the batch is too small to be a piece, or the stream is broken, now or before -
+    /// `wire` is left as it was, and the batch goes as it is. That is no part of the stream:
+    /// the other end reads it and leaves its stream where it is.
+    fn write_to_stream(
+        &mut self,
+        level: i32,
+        frames: &[u8],
+        raw_len: u32,
+        wire: &mut Vec<u8>,
+    ) -> bool {
+        use zstd::stream::raw::{InBuffer, Operation, OutBuffer};
+
+        if self.stream_is_broken || frames.len() < MIN_SIZE_TO_PACK_STREAM {
+            return false;
+        }
+
+        let stream = match &mut self.stream {
+            Some(stream) => stream,
+            None => match zstd::stream::raw::Encoder::new(level) {
+                Ok(stream) => self.stream.insert(stream),
+                // No memory for a stream: nothing was sent of it, and nothing will be.
+                Err(_) => {
+                    self.stream_is_broken = true;
+                    return false;
+                }
+            },
+        };
+
+        let batch_at = wire.len();
+
+        wire.push(BATCH_ZSTD_STREAM);
+        wire.extend_from_slice(&raw_len.to_le_bytes());
+
+        let packed_at = wire.len();
+        let bound = zstd::zstd_safe::compress_bound(frames.len()) + STREAM_FLUSH_MARGIN;
+        wire.resize(packed_at + bound, 0);
+
+        let packed_len = {
+            let mut input = InBuffer::around(frames);
+            let mut output = OutBuffer::around(&mut wire[packed_at..]);
+
+            let mut packed = || -> std::io::Result<Option<usize>> {
+                while input.pos() < frames.len() {
+                    stream.run(&mut input, &mut output)?;
+
+                    // The room is the bound of a whole batch: it does not run out before the
+                    // batch does.
+                    if output.pos() == bound && input.pos() < frames.len() {
+                        return Ok(None);
+                    }
+                }
+
+                // The end of the piece: all of the batch is in `wire`, and can be unpacked.
+                if stream.flush(&mut output)? > 0 {
+                    return Ok(None);
+                }
+
+                Ok(Some(output.pos()))
+            };
+
+            packed().ok().flatten()
+        };
+
+        match packed_len {
+            Some(packed_len) => {
+                wire.truncate(packed_at + packed_len);
+                true
+            }
+            // A part of the batch is in the stream and is not in `wire`: the stream is not
+            // what the other end has any more.
+            None => {
+                self.stream_is_broken = true;
+                self.stream = None;
                 wire.truncate(batch_at);
                 false
             }
@@ -144,6 +263,9 @@ pub struct BatchUnpacker {
     unpacked: Vec<u8>,
     /// Made for the first batch packed with Zstandard, and kept for the rest.
     zstd: Option<zstd::bulk::Decompressor<'static>>,
+    /// The stream the pieces of the peer are a stream of: made for the first of them, and one
+    /// for the life of the connection.
+    stream: Option<zstd::stream::raw::Decoder<'static>>,
 }
 
 impl BatchUnpacker {
@@ -165,7 +287,7 @@ impl BatchUnpacker {
             return Ok(body);
         }
 
-        if kind != BATCH_LZ4 && kind != BATCH_ZSTD {
+        if kind != BATCH_LZ4 && kind != BATCH_ZSTD && kind != BATCH_ZSTD_STREAM {
             return Err(format!("Batch: unknown kind {kind}"));
         }
 
@@ -191,6 +313,13 @@ impl BatchUnpacker {
         let unpacked_len = if kind == BATCH_LZ4 {
             lz4::block::decompress_to_buffer(packed, Some(raw_len as i32), unpacked)
                 .map_err(|err| format!("Batch: lz4 can not unpack it: {err}"))?
+        } else if kind == BATCH_ZSTD_STREAM {
+            let stream = match &mut self.stream {
+                Some(stream) => stream,
+                None => self.stream.insert(new_stream_decoder()?),
+            };
+
+            read_from_stream(stream, packed, unpacked)?
         } else {
             let zstd = match &mut self.zstd {
                 Some(zstd) => zstd,
@@ -214,11 +343,78 @@ impl BatchUnpacker {
     }
 
     /// Lets the unpack buffer go after a batch too big to keep a buffer for.
+    ///
+    /// The stream is not let go with it: its window is what the next pieces are unpacked with.
     pub fn release_buffer(&mut self) {
         if self.unpacked.len() > UNPACK_BUFFER_TO_KEEP {
             self.unpacked = Vec::new();
         }
     }
+}
+
+fn new_stream_decoder() -> Result<zstd::stream::raw::Decoder<'static>, String> {
+    let mut stream = zstd::stream::raw::Decoder::new()
+        .map_err(|err| format!("Batch: no zstd stream decoder: {err}"))?;
+
+    stream
+        .set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(
+            STREAM_WINDOW_LOG_MAX,
+        ))
+        .map_err(|err| format!("Batch: no zstd stream decoder: {err}"))?;
+
+    Ok(stream)
+}
+
+/// Unpacks `packed`, the next piece of the stream, into `unpacked` - a buffer of the size the
+/// batch announced - and returns how much of it was filled. All of the piece has to go in, and
+/// nothing may be left of it for which the buffer has no room: then the batch is bigger than
+/// it said, and the rest of it would come out in front of the next one.
+///
+/// An error leaves the stream wherever it stopped. It is not used again: the connection is
+/// closed for a batch which does not unpack, as for any frame which is not what a peer sends.
+fn read_from_stream(
+    stream: &mut zstd::stream::raw::Decoder<'static>,
+    packed: &[u8],
+    unpacked: &mut [u8],
+) -> Result<usize, String> {
+    use zstd::stream::raw::{InBuffer, Operation, OutBuffer};
+
+    let can_not = |err: std::io::Error| format!("Batch: the zstd stream can not unpack it: {err}");
+
+    let room = unpacked.len();
+
+    let mut input = InBuffer::around(packed);
+    let mut output = OutBuffer::around(unpacked);
+
+    while input.pos() < packed.len() {
+        if output.pos() == room {
+            return Err(format!(
+                "Batch: a piece of the zstd stream unpacks to more than the {room} bytes announced"
+            ));
+        }
+
+        stream.run(&mut input, &mut output).map_err(can_not)?;
+    }
+
+    let unpacked_len = output.pos();
+
+    // The buffer is full and the piece is read: what is unpacked and did not fit would still
+    // be inside the stream. A byte of room shows it.
+    if unpacked_len == room {
+        let mut spare = [0u8; 1];
+        let mut nothing = InBuffer::around(&[][..]);
+        let mut output = OutBuffer::around(&mut spare[..]);
+
+        stream.run(&mut nothing, &mut output).map_err(can_not)?;
+
+        if output.pos() > 0 {
+            return Err(format!(
+                "Batch: a piece of the zstd stream unpacks to more than the {room} bytes announced"
+            ));
+        }
+    }
+
+    Ok(unpacked_len)
 }
 
 #[cfg(test)]
@@ -235,7 +431,12 @@ mod tests {
             None => BATCH_STORED,
             Some(Packing::Lz4 { .. }) => BATCH_LZ4,
             Some(Packing::Zstd { .. }) => BATCH_ZSTD,
+            Some(Packing::ZstdStream { .. }) => BATCH_ZSTD_STREAM,
         }
+    }
+
+    fn is_stream(level: CompressionLevel) -> bool {
+        matches!(level.packing(), Some(Packing::ZstdStream { .. }))
     }
 
     fn batch_of(frames: &[u8], level: CompressionLevel) -> Vec<u8> {
@@ -262,16 +463,32 @@ mod tests {
         let text = b"GET /api/accounts HTTP/1.1\r\nhost: example.com\r\n\r\n".repeat(200);
 
         for level in CompressionLevel::all() {
+            let is_stream = matches!(level.packing(), Some(Packing::ZstdStream { .. }));
+
             for (frames, kind) in [
                 (text.clone(), kind_of(level)),
-                // Nothing to save: it goes as it is.
-                (noise(100_000), BATCH_STORED),
+                // Nothing to save: it goes as it is - but into a stream, where it is what the
+                // next batches are packed with.
+                (
+                    noise(100_000),
+                    if is_stream {
+                        BATCH_ZSTD_STREAM
+                    } else {
+                        BATCH_STORED
+                    },
+                ),
                 (b"ping".to_vec(), BATCH_STORED),
                 (Vec::new(), BATCH_STORED),
             ] {
                 let batch = batch_of(&frames, level);
                 assert_eq!(batch[0], kind, "level {level}");
-                assert!(batch.len() <= frames.len() + 1);
+
+                if is_stream {
+                    // The kind, the size, the head of the stream and of its blocks.
+                    assert!(batch.len() <= frames.len() + 32, "level {level}");
+                } else {
+                    assert!(batch.len() <= frames.len() + 1);
+                }
 
                 assert_eq!(BatchUnpacker::new().read_batch(&batch).unwrap(), frames);
             }
@@ -313,14 +530,16 @@ mod tests {
         }
     }
 
-    /// A batch says what it is packed with: one unpacker reads the batches of every level.
+    /// A batch says what it is packed with: one unpacker reads the batches of every level which
+    /// packs a batch on its own. (A piece of a stream is read by the unpacker which read the
+    /// pieces before it: [`a_piece_of_a_stream_is_read_after_the_pieces_before_it`].)
     #[test]
     fn an_unpacker_reads_the_batches_of_any_level() {
         let frames = b"a batch of frames ".repeat(500);
         let mut unpacker = BatchUnpacker::new();
 
         for _ in 0..2 {
-            for level in CompressionLevel::all() {
+            for level in CompressionLevel::all().filter(|level| !is_stream(*level)) {
                 let batch = batch_of(&frames, level);
                 assert_eq!(
                     unpacker.read_batch(&batch).unwrap(),
@@ -356,10 +575,314 @@ mod tests {
         assert!(size_at(2) < size_at(1), "zstd 1 against lz4");
 
         // And no two rows are one packer under two numbers: the level of a row is what its
-        // packer is given.
-        let sizes: std::collections::BTreeSet<usize> =
-            (0..=CompressionLevel::MAX).map(size_at).collect();
-        assert_eq!(sizes.len(), CompressionLevel::MAX as usize + 1, "{sizes:?}");
+        // packer is given. A row of one stream packs a single batch the way the row of its
+        // level does, so the two kinds of rows are compared apart.
+        for rows in [
+            (0..=CompressionLevel::MAX)
+                .filter(|no| !is_stream(level(*no)))
+                .collect::<Vec<u8>>(),
+            (0..=CompressionLevel::MAX)
+                .filter(|no| is_stream(level(*no)))
+                .collect(),
+        ] {
+            let sizes: std::collections::BTreeSet<usize> =
+                rows.iter().map(|no| size_at(*no)).collect();
+            assert_eq!(sizes.len(), rows.len(), "{rows:?}: {sizes:?}");
+        }
+    }
+
+    /// The point of the one stream: a small batch - a request, an answer - is packed with the
+    /// batches before it. On its own it has next to nothing to be packed with.
+    #[test]
+    fn a_small_batch_in_a_stream_is_packed_with_the_batches_before_it() {
+        let requests: Vec<Vec<u8>> = (0..400u32)
+            .map(|no| {
+                format!(
+                    "GET /api/accounts/{}/orders?page={} HTTP/1.1\r\nhost: api.example.com\r\n\
+                     user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)\r\n\
+                     accept: application/json\r\nauthorization: Bearer {:x}\r\n\r\n",
+                    no.wrapping_mul(2_654_435_761) % 100_000,
+                    no % 7,
+                    u64::from(no).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                )
+                .into_bytes()
+            })
+            .collect();
+
+        let on_the_wire = |no: u8| {
+            let mut packer = BatchPacker::new(level(no));
+            let mut unpacker = BatchUnpacker::new();
+            let mut total = 0;
+
+            for request in &requests {
+                let mut wire = Vec::new();
+                packer.write_batch(request, &mut wire);
+                assert_eq!(unpacker.read_batch(&wire).unwrap(), request, "level {no}");
+                total += wire.len();
+            }
+
+            total
+        };
+
+        let not_packed = on_the_wire(0);
+
+        // The same Zstandard level, a batch on its own and in the stream.
+        for (alone, in_the_stream) in [(2, 6), (3, 7), (4, 8), (5, 9)] {
+            let (alone, in_the_stream) = (on_the_wire(alone), on_the_wire(in_the_stream));
+
+            assert!(alone > not_packed / 2, "{alone} of {not_packed}");
+            assert!(
+                in_the_stream < not_packed / 3,
+                "{in_the_stream} of {not_packed}"
+            );
+            assert!(in_the_stream * 2 < alone, "{in_the_stream} against {alone}");
+        }
+    }
+
+    /// Thousands of batches of every size in a row through one stream - far more than its
+    /// window holds: what packs, what does not, and the small ones which stay out of it.
+    #[test]
+    fn a_stream_carries_thousands_of_batches_of_any_size() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let batches: Vec<Vec<u8>> = (0..3000usize)
+            .map(|no| {
+                // Mostly small, and a big one now and then: 1 byte to 300 KiB.
+                let size = match next() % 100 {
+                    0 => 1 + (next() % 300_000) as usize,
+                    1..=9 => 1 + (next() % 20_000) as usize,
+                    10..=29 => 1 + (next() % 40) as usize,
+                    _ => 1 + (next() % 2_000) as usize,
+                };
+
+                match no % 3 {
+                    0 => (0..size).map(|_| (next() >> 24) as u8).collect(),
+                    1 => format!(
+                        "{{\"row\":{no},\"symbol\":\"EURUSD\",\"bid\":1.0{}}},",
+                        no % 977
+                    )
+                    .into_bytes()
+                    .into_iter()
+                    .cycle()
+                    .take(size)
+                    .collect(),
+                    _ => vec![no as u8; size],
+                }
+            })
+            .collect();
+
+        let total: usize = batches.iter().map(Vec::len).sum();
+        assert!(total > 8 * 1024 * 1024, "{total}");
+
+        for level in CompressionLevel::all().filter(|level| is_stream(*level)) {
+            let mut packer = BatchPacker::new(level);
+            let mut unpacker = BatchUnpacker::new();
+            let mut wire = Vec::new();
+            let (mut pieces, mut stored) = (0, 0);
+
+            for frames in &batches {
+                wire.clear();
+                packer.write_batch(frames, &mut wire);
+
+                match wire[0] {
+                    BATCH_ZSTD_STREAM => pieces += 1,
+                    BATCH_STORED => {
+                        assert!(frames.len() < MIN_SIZE_TO_PACK_STREAM);
+                        stored += 1;
+                    }
+                    kind => panic!("level {level}: a batch of the kind {kind}"),
+                }
+
+                // What does not pack costs the head of a piece and of its blocks.
+                assert!(wire.len() <= frames.len() + 32, "level {level}");
+
+                assert_eq!(unpacker.read_batch(&wire).unwrap(), frames, "level {level}");
+                unpacker.release_buffer();
+            }
+
+            assert!(pieces > 2000 && stored > 100, "{pieces} and {stored}");
+        }
+    }
+
+    /// A batch of the biggest size a connection carries - megabytes nothing packs - goes into
+    /// the stream whole, and comes out of it.
+    #[test]
+    fn a_stream_carries_the_biggest_batch() {
+        let frames = noise(crate::tcp_gateway::MAX_PAYLOAD_SIZE);
+
+        for level in CompressionLevel::all().filter(|level| is_stream(*level)) {
+            let mut packer = BatchPacker::new(level);
+            let mut unpacker = BatchUnpacker::new();
+            let mut wire = Vec::new();
+
+            for _ in 0..2 {
+                wire.clear();
+                packer.write_batch(&frames, &mut wire);
+
+                assert_eq!(wire[0], BATCH_ZSTD_STREAM);
+                assert!(wire.len() <= frames.len() + 256, "level {level}");
+                assert!(
+                    unpacker.read_batch(&wire).unwrap() == frames,
+                    "level {level}"
+                );
+            }
+        }
+    }
+
+    /// The pieces are one stream: a piece is read by the unpacker which read every piece
+    /// before it, and by no other. On a connection the frames open in their order or not at
+    /// all, so a piece does not get to an unpacker out of its turn.
+    #[test]
+    fn a_piece_of_a_stream_is_read_after_the_pieces_before_it() {
+        let batches: Vec<Vec<u8>> = (0..4u32)
+            .map(|no| {
+                format!("{{\"row\":{no},\"symbol\":\"EURUSD\"}},")
+                    .repeat(50)
+                    .into_bytes()
+            })
+            .collect();
+
+        for level in CompressionLevel::all().filter(|level| is_stream(*level)) {
+            let mut packer = BatchPacker::new(level);
+            let pieces: Vec<Vec<u8>> = batches
+                .iter()
+                .map(|frames| {
+                    let mut wire = Vec::new();
+                    packer.write_batch(frames, &mut wire);
+                    assert_eq!(wire[0], BATCH_ZSTD_STREAM);
+                    wire
+                })
+                .collect();
+
+            // In their order.
+            let mut unpacker = BatchUnpacker::new();
+            for (piece, frames) in pieces.iter().zip(&batches) {
+                assert_eq!(unpacker.read_batch(piece).unwrap(), frames);
+            }
+
+            // Without the first one.
+            let err = BatchUnpacker::new().read_batch(&pieces[1]).unwrap_err();
+            assert!(err.contains("the zstd stream can not unpack it"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_piece_of_a_stream_which_is_not_what_it_says_is_refused() {
+        let frames = b"a batch of frames ".repeat(500);
+        let piece = batch_of(&frames, level(6));
+        assert_eq!(piece[0], BATCH_ZSTD_STREAM);
+
+        let with_size = |size: usize| {
+            let mut piece = piece.clone();
+            piece[1..5].copy_from_slice(&(size as u32).to_le_bytes());
+            piece
+        };
+
+        // Unpacks to more than it says.
+        for size in [1, frames.len() - 1] {
+            let err = BatchUnpacker::new()
+                .read_batch(&with_size(size))
+                .unwrap_err();
+            assert!(err.contains("unpacks to more than"), "{size}: {err}");
+        }
+
+        // Unpacks to less than it says.
+        let err = BatchUnpacker::new()
+            .read_batch(&with_size(frames.len() + 1))
+            .unwrap_err();
+        assert!(err.contains("bytes, 9001 were announced"), "{err}");
+
+        // Says more than a batch may be: refused before any memory is taken for it.
+        let err = BatchUnpacker::new()
+            .read_batch(&with_size(MAX_DECOMPRESSED_BATCH_SIZE + 1))
+            .unwrap_err();
+        assert!(err.contains("is out of range"), "{err}");
+
+        // Cut short.
+        let err = BatchUnpacker::new()
+            .read_batch(&piece[..piece.len() - 3])
+            .unwrap_err();
+        assert!(err.contains("were announced"), "{err}");
+
+        // Not a stream at all.
+        let mut garbage = with_size(frames.len());
+        garbage.truncate(5);
+        garbage.extend_from_slice(&noise(200));
+        let err = BatchUnpacker::new().read_batch(&garbage).unwrap_err();
+        assert!(err.contains("the zstd stream can not unpack it"), "{err}");
+    }
+
+    /// A stream says the size of its window, and the memory for it is taken by the end which
+    /// reads it. One which asks for more than the levels of the table do is not read.
+    #[test]
+    fn a_stream_with_a_window_beyond_the_limit_is_refused() {
+        use zstd::stream::raw::{Encoder, InBuffer, Operation, OutBuffer};
+
+        let frames = b"a batch of frames ".repeat(500);
+
+        let piece_with_window = |window_log: u32| {
+            let mut stream = Encoder::new(1).unwrap();
+            stream
+                .set_parameter(zstd::zstd_safe::CParameter::WindowLog(window_log))
+                .unwrap();
+
+            let mut packed = vec![0u8; frames.len() + 256];
+            let packed_len = {
+                let mut input = InBuffer::around(&frames[..]);
+                let mut output = OutBuffer::around(&mut packed[..]);
+                stream.run(&mut input, &mut output).unwrap();
+                assert_eq!(stream.flush(&mut output).unwrap(), 0);
+                output.pos()
+            };
+
+            let mut piece = vec![BATCH_ZSTD_STREAM];
+            piece.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+            piece.extend_from_slice(&packed[..packed_len]);
+            piece
+        };
+
+        assert_eq!(
+            BatchUnpacker::new()
+                .read_batch(&piece_with_window(STREAM_WINDOW_LOG_MAX))
+                .unwrap(),
+            frames
+        );
+
+        let err = BatchUnpacker::new()
+            .read_batch(&piece_with_window(STREAM_WINDOW_LOG_MAX + 1))
+            .unwrap_err();
+        assert!(err.contains("the zstd stream can not unpack it"), "{err}");
+    }
+
+    /// A batch which goes as it is - too small for a piece - is no part of the stream: the
+    /// pieces around it are read as if it were not there.
+    #[test]
+    fn a_batch_which_is_not_a_piece_leaves_the_stream_where_it_is() {
+        let text = b"GET /api/accounts HTTP/1.1\r\nhost: example.com\r\n\r\n".repeat(20);
+
+        let mut packer = BatchPacker::new(level(7));
+        let mut unpacker = BatchUnpacker::new();
+
+        for round in 0..50 {
+            for frames in [&text[..], &b"ping"[..], &text[..round + 40], &[7u8; 31][..]] {
+                let mut wire = Vec::new();
+                packer.write_batch(frames, &mut wire);
+
+                let kind = if frames.len() < MIN_SIZE_TO_PACK_STREAM {
+                    BATCH_STORED
+                } else {
+                    BATCH_ZSTD_STREAM
+                };
+                assert_eq!(wire[0], kind);
+                assert_eq!(unpacker.read_batch(&wire).unwrap(), frames);
+            }
+        }
     }
 
     #[test]

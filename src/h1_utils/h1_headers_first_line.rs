@@ -1,29 +1,37 @@
-use rust_extensions::slice_of_u8_utils::SliceOfU8Ext;
-
 pub struct H1HeadersFirstLine<'s> {
     pub data: &'s [u8],
 }
 
-impl<'s> H1HeadersFirstLine<'s> {
-    pub fn get_path_and_query(&self) -> &str {
-        let index_start = self.data.find_byte_pos(b' ', 0).unwrap() + 1;
-        let index_end = self.data.find_byte_pos(b' ', index_start).unwrap();
+/// The method and the target of a request line: `METHOD SP target SP version`.
+///
+/// `None`: the line is not made this way. `verify_http11_first_line` lets no such request line
+/// in - but a line is cut by what is in it, not by what the check before it promised: the same
+/// reader takes a status line (`HTTP/1.1 200 OK`), and a client can send one.
+pub fn split_request_line(line: &[u8]) -> Option<(&str, &str)> {
+    let line = std::str::from_utf8(line).ok()?;
 
-        std::str::from_utf8(&self.data[index_start..index_end]).unwrap()
+    let mut parts = line.splitn(3, ' ');
+
+    let method = parts.next()?;
+    let target = parts.next()?;
+    parts.next()?;
+
+    Some((method, target))
+}
+
+impl<'s> H1HeadersFirstLine<'s> {
+    pub fn get_path_and_query(&self) -> &'s str {
+        self.get_verb_and_path().1
     }
 
-    pub fn get_verb_and_path(&self) -> (&str, &str) {
-        let index_start = self.data.find_byte_pos(b' ', 0).unwrap();
-        let index_end = self.data.find_byte_pos(b' ', index_start + 1).unwrap();
-
-        let verb = std::str::from_utf8(&self.data[..index_start]).unwrap();
-        let path = std::str::from_utf8(&self.data[index_start + 1..index_end]).unwrap();
-
-        (verb, path)
+    /// A line which is not a request line has no verb and no target: both are empty, and an
+    /// empty target is a path of no location.
+    pub fn get_verb_and_path(&self) -> (&'s str, &'s str) {
+        split_request_line(self.data).unwrap_or(("", ""))
     }
 
     /// Verb, path and query string. `?` starts the query; a fragment is cut off, as hyper does.
-    pub fn get_verb_path_and_query(&self) -> (&str, &str, Option<&str>) {
+    pub fn get_verb_path_and_query(&self) -> (&'s str, &'s str, Option<&'s str>) {
         let (verb, target) = self.get_verb_and_path();
 
         let target = match target.find('#') {
@@ -81,6 +89,38 @@ mod tests {
     fn an_encoded_question_mark_stays_in_the_path() {
         assert_split("GET /a%3Fb HTTP/1.1", ("GET", "/a%3Fb", None));
         assert_split("GET /a%3fb?c HTTP/1.1", ("GET", "/a%3fb", Some("c")));
+    }
+
+    /// A line which is not `METHOD SP target SP version` is read without a panic: it has no verb
+    /// and no target.
+    #[test]
+    fn a_line_which_is_not_a_request_line_has_no_verb_and_no_target() {
+        for line in [
+            "GET\t/\tHTTP/1.1",
+            "GET\t/ HTTP/1.1",
+            "GET /\tHTTP/1.1",
+            "GET /",
+            "GET",
+            "",
+            "HTTP/1.1\t200\tOK",
+        ] {
+            let first_line = H1HeadersFirstLine {
+                data: line.as_bytes(),
+            };
+
+            assert_eq!(first_line.get_verb_and_path(), ("", ""), "{line:?}");
+            assert_eq!(first_line.get_path_and_query(), "", "{line:?}");
+            assert_eq!(
+                first_line.get_verb_path_and_query(),
+                ("", "", None),
+                "{line:?}"
+            );
+        }
+
+        let not_utf8 = H1HeadersFirstLine {
+            data: b"GET /\xff HTTP/1.1",
+        };
+        assert_eq!(not_utf8.get_verb_and_path(), ("", ""));
     }
 
     /// `get_verb_and_path` goes on giving the whole request target: the oauth gate splits it

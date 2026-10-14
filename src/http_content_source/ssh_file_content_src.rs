@@ -51,31 +51,48 @@ impl PathOverSshContentSource {
             .unwrap_or(Err(SshSessionError::Timeout));
 
         match result {
-            Ok(content) => Ok(RequestExecutorResult {
+            Ok(Some(content)) => Ok(RequestExecutorResult {
                 status_code: 200,
                 content_type: WebContentType::detect_by_extension(&file_path),
                 body: content,
             }),
+            // A directory, or anything else which is there and is not a file: what a local
+            // folder answers 404 to.
+            Ok(None) => Ok(RequestExecutorResult::not_found()),
             Err(err) => {
-                println!("{} -> Error: {:?}", file_path, err);
-                if crate::scripts::ssh::is_remote_file_not_found(&err) {
+                // No such file, or a name the host does not take - too long a one: no file
+                // either way, and nothing to write down for every scanner which comes by.
+                if crate::scripts::ssh::is_remote_file_not_found(&err)
+                    || crate::scripts::ssh::is_remote_name_refused(&err)
+                {
                     return Ok(RequestExecutorResult::not_found());
                 }
+
+                println!(
+                    "{} -> Error: {:?}",
+                    crate::types::path_for_log(&file_path),
+                    err
+                );
 
                 Err(ProxyPassError::SshSessionError(err))
             }
         }
     }
 
-    async fn fetch(&self, file_path: &str) -> Result<Vec<u8>, SshSessionError> {
+    /// `None`: the path is there and is not a file.
+    async fn fetch(&self, file_path: &str) -> Result<Option<Vec<u8>>, SshSessionError> {
         // Taken from the pool for every request: the pool replaces a session which died, and
         // one held here would stay dead.
         let ssh_session = crate::scripts::ssh::get_ssh_session(&self.ssh_credentials)
             .await
             .map_err(SshSessionError::Other)?;
 
-        crate::scripts::ssh::download_remote_file(&ssh_session, file_path, self.execute_timeout)
-            .await
+        crate::scripts::ssh::download_remote_regular_file(
+            &ssh_session,
+            file_path,
+            self.execute_timeout,
+        )
+        .await
     }
 
     fn remote_file_path(&self, path: &FileRequestPath<'_>) -> Option<String> {
@@ -133,6 +150,76 @@ mod tests {
 
         let root = FileRequestPath::parse("/").unwrap();
         assert_eq!(source.remote_file_path(&root), None);
+    }
+
+    /// Against a real ssh server - the one of this machine: the user who runs the test logs in
+    /// to 127.0.0.1:22 with what the ssh agent holds. Not a part of the suite:
+    /// `cargo test -- --ignored a_live_ssh_host`.
+    ///
+    /// What is not a file is no file - a 404, the same as a local folder answers - and not an
+    /// error of the ssh host: a directory, a name longer than a file system takes.
+    #[tokio::test]
+    #[ignore = "needs an ssh server on 127.0.0.1:22 and a key in the ssh agent"]
+    async fn a_live_ssh_host_serves_files_and_nothing_else() {
+        use crate::http_content_source::test_utils::*;
+
+        let site = TestSite::new();
+
+        let source = PathOverSshContentSource::new(
+            Arc::new(SshCredentials::SshAgent {
+                ssh_remote_host: "127.0.0.1".to_string(),
+                ssh_remote_port: 22,
+                ssh_user_name: std::env::var("USER").unwrap(),
+            }),
+            site.root(),
+            Some("index.html".to_string()),
+            Duration::from_secs(5),
+        );
+
+        let get = |path: String| {
+            let source = &source;
+            async move {
+                let path = FileRequestPath::parse(&path).unwrap();
+                source
+                    .get_file(&path)
+                    .await
+                    .map(|file| (file.status_code, file.body))
+            }
+        };
+
+        assert_eq!(
+            get("/index.html".to_string()).await.unwrap(),
+            (200, INDEX_HTML.to_vec())
+        );
+        assert_eq!(
+            get("/".to_string()).await.unwrap(),
+            (200, INDEX_HTML.to_vec())
+        );
+        assert_eq!(
+            get("/css/site.css".to_string()).await.unwrap(),
+            (200, SITE_CSS.to_vec())
+        );
+
+        for path in [
+            "/missing.html".to_string(),
+            "/css/missing.css".to_string(),
+            // A directory.
+            "/css".to_string(),
+            "/css/".to_string(),
+            // A file is not a directory.
+            "/index.html/x".to_string(),
+            // Longer than a name can be.
+            format!("/{}", "a".repeat(300)),
+            format!("/{}.html", "b".repeat(5000)),
+        ] {
+            let result = get(path.clone()).await;
+            println!("{:.40} -> {:?}", path, result.as_ref().map(|file| file.0));
+
+            match result {
+                Ok((status, _)) => assert_eq!(status, 404, "{path:.60}"),
+                Err(err) => panic!("{path:.60}: {err:?}"),
+            }
+        }
     }
 
     /// An ssh host which takes the connection and then says nothing. my-ssh waits for such a

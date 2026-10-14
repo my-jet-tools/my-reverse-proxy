@@ -119,7 +119,7 @@ impl HttpsRequestsHandler {
                     host
                 ),
             );
-            let content = crate::error_templates::generate_layout(
+            let content = crate::error_templates::generate_layout_body(
                 421,
                 "Misdirected Request",
                 Some("A client certificate is required for this host".into()),
@@ -156,7 +156,7 @@ impl HttpsRequestsHandler {
                         ),
                     );
                     let content =
-                        crate::error_templates::generate_layout(401, "Restricted by IP", None);
+                        crate::error_templates::generate_layout_body(401, "Restricted by IP", None);
                     return Err(create_err_response(StatusCode::UNAUTHORIZED, content));
                 }
             }

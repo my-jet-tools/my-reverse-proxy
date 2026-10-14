@@ -21,9 +21,12 @@ impl FilesAnswer {
     }
 
     /// What the source came back with for `path`, as a response.
+    /// `response_headers`: what `modify_http_headers` add to a response - they go on a file
+    /// which is served, not on an error page.
     fn of_file(
         path: &FileRequestPath<'_>,
         file: Result<RequestExecutorResult, ProxyPassError>,
+        response_headers: &[(String, String)],
     ) -> Self {
         match file {
             Ok(file) if file.status_code == 404 => Self::page(tpl::NOT_FOUND.as_slice()),
@@ -31,6 +34,9 @@ impl FilesAnswer {
                 let mut builder = Http1ResponseBuilder::new(file.status_code);
                 if let Some(content_type) = file.content_type.as_ref() {
                     builder = builder.add_content_type(content_type.as_str());
+                }
+                for (name, value) in response_headers {
+                    builder = builder.add_header(name, value);
                 }
                 Self {
                     bytes: builder.build_with_body(&file.body),
@@ -45,7 +51,11 @@ impl FilesAnswer {
                 bytes: tpl::REMOTE_RESOURCE_IS_NOT_AVAILABLE.to_vec(),
                 returned_5xx: Some((
                     503,
-                    format!("can not get the file {}: {:?}", path.as_str(), err),
+                    format!(
+                        "can not get the file {}: {:?}",
+                        crate::types::path_for_log(path.as_str()),
+                        err
+                    ),
                 )),
             },
         }
@@ -60,6 +70,7 @@ pub async fn answer_files_request(
     source: &FilesContentSource,
     method: &str,
     path: &str,
+    response_headers: &[(String, String)],
 ) -> FilesAnswer {
     // Before the method rule: a path which does not pass the check is refused
     // whatever the method is.
@@ -67,12 +78,13 @@ pub async fn answer_files_request(
         return FilesAnswer::page(tpl::BAD_REQUEST.as_slice());
     };
 
-    // Only GET is served on this path.
-    if method != "GET" {
+    // Only GET and HEAD are served on this path. A HEAD is answered as the GET
+    // would be: the caller sends the head of the response and leaves the body out.
+    if method != "GET" && method != "HEAD" {
         return FilesAnswer::page(tpl::NOT_FOUND.as_slice());
     }
 
-    FilesAnswer::of_file(&path, source.get_file(&path).await)
+    FilesAnswer::of_file(&path, source.get_file(&path).await, response_headers)
 }
 
 #[cfg(test)]
@@ -115,11 +127,29 @@ mod tests {
         result
     }
 
+    /// What `modify_http_headers` add to a response goes on a file which is served, and not on
+    /// the page of a file which is not there.
+    #[tokio::test]
+    async fn the_response_headers_of_the_location_go_on_a_served_file() {
+        let site = TestSite::new();
+        let headers = [("x-frame-options".to_string(), "DENY".to_string())];
+
+        let answer = answer_files_request(&local(&site), "GET", "/css/site.css", &headers).await;
+        let head = String::from_utf8_lossy(&answer.bytes).to_string();
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(head.contains("x-frame-options: DENY\r\n"), "{head}");
+
+        let answer = answer_files_request(&local(&site), "GET", "/missing.css", &headers).await;
+        let head = String::from_utf8_lossy(&answer.bytes).to_string();
+        assert!(head.starts_with("HTTP/1.1 404"), "{head}");
+        assert!(!head.contains("x-frame-options"), "{head}");
+    }
+
     #[tokio::test]
     async fn a_file_is_a_whole_response_with_its_type_and_length() {
         let site = TestSite::new();
 
-        let answer = answer_files_request(&local(&site), "GET", "/css/site.css").await;
+        let answer = answer_files_request(&local(&site), "GET", "/css/site.css", &[]).await;
 
         assert_eq!(
             answer.bytes,
@@ -138,7 +168,7 @@ mod tests {
     async fn the_default_file_is_served_for_the_root() {
         let site = TestSite::new();
 
-        let answer = answer_files_request(&local(&site), "GET", "/").await;
+        let answer = answer_files_request(&local(&site), "GET", "/", &[]).await;
 
         assert_eq!(
             answer.bytes,
@@ -159,7 +189,7 @@ mod tests {
         let site = TestSite::new();
         std::fs::write(format!("{}/notes.bin", site.root()), b"notes").unwrap();
 
-        let answer = answer_files_request(&local(&site), "GET", "/notes.bin").await;
+        let answer = answer_files_request(&local(&site), "GET", "/notes.bin", &[]).await;
 
         assert_eq!(
             answer.bytes,
@@ -182,7 +212,7 @@ mod tests {
                 "/a%00.html",
                 "index.html",
             ] {
-                let answer = answer_files_request(&source, method, path).await;
+                let answer = answer_files_request(&source, method, path, &[]).await;
 
                 assert_eq!(answer.bytes, tpl::BAD_REQUEST.as_slice(), "{method} {path}");
                 assert!(answer.returned_5xx.is_none());
@@ -193,16 +223,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_get_is_served() {
+    async fn only_get_and_head_are_served() {
         let site = TestSite::new();
         let source = local(&site);
 
-        for method in ["POST", "PUT", "DELETE", "HEAD", "OPTIONS"] {
-            let answer = answer_files_request(&source, method, "/index.html").await;
+        for method in ["POST", "PUT", "DELETE", "OPTIONS"] {
+            let answer = answer_files_request(&source, method, "/index.html", &[]).await;
 
             assert_eq!(answer.bytes, tpl::NOT_FOUND.as_slice(), "{method}");
             assert!(answer.returned_5xx.is_none());
         }
+
+        // A HEAD is answered as the GET is: it is the caller which leaves the body out.
+        let get = answer_files_request(&source, "GET", "/index.html", &[]).await;
+        let head = answer_files_request(&source, "HEAD", "/index.html", &[]).await;
+        assert!(get.bytes.starts_with(b"HTTP/1.1 200"));
+        assert_eq!(head.bytes, get.bytes);
     }
 
     #[tokio::test]
@@ -211,7 +247,7 @@ mod tests {
         let source = local(&site);
 
         for path in ["/missing.html", "/css", "/css/"] {
-            let answer = answer_files_request(&source, "GET", path).await;
+            let answer = answer_files_request(&source, "GET", path, &[]).await;
 
             assert_eq!(answer.bytes, tpl::NOT_FOUND.as_slice(), "{path}");
             assert!(answer.returned_5xx.is_none());
@@ -224,7 +260,7 @@ mod tests {
     async fn a_gateway_which_can_not_be_reached_is_a_logged_503() {
         let source = behind_unknown_gateway();
 
-        let answer = answer_files_request(&source, "GET", "/index.html").await;
+        let answer = answer_files_request(&source, "GET", "/index.html", &[]).await;
 
         assert_eq!(
             answer.bytes,
@@ -234,7 +270,7 @@ mod tests {
             answer.returned_5xx,
             Some((
                 503,
-                "can not get the file /index.html: GatewayError".to_string()
+                "can not get the file \"/index.html\": GatewayError".to_string()
             ))
         );
     }
@@ -245,7 +281,7 @@ mod tests {
     fn a_file_missing_behind_a_gateway_is_not_found_and_a_failure_is_a_503() {
         let path = FileRequestPath::parse("/missing.html").unwrap();
 
-        let answer = FilesAnswer::of_file(&path, Err(ProxyPassError::NoLocationFound));
+        let answer = FilesAnswer::of_file(&path, Err(ProxyPassError::NoLocationFound), &[]);
         assert_eq!(answer.bytes, tpl::NOT_FOUND.as_slice());
         assert!(answer.returned_5xx.is_none());
 
@@ -254,6 +290,7 @@ mod tests {
             Err(ProxyPassError::SshSessionError(
                 my_ssh::SshSessionError::Timeout,
             )),
+            &[],
         );
         assert_eq!(
             answer.bytes,
@@ -263,7 +300,7 @@ mod tests {
             answer.returned_5xx,
             Some((
                 503,
-                "can not get the file /missing.html: SshSessionError(Timeout)".to_string()
+                "can not get the file \"/missing.html\": SshSessionError(Timeout)".to_string()
             ))
         );
     }
@@ -273,11 +310,11 @@ mod tests {
     async fn a_refused_request_does_not_get_to_the_gateway() {
         let source = behind_unknown_gateway();
 
-        let answer = answer_files_request(&source, "GET", "/../secret.txt").await;
+        let answer = answer_files_request(&source, "GET", "/../secret.txt", &[]).await;
         assert_eq!(answer.bytes, tpl::BAD_REQUEST.as_slice());
         assert!(answer.returned_5xx.is_none());
 
-        let answer = answer_files_request(&source, "POST", "/index.html").await;
+        let answer = answer_files_request(&source, "POST", "/index.html", &[]).await;
         assert_eq!(answer.bytes, tpl::NOT_FOUND.as_slice());
         assert!(answer.returned_5xx.is_none());
     }

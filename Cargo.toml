@@ -32,8 +32,10 @@ rust-common = { tag = "0.1.1", git = "https://github.com/MyJetTools/rust-common.
 
 my-settings-reader = { tag = "0.5.0", git = "https://github.com/MyJetTools/my-settings-reader.git" }
 
-# FlUrl comes re-exported from my-settings-reader, which pulls it with no TLS feature: without
-# this entry every `https://` FlUrl request (certificate sources, google auth) panics.
+# The FlUrl of every request this crate makes - certificate sources, google auth - with TLS.
+# Not the one my-settings-reader re-exports: that one is pulled with no TLS feature, and not
+# always from the same git url as this one - then it is a crate of its own, and an `https://`
+# request through it fails.
 flurl = { tag = "0.7.0", git = "https://github.com/MyJetTools/fl-url.git", features = [
     "with-ring-tls",
 ] }

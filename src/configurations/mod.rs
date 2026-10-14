@@ -9,6 +9,8 @@ pub use pool_tuning::*;
 
 mod tcp_endpoint_host_config;
 pub use tcp_endpoint_host_config::*;
+mod not_served_reason;
+pub use not_served_reason::*;
 //mod tcp_over_ssh_host_config;
 //pub use tcp_over_ssh_host_config::*;
 mod http_type;
