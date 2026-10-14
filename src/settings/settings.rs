@@ -5,6 +5,10 @@ use serde::*;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SettingsModel {
+    /// Not required in any file: the hosts may all be in the files the main one includes, and a
+    /// file may hold nothing but certificates or variables. `hosts:` with nothing under it is no
+    /// hosts as well.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub hosts: HashMap<String, HostSettings>,
     pub include: Option<Vec<String>>,
     pub dynamic_configurations_file: Option<String>,
@@ -71,6 +75,15 @@ impl SettingsModel {
             )),
         }
     }
+}
+
+/// A key which is there with nothing under it - `hosts:` - is read as if it were not there.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 fn resolve_file_name(file_name: Option<&str>) -> String {
@@ -217,6 +230,33 @@ mod tests {
 
         let result = SettingsModel::from_dynamic_yaml("dynamic", b"\n  not a settings file\n");
         assert!(result.is_err());
+    }
+
+    /// The hosts may all be in the included files: a file without them - or with `hosts:` and
+    /// nothing under it - is read, and has no hosts.
+    #[test]
+    fn hosts_are_not_required() {
+        for content in [
+            "include:\n- ~/hosts.yaml\n",
+            "hosts:\ninclude:\n- ~/hosts.yaml\n",
+            "hosts: {}\n",
+            "variables:\n  ENV: dev\n",
+        ] {
+            let model = SettingsModel::from_yaml("settings", content.as_bytes())
+                .unwrap_or_else(|err| panic!("{content:?}: {err}"));
+            assert!(model.hosts.is_empty(), "{content:?}");
+        }
+
+        let model = SettingsModel::from_yaml(
+            "settings",
+            b"include:\n- ~/hosts.yaml\nhosts:\n  localhost:8000:\n    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n",
+        )
+        .unwrap();
+        assert_eq!(model.hosts.len(), 1);
+        assert_eq!(model.include.unwrap(), vec!["~/hosts.yaml".to_string()]);
+
+        // Hosts which are not a map are still an error.
+        assert!(SettingsModel::from_yaml("settings", b"hosts: 5\n").is_err());
     }
 
     #[test]

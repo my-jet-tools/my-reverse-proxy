@@ -2054,6 +2054,12 @@ include:
 - ~/other_config_file2.yaml
 ```
 
+`hosts` is not required in any of the files - the main one included. The hosts may all be in
+the included files, and a file may hold nothing but variables, certificates or ssh settings.
+`hosts:` with nothing under it is the same as no `hosts`. A host id which is in two files is
+taken from the file read last: the main file first, then the includes in their order, then the
+dynamic settings file.
+
 ## Dynamic settings file
 
 A single settings file can be designated as the **dynamic settings file** — a

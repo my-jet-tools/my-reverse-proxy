@@ -491,3 +491,62 @@ fn compile_locations(
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The main file names no hosts and includes the files which do: the hosts of all of them
+    /// are there once the settings are put together.
+    #[test]
+    fn the_hosts_may_all_be_in_the_included_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "my-reverse-proxy-hosts-in-includes-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let host = |port: u16| {
+            format!(
+                "  localhost:{port}:\n    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n"
+            )
+        };
+
+        let first = dir.join("first.yaml");
+        std::fs::write(&first, format!("hosts:\n{}", host(8001))).unwrap();
+
+        let second = dir.join("second.yaml");
+        std::fs::write(&second, format!("hosts:\n{}{}", host(8002), host(8003))).unwrap();
+
+        // A file of variables and nothing else: no hosts in it either.
+        let third = dir.join("third.yaml");
+        std::fs::write(&third, "variables:\n  ENV: dev\n").unwrap();
+
+        let main = dir.join("main.yaml");
+        std::fs::write(
+            &main,
+            format!(
+                "include:\n- {}\n- {}\n- {}\n",
+                first.display(),
+                second.display(),
+                third.display()
+            ),
+        )
+        .unwrap();
+
+        let settings_model = SettingsModel::load(Some(main.to_str().unwrap())).unwrap();
+        let include_settings = load_includes_block(&settings_model).unwrap();
+
+        let mut compiled = SettingsCompiled::default();
+        compiled.populate(settings_model, include_settings).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut hosts: Vec<_> = compiled.hosts.keys().cloned().collect();
+        hosts.sort();
+        assert_eq!(
+            hosts,
+            vec!["localhost:8001", "localhost:8002", "localhost:8003"]
+        );
+    }
+}
