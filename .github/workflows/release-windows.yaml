@@ -1,0 +1,46 @@
+# The Windows build of a release, next to the Linux one in release.yaml. It is a file of its own
+# because build.rs (ci-utils CiGenerator) rewrites release.yaml from a fixed template on every
+# build: a job added there would be reverted by the next `cargo build`.
+name: Release Windows
+on:
+  push:
+    tags: "*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.15.2
+        with:
+          toolchain: stable
+
+      - name: Updating version
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: sed -i -e "s/^version = .*/version = \"${VERSION}\"/" Cargo.toml
+
+      - name: Build
+        env:
+          GIT_HUB_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          # aws-lc-sys assembles with NASM on x86_64 Windows. When NASM is not on PATH, this makes it
+          # link the NASM objects it ships instead.
+          AWS_LC_SYS_PREBUILT_NASM: "1"
+        run: cargo build --release
+
+      - name: Attach the exe to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ASSET="my-reverse-proxy-${TAG}-x86_64-pc-windows-msvc.exe"
+          cp target/release/my-reverse-proxy.exe "${ASSET}"
+          gh release view "${TAG}" > /dev/null || gh release create "${TAG}" --title "${TAG}" \
+            --notes "Windows build: ${ASSET}. See \"Running on Windows\" in the README."
+          gh release upload "${TAG}" "${ASSET}" --clobber

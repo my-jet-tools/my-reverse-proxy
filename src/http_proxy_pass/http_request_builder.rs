@@ -118,16 +118,40 @@ fn rewrite_mcp_path(uri: &mut Uri, location: &ProxyPassLocation) {
     apply_upstream_path(uri, mcp_path, location.config.id_string.as_str());
 }
 
+/// A location with `strip_path` sends its upstream the target without the part of
+/// the path which picked the location (`crate::types::strip_location_path`) - the
+/// same target the h1 pipeline sends. The scheme and the authority of an absolute
+/// uri stay, as they do for an MCP location.
+///
+/// Returns the uri as the client sent it, when the location has `strip_path`.
+fn strip_location_path(uri: &mut Uri, location: &ProxyPassLocation) -> Option<Uri> {
+    if !location.config.strip_path {
+        return None;
+    }
+
+    let client_uri = uri.clone();
+
+    // An authority-form target (`CONNECT host:443`) has no path, and is a request of
+    // no location.
+    let path_and_query = client_uri.path_and_query()?;
+
+    let target = crate::types::strip_location_path(path_and_query.as_str(), &location.config.path);
+
+    apply_upstream_path(uri, &target, location.config.id_string.as_str());
+
+    Some(client_uri)
+}
+
 /// Swaps the uri's path-and-query for `upstream_path`, keeping everything else.
 /// On bad input the uri is left untouched and the reason is printed — forwarding
-/// the client's own path would silently 404 on the MCP upstream, so it must not
-/// happen quietly.
+/// the client's own path would silently 404 on the upstream (an MCP location's, or
+/// the one of a location with `strip_path`), so it must not happen quietly.
 fn apply_upstream_path(uri: &mut Uri, upstream_path: &str, location_id: &str) {
     let path_and_query = match upstream_path.parse::<hyper::http::uri::PathAndQuery>() {
         Ok(path_and_query) => path_and_query,
         Err(err) => {
             println!(
-                "MCP location [{}]: upstream path '{}' is not a valid path: {:?}",
+                "Location [{}]: upstream path '{}' is not a valid path: {:?}",
                 location_id, upstream_path, err
             );
             return;
@@ -141,7 +165,7 @@ fn apply_upstream_path(uri: &mut Uri, upstream_path: &str, location_id: &str) {
         Ok(rewritten) => *uri = rewritten,
         Err(err) => {
             println!(
-                "MCP location [{}]: can not apply upstream path '{}' to uri '{}': {:?}",
+                "Location [{}]: can not apply upstream path '{}' to uri '{}': {:?}",
                 location_id, upstream_path, uri, err
             );
         }
@@ -155,7 +179,29 @@ impl HttpRequestBuilder {
         Self { parts, body }
     }
 
+    /// The request to the upstream of `location`.
+    ///
+    /// `strip_path` is applied here, once, before the request takes one of its shapes
+    /// below: every one of them - an upgrade included - and every content source
+    /// reads the uri. `req_parts` keeps the uri the client sent: `${PATH_AND_QUERY}`
+    /// in a response header is the path and query of the client's request.
     pub async fn into_request(
+        mut self,
+        proxy_pass: &HttpProxyPass,
+        location: &ProxyPassLocation,
+    ) -> Result<TransformedRequest, ProxyPassError> {
+        let client_uri = strip_location_path(&mut self.parts.uri, location);
+
+        let mut request = self.into_upstream_request(proxy_pass, location).await?;
+
+        if let Some(client_uri) = client_uri {
+            request.req_parts.uri = client_uri;
+        }
+
+        Ok(request)
+    }
+
+    async fn into_upstream_request(
         self,
         proxy_pass: &HttpProxyPass,
         location: &ProxyPassLocation,

@@ -66,9 +66,11 @@ impl McpToolCall<LookupPoolInputData, LookupPoolResponse> for LookupPoolHandler 
 
         matches.extend(filter_h1(&APP_CTX.h1_tcp_pools, "h1_tcp", now, &id_match));
         matches.extend(filter_h1(&APP_CTX.h1_tls_pools, "h1_tls", now, &id_match));
+        #[cfg(unix)]
         matches.extend(filter_h1(&APP_CTX.h1_uds_pools, "h1_uds", now, &id_match));
         matches.extend(filter_h2(&APP_CTX.h2_tcp_pools, "h2_tcp", now, &id_match));
         matches.extend(filter_h2(&APP_CTX.h2_tls_pools, "h2_tls", now, &id_match));
+        #[cfg(unix)]
         matches.extend(filter_h2(&APP_CTX.h2_uds_pools, "h2_uds", now, &id_match));
 
         Ok(LookupPoolResponse {

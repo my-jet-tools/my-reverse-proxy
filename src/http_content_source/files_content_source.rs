@@ -343,7 +343,8 @@ mod tests {
             FilesContentSource::Local(LocalPathContentSrc::new("", Some("etc/hosts".to_string())));
         assert_eq!(get_file(&source, "/").await.status_code, 404);
 
-        // What the request would have read otherwise.
+        // What the request would have read otherwise. Windows has no /etc/hosts.
+        #[cfg(unix)]
         assert!(std::fs::read("/etc/hosts").is_ok());
     }
 

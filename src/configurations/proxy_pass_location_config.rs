@@ -25,6 +25,9 @@ pub struct ProxyPassLocationConfig {
     pub proxy_pass_to: ProxyPassToConfig,
     pub compress: bool,
     pub auth_header: Option<String>,
+    /// `strip_path` of the settings: the upstream gets the request target without the part of
+    /// the path which picked this location (`crate::types::strip_location_path`).
+    pub strip_path: bool,
 }
 
 /// Byte-for-byte comparison of the configured `auth_header` value against the
@@ -80,6 +83,7 @@ impl ProxyPassLocationConfig {
             domain_name: location_settings.domain_name.clone(),
             compress: location_settings.get_compress(),
             auth_header: location_settings.auth_header.clone(),
+            strip_path: location_settings.get_strip_path(),
         }
     }
     pub fn get_proxy_pass_to_as_string(&self) -> String {
@@ -242,6 +246,7 @@ impl ProxyPassLocationConfig {
                                     request_timeout: proxy_pass.request_timeout,
                                 });
                             }
+                            #[cfg(unix)]
                             rust_extensions::remote_endpoint::Scheme::UnixSocket => {
                                 let (pool_desc, pool_params, factory) = make_uds_h1_pool_factory(
                                     remote_host,
@@ -259,6 +264,12 @@ impl ProxyPassLocationConfig {
                                         request_timeout: proxy_pass.request_timeout,
                                     },
                                 );
+                            }
+                            // Not reached: compiling the settings refuses a unix socket upstream on
+                            // this platform.
+                            #[cfg(not(unix))]
+                            rust_extensions::remote_endpoint::Scheme::UnixSocket => {
+                                return unix_socket_not_supported();
                             }
                         }
                     }
@@ -374,6 +385,7 @@ impl ProxyPassLocationConfig {
                                     request_timeout: proxy_pass.request_timeout,
                                 });
                             }
+                            #[cfg(unix)]
                             rust_extensions::remote_endpoint::Scheme::UnixSocket => {
                                 let (pool_desc, pool_params, factory) = make_uds_h2_pool_factory(
                                     remote_host,
@@ -391,6 +403,12 @@ impl ProxyPassLocationConfig {
                                     },
                                 );
                             }
+                            // Not reached: compiling the settings refuses a unix socket upstream on
+                            // this platform.
+                            #[cfg(not(unix))]
+                            rust_extensions::remote_endpoint::Scheme::UnixSocket => {
+                                return unix_socket_not_supported();
+                            }
                         }
                     }
                 }
@@ -398,6 +416,7 @@ impl ProxyPassLocationConfig {
             ProxyPassToConfig::FilesPath(model) => {
                 HttpProxyPassContentSource::Files(FilesContentSource::new(model, timeout))
             }
+            #[cfg(unix)]
             ProxyPassToConfig::UnixHttp1(proxy_pass) => match &proxy_pass.remote_host {
                 // The gateway peer connects to a socket path itself: through a gateway a unix
                 // socket upstream is an ordinary one.
@@ -437,6 +456,7 @@ impl ProxyPassLocationConfig {
                     });
                 }
             },
+            #[cfg(unix)]
             ProxyPassToConfig::UnixHttp2(proxy_pass) => match &proxy_pass.remote_host {
                 // As for unix+http: the gateway peer connects to the socket path itself.
                 MyReverseProxyRemoteEndpoint::Gateway { id, remote_host } => {
@@ -491,9 +511,11 @@ impl ProxyPassLocationConfig {
         match &self.proxy_pass_to {
             ProxyPassToConfig::Http1(_) => Some(true),
             ProxyPassToConfig::McpHttp1(_) => Some(true),
+            #[cfg(unix)]
             ProxyPassToConfig::UnixHttp1(_) => Some(true),
             ProxyPassToConfig::Http2(_) => Some(false),
             ProxyPassToConfig::McpHttp2(_) => Some(false),
+            #[cfg(unix)]
             ProxyPassToConfig::UnixHttp2(_) => Some(false),
             ProxyPassToConfig::DynamicProxy(_) => Some(true),
             _ => None,
@@ -523,6 +545,7 @@ fn h1_tls_pool_name(host: &str, port: u16, location_id: i64) -> String {
     format!("h1s://{}:{}#{}", host, port, location_id)
 }
 
+#[cfg(unix)]
 fn h1_uds_pool_name(socket_path: &str, location_id: i64) -> String {
     format!("uds-h1://{}#{}", socket_path, location_id)
 }
@@ -535,6 +558,7 @@ fn h2_tls_pool_name(host: &str, port: u16, location_id: i64) -> String {
     format!("h2s://{}:{}#{}", host, port, location_id)
 }
 
+#[cfg(unix)]
 fn h2_uds_pool_name(socket_path: &str, location_id: i64) -> String {
     format!("uds-h2://{}#{}", socket_path, location_id)
 }
@@ -650,6 +674,7 @@ pub(crate) fn make_tls_h1_pool_factory(
     (desc, params, factory)
 }
 
+#[cfg(unix)]
 pub(crate) fn make_uds_h1_pool_factory(
     remote_host: &std::sync::Arc<rust_extensions::remote_endpoint::RemoteEndpointOwned>,
     debug: bool,
@@ -769,6 +794,7 @@ pub(crate) fn make_tls_h2_pool_factory(
     (desc, params, factory)
 }
 
+#[cfg(unix)]
 pub(crate) fn make_uds_h2_pool_factory(
     remote_host: &std::sync::Arc<rust_extensions::remote_endpoint::RemoteEndpointOwned>,
     debug: bool,
@@ -805,6 +831,23 @@ pub(crate) fn make_uds_h2_pool_factory(
         )
     });
     (desc, params, factory)
+}
+
+/// What a unix socket upstream is served by on a platform without unix sockets: a 502 which
+/// says why.
+#[cfg(not(unix))]
+fn unix_socket_not_supported() -> HttpProxyPassContentSource {
+    HttpProxyPassContentSource::Static(
+        crate::http_content_source::static_content::StaticContentSrc::new(std::sync::Arc::new(
+            StaticContentConfig {
+                status_code: 502,
+                content_type: Some("text/plain".to_string()),
+                body: crate::consts::UNIX_SOCKETS_NOT_SUPPORTED
+                    .as_bytes()
+                    .to_vec(),
+            },
+        )),
+    )
 }
 
 #[cfg(test)]

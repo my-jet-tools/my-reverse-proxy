@@ -1,0 +1,54 @@
+# Clippy and the tests on Linux, clippy and the build on Windows - the way fl-url checks a push.
+# The tests do not run on Windows. Not named test.yml: ci-utils `with_ci_test()` in build.rs would
+# overwrite that name with a Linux-only workflow.
+name: Checks
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Clippy and tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.15.2
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  build-windows:
+    name: Clippy and build (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.15.2
+        with:
+          toolchain: stable
+          components: clippy
+
+      # aws-lc-sys assembles with NASM on x86_64 Windows. When NASM is not on PATH, this makes it
+      # link the NASM objects it ships instead.
+      - name: Prebuilt NASM objects for aws-lc-sys
+        run: echo "AWS_LC_SYS_PREBUILT_NASM=1" >> "$GITHUB_ENV"
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build

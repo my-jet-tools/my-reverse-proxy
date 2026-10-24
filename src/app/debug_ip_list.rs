@@ -54,6 +54,7 @@ mod tests {
         let list = DebugIpList::new();
 
         assert!(!list.is_debug_ip(&tcp("10.0.0.5:5000")));
+        #[cfg(unix)]
         assert!(!list.is_debug_ip(&ConnectionIp::UnixSocket));
     }
 
@@ -66,6 +67,7 @@ mod tests {
         assert!(list.is_debug_ip(&tcp("[::1]:5000")));
         assert!(list.is_debug_ip(&tcp("[::ffff:10.0.0.5]:5000")));
         assert!(!list.is_debug_ip(&tcp("10.0.0.6:5000")));
+        #[cfg(unix)]
         assert!(!list.is_debug_ip(&ConnectionIp::UnixSocket));
     }
 

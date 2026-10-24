@@ -19,13 +19,24 @@ pub async fn compile_location_proxy_pass_to(
     // `proxy_pass_to` and differs only in which variant wraps it — the variant
     // is the only decision, so the parsing lives in one helper.
     let proxy_pass_to = match location_type {
+        #[cfg(unix)]
         LocationType::UnixSocketHttp => ProxyPassToConfig::UnixHttp1(
             compile_model(location_settings, settings_model, resolved, "unix+http").await?,
         ),
 
+        #[cfg(unix)]
         LocationType::UnixSocketHttp2 => ProxyPassToConfig::UnixHttp2(
             compile_model(location_settings, settings_model, resolved, "unix+http2").await?,
         ),
+
+        #[cfg(not(unix))]
+        LocationType::UnixSocketHttp | LocationType::UnixSocketHttp2 => {
+            return Err(unix_socket_upstream_is_refused(
+                listen_host,
+                &path,
+                location_settings,
+            ));
+        }
 
         LocationType::Http | LocationType::Https1 => ProxyPassToConfig::Http1(
             compile_model(location_settings, settings_model, resolved, "http").await?,
@@ -95,9 +106,46 @@ pub async fn compile_location_proxy_pass_to(
         ),
     };
 
+    // A unix socket upstream of a location of another type: a `unix+http://`, `http+unix://` or
+    // `unix://` URL, or a socket path behind a gateway.
+    #[cfg(not(unix))]
+    if let ProxyPassToConfig::Http1(model)
+    | ProxyPassToConfig::Http2(model)
+    | ProxyPassToConfig::McpHttp1(model)
+    | ProxyPassToConfig::McpHttp2(model) = &proxy_pass_to
+    {
+        if model.remote_host.is_unix_socket() {
+            return Err(unix_socket_upstream_is_refused(
+                listen_host,
+                &path,
+                location_settings,
+            ));
+        }
+    }
+
     let result = ProxyPassLocationConfig::new(path, location_settings, proxy_pass_to, listen_host);
 
     Ok(result)
+}
+
+/// A unix socket upstream - direct, or the target of a gateway - is refused on a platform without
+/// unix sockets: refused when its location compiles, only its endpoint fails to load, and says why.
+#[cfg(not(unix))]
+fn unix_socket_upstream_is_refused(
+    listen_host: &str,
+    path: &str,
+    location_settings: &LocationSettings,
+) -> String {
+    format!(
+        "Endpoint '{}', location '{}': proxy_pass_to '{}' is a unix socket: {}",
+        listen_host,
+        path,
+        location_settings
+            .proxy_pass_to
+            .as_deref()
+            .unwrap_or_default(),
+        crate::consts::UNIX_SOCKETS_NOT_SUPPORTED
+    )
 }
 
 /// Parses `proxy_pass_to` into the upstream model shared by every network

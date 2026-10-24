@@ -24,6 +24,7 @@ impl From<AcceptedServerConnection> for MyNetworkStream {
                 network_stream,
                 addr: _,
             } => MyNetworkStream::Tcp(network_stream),
+            #[cfg(unix)]
             AcceptedServerConnection::Unix(unix_stream) => MyNetworkStream::UnixSocket(unix_stream),
         }
     }
@@ -36,6 +37,7 @@ impl MyNetworkStream {
                 let result = tcp_stream.into_split();
                 (result.0.into(), result.1.into())
             }
+            #[cfg(unix)]
             MyNetworkStream::UnixSocket(unix_stream) => {
                 let result = unix_stream.into_split();
                 (result.0.into(), result.1.into())
@@ -50,6 +52,7 @@ impl From<tokio::net::TcpStream> for MyNetworkStream {
     }
 }
 
+#[cfg(unix)]
 impl From<tokio::net::UnixStream> for MyNetworkStream {
     fn from(val: tokio::net::UnixStream) -> Self {
         MyNetworkStream::UnixSocket(val)
@@ -188,7 +191,6 @@ impl NetworkStream for tokio::net::UnixStream {
     }
 }
 
-#[cfg(unix)]
 impl NetworkStream for my_ssh::SshAsyncChannel {
     type WritePart = tokio::io::WriteHalf<my_ssh::SshAsyncChannel>;
     type ReadPart = tokio::io::ReadHalf<my_ssh::SshAsyncChannel>;

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rust_extensions::{file_utils::FilePath, SliceOrVec};
+use rust_extensions::SliceOrVec;
 use tokio::io::AsyncReadExt;
 
 use crate::tcp_gateway::{
@@ -33,12 +33,10 @@ pub async fn serve_file(
             return;
         };
 
-        let file_path = FilePath::from_str(path.as_str());
-
         // A read which hangs - a stalled network file system - must not keep the slot either.
         let content = tokio::select! {
             _ = disconnected.cancelled() => return,
-            content = tokio::time::timeout_at(deadline, read_file_to_serve(file_path.as_str())) => content,
+            content = tokio::time::timeout_at(deadline, read_file_to_serve(path.as_str())) => content,
         };
 
         let Ok(content) = content else {
@@ -83,7 +81,13 @@ fn report_dropped(gateway_connection: &TcpGatewayConnection, path: &str) {
 /// a frame above its limit - a file too big for one frame is answered with an error instead.
 /// Only regular files are served, and the read itself is capped: the size a device or a procfs
 /// file reports says nothing about how much it yields.
+///
+/// The requester sends a leading `~` as it is: it is the home directory of this side, and when
+/// that is not known the file can not be read either.
 async fn read_file_to_serve(path: &str) -> Result<Vec<u8>, ()> {
+    let path = crate::settings::expand_home(path).map_err(|_| ())?;
+    let path = path.as_str();
+
     let metadata = tokio::fs::metadata(path).await.map_err(|_| ())?;
 
     if !metadata.is_file() {

@@ -8,10 +8,12 @@ use crate::{
 use super::*;
 
 pub enum HttpProxyPassContentSource {
+    #[cfg(unix)]
     UnixHttp1(UnixHttp1ContentSource),
     Http1(Http1ContentSource),
     Https1(Https1ContentSource),
     Http2(Http2ContentSource),
+    #[cfg(unix)]
     UnixHttp2(UnixHttp2ContentSource),
     Https2(Https2ContentSource),
     Http1OverGateway(Http1OverGatewayContentSource),
@@ -30,14 +32,16 @@ impl HttpProxyPassContentSource {
     /// send, and h2 needs no chunked framing to carry a body whose length is not
     /// known up front.
     pub fn can_stream_request_body(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::Http2(_)
-                | Self::Https2(_)
-                | Self::UnixHttp2(_)
-                | Self::Http2OverSsh(_)
-                | Self::Http2OverGateway(_)
-        )
+            | Self::Https2(_)
+            | Self::Http2OverSsh(_)
+            | Self::Http2OverGateway(_) => true,
+            // An arm of its own: a cfg can not be put on one alternative of a pattern.
+            #[cfg(unix)]
+            Self::UnixHttp2(_) => true,
+            _ => false,
+        }
     }
 
     /// Send a request whose body is forwarded frame by frame. Only reached for a
@@ -51,6 +55,7 @@ impl HttpProxyPassContentSource {
         match self {
             Self::Http2(model) => model.execute_streamed(req, content_size).await,
             Self::Https2(model) => model.execute_streamed(req, content_size).await,
+            #[cfg(unix)]
             Self::UnixHttp2(model) => model.execute_streamed(req, content_size).await,
             Self::Http2OverSsh(model) => model.execute_streamed(req, content_size).await,
             Self::Http2OverGateway(model) => model.execute_streamed(req, content_size).await,
@@ -64,7 +69,9 @@ impl HttpProxyPassContentSource {
     ) -> Result<HttpResponse, ProxyPassError> {
         match self {
             Self::Http1(model) => model.execute(req).await,
+            #[cfg(unix)]
             Self::UnixHttp2(model) => model.execute(req).await,
+            #[cfg(unix)]
             Self::UnixHttp1(model) => model.execute(req).await,
             Self::Https1(model) => model.execute(req).await,
             Self::Http2(model) => model.execute(req).await,

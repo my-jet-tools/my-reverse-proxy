@@ -59,8 +59,11 @@ const CLIENT_IS_LISTED: &[&str] = &["127.0.0.1"];
 
 const LOCATION_TOKEN: &str = "Bearer location-secret";
 
-/// The README, to take its own example from.
-const README: &str = include_str!("../../README.md");
+/// The README, to take its own example from - with `\n` line ends, which a checkout on Windows
+/// may have turned into `\r\n`.
+fn readme() -> String {
+    include_str!("../../README.md").replace("\r\n", "\n")
+}
 
 // ---------------------------------------------------------------------------------------------
 // The claim itself, on the README's own example
@@ -77,8 +80,8 @@ const README_IP_LIST: &str =
 /// is refused, and the upstream does not see it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn readme_location_example_on_https_refuses_an_address_which_is_not_in_the_list() {
-    assert!(README.contains(README_LOCATION_EXAMPLE));
-    assert!(README.contains(README_IP_LIST));
+    assert!(readme().contains(README_LOCATION_EXAMPLE));
+    assert!(readme().contains(README_IP_LIST));
 
     my_tls::install_default_crypto_providers();
 
@@ -779,7 +782,7 @@ const README_REDIRECT_EXAMPLE: &str = "  7700:\n    endpoint:\n      type: http\
 /// its `Location` there, and under `type: http2` as well.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn readme_redirect_example_redirects() {
-    assert!(README.contains(README_REDIRECT_EXAMPLE));
+    assert!(readme().contains(README_REDIRECT_EXAMPLE));
 
     let mut seen = Vec::new();
 

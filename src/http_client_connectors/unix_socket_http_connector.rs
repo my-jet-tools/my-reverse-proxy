@@ -21,7 +21,13 @@ impl MyHttpClientConnector<tokio::net::UnixStream> for UnixSocketHttpConnector {
 
     async fn connect(&self) -> Result<tokio::net::UnixStream, MyHttpClientError> {
         let host_port = self.remote_endpoint.get_host_port();
-        let socket_path = expand_tilde(host_port.as_str());
+        let socket_path = crate::settings::expand_home(host_port.as_str()).map_err(|err| {
+            MyHttpClientError::CanNotConnectToRemoteHost(format!(
+                "{}. Err:{}",
+                self.remote_endpoint.as_str(),
+                err
+            ))
+        })?;
 
         let connect_feature = tokio::net::UnixStream::connect(socket_path.as_str());
 
@@ -43,17 +49,4 @@ impl MyHttpClientConnector<tokio::net::UnixStream> for UnixSocketHttpConnector {
     ) -> tokio::net::UnixStream {
         read.unsplit(write)
     }
-}
-
-fn expand_tilde(path: &str) -> String {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}/{}", home.trim_end_matches('/'), stripped);
-        }
-    } else if path == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return home;
-        }
-    }
-    path.to_string()
 }

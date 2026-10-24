@@ -28,13 +28,13 @@ pub struct SettingsModel {
 
 impl SettingsModel {
     pub async fn load_async(file_name: Option<&str>) -> Result<Self, String> {
-        let file_name = resolve_file_name(file_name);
+        let file_name = resolve_file_name(file_name)?;
         let file_content = read_file_async(file_name.as_str()).await?;
         Self::from_yaml(file_name.as_str(), &file_content)
     }
 
     pub fn load(file_name: Option<&str>) -> Result<Self, String> {
-        let file_name = resolve_file_name(file_name);
+        let file_name = resolve_file_name(file_name)?;
         let file_content = read_file(file_name.as_str())?;
         Self::from_yaml(file_name.as_str(), &file_content)
     }
@@ -42,13 +42,13 @@ impl SettingsModel {
     /// Loads the dynamic settings file. A blank file (empty, or nothing but spaces
     /// and line breaks) is not parsed at all and yields `None` — it holds no data.
     pub async fn load_dynamic_async(file_name: &str) -> Result<Option<Self>, String> {
-        let file_name = resolve_file_name(Some(file_name));
+        let file_name = resolve_file_name(Some(file_name))?;
         let file_content = read_file_async(file_name.as_str()).await?;
         Self::from_dynamic_yaml(file_name.as_str(), &file_content)
     }
 
     pub fn load_dynamic(file_name: &str) -> Result<Option<Self>, String> {
-        let file_name = resolve_file_name(Some(file_name));
+        let file_name = resolve_file_name(Some(file_name))?;
         let file_content = read_file(file_name.as_str())?;
         Self::from_dynamic_yaml(file_name.as_str(), &file_content)
     }
@@ -86,11 +86,11 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-fn resolve_file_name(file_name: Option<&str>) -> String {
+fn resolve_file_name(file_name: Option<&str>) -> Result<String, String> {
     if let Some(file_name) = file_name {
-        rust_extensions::file_utils::format_path(file_name).to_string()
+        expand_home(file_name)
     } else {
-        format!("{}/{}", std::env::var("HOME").unwrap(), ".my-reverse-proxy")
+        settings_file_path()
     }
 }
 
@@ -152,6 +152,7 @@ mod tests {
                     trace_payload: None,
                     auth_header: None,
                     allowed_hosts: None,
+                    strip_path: None,
                     timeouts: TimeoutsSettings::default(),
                 }],
             },

@@ -25,9 +25,11 @@ impl MyTimerTick for GcPoolsTimer {
 
         APP_CTX.h1_tcp_pools.drain_unused(&desired.h1_tcp);
         APP_CTX.h1_tls_pools.drain_unused(&desired.h1_tls);
+        #[cfg(unix)]
         APP_CTX.h1_uds_pools.drain_unused(&desired.h1_uds);
         APP_CTX.h2_tcp_pools.drain_unused(&desired.h2_tcp);
         APP_CTX.h2_tls_pools.drain_unused(&desired.h2_tls);
+        #[cfg(unix)]
         APP_CTX.h2_uds_pools.drain_unused(&desired.h2_uds);
 
         RepeatTimerIteration::WithInterval
@@ -85,10 +87,12 @@ fn absorb_location(location: &ProxyPassLocationConfig, out: &mut DesiredKeys) {
     // we'd skip the location — leaving the pool orphaned and drained on the
     // next tick.
     let (family, model) = match &location.proxy_pass_to {
+        #[cfg(unix)]
         ProxyPassToConfig::UnixHttp1(_) => {
             out.h1_uds.insert(location_id);
             return;
         }
+        #[cfg(unix)]
         ProxyPassToConfig::UnixHttp2(_) => {
             out.h2_uds.insert(location_id);
             return;

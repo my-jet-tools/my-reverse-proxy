@@ -421,7 +421,9 @@ async fn https2_takes_an_http1_client_the_same_way() {
 /// the file system: the location has no files.
 #[tokio::test]
 async fn an_empty_folder_serves_nothing_on_either_path() {
-    // What a request would read with its path taken for the whole name of the file.
+    // What a request would read with its path taken for the whole name of the file. Windows
+    // has no /etc/hosts.
+    #[cfg(unix)]
     assert!(std::fs::read("/etc/hosts").is_ok());
 
     let endpoint = start_endpoint(ListenHttpEndpointType::Http1, "", "").await;
@@ -498,6 +500,97 @@ async fn a_file_is_not_served_past_the_location_which_guards_it() {
         let response = client.get(target).await;
         assert_eq!(response.status, 400, "{target}");
         assert!(!contains(&response.body, SITE_CSS), "{target}");
+    }
+}
+
+/// With `strip_path` a folder is served under a prefix: the request path without the path of the
+/// location is the path of the file in the folder, and the root of the prefix is the default
+/// file - on both paths of the proxy, and for a client of either version on hyper.
+/// `${PATH_AND_QUERY}` in a header of the answer is still the path the client asked for.
+#[tokio::test]
+async fn a_folder_is_served_under_a_prefix_with_strip_path() {
+    const SERVED: [(&str, &[u8]); 6] = [
+        ("/static/css/site.css", SITE_CSS),
+        ("/static/", INDEX_HTML),
+        ("/static/?v=1", INDEX_HTML),
+        ("/static/index.html?v=1", INDEX_HTML),
+        ("/STATIC/css/site.css", SITE_CSS),
+        ("/%73tatic/css/site.css", SITE_CSS),
+    ];
+
+    const NOT_SERVED: [(&str, u16); 4] = [
+        ("/static/../secret.txt", 400),
+        ("/static/%2e%2e/secret.txt", 400),
+        // The prefix is cut once: there is no `static` in the folder.
+        ("/static/static/css/site.css", 404),
+        ("/static/missing.html", 404),
+    ];
+
+    let site = TestSite::new();
+    let locations = format!(
+        "- path: /static/\n  proxy_pass_to: '{root}'\n  default_file: index.html\n  strip_path: true\n  \
+         modify_http_headers:\n    add:\n      response:\n      - name: x-client-path\n        value: ${{PATH_AND_QUERY}}\n",
+        root = site.root()
+    );
+
+    let endpoint = start_host(ListenHttpEndpointType::Http1, "", &locations).await;
+    let mut client = H1Client::connect(endpoint.port).await;
+
+    for (target, body) in SERVED {
+        let response = client.get(target).await;
+        assert_eq!(response.status, 200, "{target}");
+        assert_eq!(response.body, body, "{target}");
+        assert!(
+            response
+                .head
+                .contains(&format!("x-client-path: {target}\r\n")),
+            "{target}: {}",
+            response.head
+        );
+    }
+
+    for (target, status) in NOT_SERVED {
+        assert_eq!(client.get(target).await.status, status, "{target}");
+    }
+
+    let endpoint = start_host(ListenHttpEndpointType::Http2, "", &locations).await;
+    let mut client = H2Client::connect(endpoint.port).await;
+
+    for (target, body) in SERVED {
+        let response = client.get(target).await;
+        assert_eq!(response.status, 200, "{target}");
+        assert_eq!(response.body, body, "{target}");
+        assert_eq!(
+            response.headers.get("x-client-path").unwrap(),
+            target,
+            "{target}"
+        );
+    }
+
+    for (target, status) in NOT_SERVED {
+        assert_eq!(client.get(target).await.status, status, "{target}");
+    }
+
+    // An https2 endpoint takes an HTTP/1.1 client with hyper as well, whose uri is not an
+    // absolute one.
+    let endpoint = start_host(ListenHttpEndpointType::Https2, "", &locations).await;
+    let mut client = H1Client::connect_tls(endpoint.port).await;
+
+    for (target, body) in SERVED {
+        let response = client.get(target).await;
+        assert_eq!(response.status, 200, "{target}");
+        assert_eq!(response.body, body, "{target}");
+        assert!(
+            response
+                .head
+                .contains(&format!("x-client-path: {target}\r\n")),
+            "{target}: {}",
+            response.head
+        );
+    }
+
+    for (target, status) in NOT_SERVED {
+        assert_eq!(client.get(target).await.status, status, "{target}");
     }
 }
 
@@ -818,10 +911,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> H1Client<S> {
     async fn assert_closed(&mut self) {
         let mut buffer = [0u8; 4096];
 
-        let read = tokio::time::timeout(TIMEOUT, self.stream.read(&mut buffer))
+        let read = match tokio::time::timeout(TIMEOUT, self.stream.read(&mut buffer))
             .await
             .expect("the connection is still open")
-            .unwrap();
+        {
+            Ok(read) => read,
+            // A connection closed with bytes of the client unread is reset, and Windows reports
+            // the reset instead of the end of the stream: it is closed all the same.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                0
+            }
+            Err(err) => panic!("{err}"),
+        };
 
         self.received.extend_from_slice(&buffer[..read]);
 
@@ -836,6 +942,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> H1Client<S> {
 struct H2Response {
     status: u16,
     content_type: Option<String>,
+    headers: hyper::HeaderMap,
     body: Vec<u8>,
 }
 
@@ -893,6 +1000,7 @@ impl H2Client {
             .headers()
             .get(hyper::header::CONTENT_TYPE)
             .map(|value| value.to_str().unwrap().to_string());
+        let headers = response.headers().clone();
 
         let body = tokio::time::timeout(TIMEOUT, response.into_body().collect())
             .await
@@ -903,6 +1011,7 @@ impl H2Client {
         H2Response {
             status,
             content_type,
+            headers,
             body: body.to_vec(),
         }
     }

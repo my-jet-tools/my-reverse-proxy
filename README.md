@@ -15,6 +15,8 @@ HOME=/srv/proxy-b ./target/release/my-reverse-proxy
 On a settings-level error it refuses to start and prints the reason; a per-endpoint problem is reported through
 the API instead (see "How a failure is reported").
 
+On Windows, see "Running on Windows" at the end of this file.
+
 # Configuration Example
 
 File should be at `~/.my-reverse-proxy` location with yaml format:
@@ -23,6 +25,7 @@ File should be at `~/.my-reverse-proxy` location with yaml format:
 global_settings:
   http_control_port: 9000 # admin ui, REST API (/api/...), Swagger (/swagger) and MCP (/mcp) are
                           # served HERE - never on the ports under `hosts:`
+  http_control_ip: 127.0.0.1 # Optional: address of the control port, IPv4 or IPv6 (in quotes: "::1"); absent = 0.0.0.0 (see "Certificates provided at runtime")
   connection_settings:
     buffer_size: 512Kb # Buffer, which is allocated twice (read/write) per connection to pass traffic by
     connect_to_remote_timeout: 5000 # ms — timeout to connect to remote host (type: tcp endpoints)
@@ -161,6 +164,18 @@ from the admin ui or over the API, instead of being read from a file next to the
 
 Everything below is served on the **control port** (`global_settings.http_control_port`, `9000` in these
 examples) - the admin ui, `/api/...`, `/swagger` and `/mcp`. The ports under `hosts:` never serve it.
+
+Nothing on the control port asks for a login. It listens on every IPv4 address of the host (`0.0.0.0`) unless
+`global_settings.http_control_ip` names one; `127.0.0.1` keeps it to the host itself:
+
+```yaml
+global_settings:
+  http_control_port: 9000
+  http_control_ip: 127.0.0.1   # an IPv6 address in quotes: "::1"
+```
+
+A value that is not an ip address fails the settings load, the same way a wrong `debug_ip` does - the port does not
+fall back to every address.
 
 ### 1. Declare it
 
@@ -531,10 +546,11 @@ The folder is one on the other end of the gateway `gateway_name`. Through a gate
 
 Whatever the folder is - local, behind ssh or behind a gateway:
 
-- The request path is the path of the file inside the folder. The query string is not a part of it: `/index.html?v=1` serves `index.html`.
+- The request path is the path of the file inside the folder. The query string is not a part of it: `/index.html?v=1` serves `index.html`. To serve a folder under a prefix, give the location a `path` and `strip_path: true` (see [strip_path](#strip_path)): the request path without the prefix is then the path of the file.
 - `default_file` is served for the root: `/`, and `/?utm=x` as well. Without `default_file` the root is answered 404.
 - A path with a `..` segment is answered `400 Bad Request`, written as it is or percent-encoded - `/../x`, `/%2e%2e/x`, `/..%2fx`. So is a path with a control character in it - percent-encoded, or as it is where a request line can carry one. A request path does not get out of the folder.
 - A path with an empty segment or a `.` segment - `//x`, `/./x` - is answered `400 Bad Request` as well. To the file system it is the file `/x`, and a location is picked by the path as it is written: served, it would get the file past the location which guards `/x` - its `drop`, its `auth_header`. A file has one path.
+- On Windows a name has more spellings than these, and a path which uses one is answered `400 Bad Request` too: a segment which ends with `.` or a space (`/private./x` is `/private/x` to Windows), holds a `\` or a `:` (`/private\x`, `/private::$INDEX_ALLOCATION/x`), is a device name - `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, `CONIN$`, `CONOUT$`, with an extension or without - or has a `~` and a digit in it, the way a short 8.3 name ends (`/PRIVAT~1/x` for `private-files`). That is wider than a short name: `report~2.html` is refused as well. The check is made by a proxy which runs on Windows, for every folder it serves; a folder on a Windows host behind ssh or a gateway is read by that host, and a proxy on Linux does not make it. And it does not cover all: letters other than `a`-`z` are told apart by case by a location and not by the file system, and short names on other file systems (an SMB share) take other forms. On Windows, do not guard a subfolder of a served folder with a location of its own - serve it from a folder of its own.
 - It is the request path which is checked. A symbolic link inside the folder is followed wherever it points, a file whose name begins with a dot is served like any other, and `default_file` and the folder are taken from the settings as they are.
 - A file name is not percent-decoded: `/my%20file.txt` is a file named `my%20file.txt`, not `my file.txt`.
 - A file which is not there is answered 404. So is a path which is there and is not a file - a directory - and a name longer than the file system takes, behind ssh the same as in a local folder.
@@ -807,7 +823,9 @@ None tls connections can not infer which type of HTTP protocol endpoint supports
 
 ### How a request picks a location
 
-A request goes to the first location, in the order of the settings, whose `path` the request path starts with. The rules of that location - its `auth_header`, its `whitelisted_ip` - are the rules of the request, and the path goes on to the upstream as it was received.
+A request goes to the first location, in the order of the settings, whose `path` the request path starts with. The rules of that location - its `auth_header`, its `whitelisted_ip` - are the rules of the request, and the path goes on to the upstream as it was received, unless the location has `strip_path` (see [strip_path](#strip_path)).
+
+The match is by the start of the string, not by whole segments: the location `/a` takes `/ab/x` as well as `/a/x`. A `path` meant for a subtree should end with `/` - `/a/`.
 
 The paths are compared percent-decoded (one pass) and without the case of letters: `/%73ecure/x` is a request of the location `/secure`, the same as `/secure/x` and `/SECURE/x`. An upstream decodes a path, so a location picked by the path as it is written would let such a request past the rules of `/secure`. The query string is not a part of the path.
 
@@ -818,6 +836,56 @@ So a request is taken only when its path names the resource in one way. A path w
 - `..;` and `.;` - to an upstream which takes path parameters off first they are `..` and `.`.
 
 The last segment may be empty (`/api/`), dots inside a name are a part of the name (`/a..b`, `/.well-known/x`), and the query string is not looked at. The request is answered as an ordinary one: its body is read, the connection goes on, nothing is counted against the source ip.
+
+### strip_path
+
+By default the upstream gets the path the client sent. With `strip_path: true` it gets the path without the part the location was picked by:
+
+```yaml
+hosts:
+  9443:
+    endpoint:
+      type: https
+      ssl_certificate: mt_fleet
+    locations:
+    - path: /mt4-direct-live-1/
+      proxy_pass_to: http://127.0.0.1:8200
+      strip_path: true
+```
+
+- `/mt4-direct-live-1/metrics?x=1` goes to the upstream as `/metrics?x=1`, and `/mt4-direct-live-1/` as `/`. What is left always starts with `/`.
+- The query string is kept as it is.
+- The part which is cut is the part which matched (see [How a request picks a location](#how-a-request-picks-a-location)): `/MT4-Direct-Live-1/metrics` and `/%6Dt4-direct-live-1/metrics` go as `/metrics` too. What is left goes on as it was received, escapes and all: `/mt4-direct-live-1/a%2Fb` goes as `/a%2Fb`.
+- A `path` without a trailing `/` is cut the same way: the location `/mt4` sends `/mt4/metrics` as `/metrics` and `/mt4` as `/`, but also `/mt4x/metrics` as `/x/metrics`. End the `path` with `/`.
+- The cut may join what was on its two sides into a `..`, a `.` or an empty segment which the path did not have as it came: the location `/a` would send `/a..%2Fx` as `/..%2Fx` and `/a%2Fx` as `/%2Fx`. Such a request is answered `400 Bad Request`, like a path which came so. With a `path` which ends with `/` it does not happen.
+- The path of `proxy_pass_to` is not used, with or without `strip_path`: `proxy_pass_to: http://127.0.0.1:8200/base` sends `/metrics`, not `/base/metrics`. Only an `mcp` location uses that path (see [Mcp / Mcp-h2](#mcp--mcp-h2)).
+- `${PATH_AND_QUERY}` in a request header of `modify_http_headers` stays the path the client sent.
+
+It works for the location types which send the request on: `http`, `http2`, `unix+http`, `unix+http2` - direct, `ssh:...->http://...` and `gateway:<name>->http://...` - a `dynamic` location, and a folder of files. A folder is then served under a prefix: the location `/static/` serves `/static/css/a.css` from `<folder>/css/a.css`, and `/static/` is the `default_file`. It is the same on every type of http endpoint, for a WebSocket upgrade as well.
+
+The settings are refused at load time where `strip_path: true` has no meaning:
+
+- an `mcp` / `mcp-h2` location - every request goes to the path of its `proxy_pass_to`;
+- a `static` location - it answers by itself;
+- a `drop` location - it closes the connection;
+- any location of a `type: tcp` or a `type: mcp` endpoint - they forward bytes, there is no request path;
+- a `path` which, percent-decoded, is not UTF-8 text - the cut could fall inside a letter.
+
+What the upstream sends back is not rewritten. A redirect (`Location: /login`) or a cookie path (`Set-Cookie: ...; Path=/`) of the upstream reaches the client as it is, without the prefix: an upstream which is published under a prefix has to know it, or use relative links.
+
+A location with `strip_path` publishes every path of its upstream. When another location guards a part of the same upstream, the stripped one goes past it:
+
+```yaml
+    locations:
+    - path: /admin/
+      proxy_pass_to: http://127.0.0.1:5123
+      auth_header: "Bearer secret"
+    - path: /public/
+      proxy_pass_to: http://127.0.0.1:5123
+      strip_path: true
+```
+
+`/public/admin/x` is a request of `/public/`, which has no `auth_header`, and goes to the upstream as `/admin/x`.
 
 ### Http
 
@@ -1045,7 +1113,8 @@ Request flow:
    case-insensitive) together with the original request.
 2. The proxy parses the header value as a base URL, strips the `proxy-to`
    header, rewrites the request `Host` to the target host, and forwards the
-   original path + query as-is.
+   original path + query as-is (without the location path when the location
+   has `strip_path`, see [strip_path](#strip_path)).
 3. The proxy opens a **fresh HTTP/1.1 connection per request** (no pooling)
    using the parsed scheme — `http` / `ws` use plain TCP, `https` / `wss`
    use TLS with the system CA bundle.
@@ -2107,3 +2176,122 @@ contain everything you want to keep plus your changes.
 
 Diffing the two shows whether there are pending changes that a
 `reload_settings` would apply.
+
+# Running on Windows
+
+On Windows the proxy is built with the MSVC toolchain and reads the same settings. This section lists what differs
+from Linux.
+
+## Build prerequisites
+
+- Rust stable with the MSVC toolchain, `x86_64-pc-windows-msvc` - what `rustup` installs by default on Windows;
+- Visual Studio Build Tools 2017 or later with the "Desktop development with C++" workload (the MSVC compiler and
+  the Windows SDK) - it compiles the C code of `aws-lc-sys`, `ring`, `zstd-sys` and `lz4-sys`;
+- NASM on `PATH`, for `aws-lc-sys` - or set `AWS_LC_SYS_PREBUILT_NASM=1`, and it uses the NASM objects it ships;
+- Git, to get the repository.
+
+`my-ssh` 0.1.2, the version `Cargo.toml` names, does not build on Windows yet: it binds a unix socket for a port
+forward and reaches the ssh agent through a unix socket only. The Windows build needs a `my-ssh` tag with the fix for
+that, named in `Cargo.toml`.
+
+CMake is not needed: `aws-lc-sys` needs it only for its FIPS build, which is not used here.
+
+In PowerShell, from the repository root:
+
+```powershell
+$env:AWS_LC_SYS_PREBUILT_NASM = '1'   # only when NASM is not on PATH
+cargo build --release
+.\target\release\my-reverse-proxy.exe
+```
+
+In cmd it is `set AWS_LC_SYS_PREBUILT_NASM=1`, then the same `cargo build --release` and
+`target\release\my-reverse-proxy.exe`.
+
+A release tag also builds it on GitHub: the release of the tag gets
+`my-reverse-proxy-<tag>-x86_64-pc-windows-msvc.exe`.
+
+## Working directory
+
+The admin ui (`wwwroot\`) and the IPv6 country database (`ip_v6\`) are read relative to the working directory, as
+in the Docker image. Start the exe from the repository root, or copy both folders into the folder you start it
+from. With the exe of a release, take them from the repository at the same tag.
+
+## Settings file location
+
+The settings are read from `%HOME%\.my-reverse-proxy` when `HOME` is set, otherwise from
+`%USERPROFILE%\.my-reverse-proxy` (`C:\Users\<name>\.my-reverse-proxy`). A leading `~` in the settings is the same
+folder. When neither variable is set, the proxy does not start: it prints why and exits.
+
+A second instance is started by pointing `HOME` somewhere else, as on Linux. In PowerShell (this sets `HOME` for
+the rest of that window):
+
+```powershell
+$env:HOME = 'C:\proxy-b'; .\my-reverse-proxy.exe
+```
+
+In cmd:
+
+```bat
+set HOME=C:\proxy-b
+my-reverse-proxy.exe
+```
+
+A local path in the settings - a certificate, a key, a folder of files - can be written either way:
+`C:\certs\cert.pem` or `C:/certs/cert.pem`. A path behind `ssh:` or a gateway is a path of the other host, written
+the way that host writes it. Write a path with
+`\` without quotes or in single quotes - in double quotes YAML reads `\` as an escape.
+
+## What is not available on Windows
+
+Unix sockets:
+
+- listening on a unix socket (a `hosts:` key that is a path);
+- `unix+http` and `unix+http2` locations;
+- `unix+http://`, `http+unix://` and `unix://` upstreams;
+- a gateway target on a unix socket.
+
+Such an endpoint is refused when the settings load, with `unix sockets are not supported on this platform`. It is
+reported like any other endpoint error - in the log and in `errors` of `GET /api/configuration/Current` - and the
+other endpoints run.
+
+## Other differences
+
+- An ssh connection with no password or key under `ssh:` uses the ssh agent (see "Settings up SSH tunnels"). On
+  Windows that is the OpenSSH agent's named pipe, `\\.\pipe\openssh-ssh-agent`, or the pipe `SSH_AUTH_SOCK`
+  names.
+- A files location answers `400 Bad Request` to the paths Windows reads as another name - `/private./x`,
+  `/private\x`, `/CON` - see "How a request picks a file".
+- Ctrl+C stops the proxy. Running it as a Windows service is not covered here.
+
+## Example: local exporters behind one https port
+
+Prometheus scrapes exporters which listen on `127.0.0.1:8200`, `127.0.0.1:8201`, ... through one https port, one
+path each. `strip_path: true` cuts the path of the location off, so `/mt4-direct-live-1/metrics` reaches the
+exporter as `/metrics` (see `strip_path` under "Location types").
+
+```yaml
+global_settings:
+  http_control_port: 9000
+  http_control_ip: 127.0.0.1   # the admin ui and the API for this machine only
+
+hosts:
+  9443:
+    endpoint:
+      type: https
+      ssl_certificate: mt_fleet
+    locations:
+    - path: /mt4-direct-live-1/
+      proxy_pass_to: http://127.0.0.1:8200
+      strip_path: true
+    - path: /mt4-direct-live-2/
+      proxy_pass_to: http://127.0.0.1:8201
+      strip_path: true
+
+ssl_certificates:
+  - id: mt_fleet
+    certificate: C:\certs\mt_fleet.pem
+    private_key: C:\certs\mt_fleet.key
+```
+
+Prometheus then scrapes `https://<host>:9443/mt4-direct-live-1/metrics`,
+`https://<host>:9443/mt4-direct-live-2/metrics` and so on.

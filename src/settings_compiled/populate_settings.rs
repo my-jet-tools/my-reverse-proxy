@@ -218,6 +218,7 @@ impl SettingsCompiled {
     ) -> Result<(), String> {
         if let Some(itm) = settings_model.global_settings.take() {
             itm.get_debug_ip()?;
+            itm.get_http_control_ip()?;
 
             self.global_settings = Some(GlobalSettings {
                 connection_settings: itm.connection_settings,
@@ -233,6 +234,7 @@ impl SettingsCompiled {
                 },
                 show_error_description_on_error_page: itm.show_error_description_on_error_page,
                 http_control_port: itm.http_control_port,
+                http_control_ip: itm.http_control_ip,
                 default_h2_livness_url: itm.default_h2_livness_url,
                 ip_blocklist_white_list: itm.ip_blocklist_white_list,
                 debug_ip: itm.debug_ip,
@@ -416,7 +418,7 @@ async fn load_includes(
     // The dynamic settings file is merged like an include, but it is allowed to be
     // missing (it may not have been written yet via MCP) or blank — then it adds nothing.
     if let Some(dynamic_file) = settings_model.dynamic_configurations_file.as_ref() {
-        if dynamic_configurations_file_exists(dynamic_file) {
+        if dynamic_configurations_file_exists(dynamic_file)? {
             if let Some(settings) =
                 crate::settings::SettingsModel::load_dynamic_async(dynamic_file.as_str()).await?
             {
@@ -443,7 +445,7 @@ fn load_includes_block(
     // The dynamic settings file is merged like an include, but it is allowed to be
     // missing (it may not have been written yet via MCP) or blank — then it adds nothing.
     if let Some(dynamic_file) = settings_model.dynamic_configurations_file.as_ref() {
-        if dynamic_configurations_file_exists(dynamic_file) {
+        if dynamic_configurations_file_exists(dynamic_file)? {
             if let Some(settings) =
                 crate::settings::SettingsModel::load_dynamic(dynamic_file.as_str())?
             {
@@ -455,9 +457,9 @@ fn load_includes_block(
     Ok(result)
 }
 
-fn dynamic_configurations_file_exists(file_name: &str) -> bool {
-    let path = rust_extensions::file_utils::format_path(file_name).to_string();
-    std::path::Path::new(path.as_str()).exists()
+fn dynamic_configurations_file_exists(file_name: &str) -> Result<bool, String> {
+    let path = crate::settings::expand_home(file_name)?;
+    Ok(std::path::Path::new(path.as_str()).exists())
 }
 
 fn compile_locations(
@@ -485,6 +487,7 @@ fn compile_locations(
             trace_payload: location.trace_payload,
             auth_header: variables.apply_variables_opt(location.auth_header)?,
             allowed_hosts: location.allowed_hosts,
+            strip_path: location.strip_path,
             timeouts: location.timeouts,
         });
     }
@@ -547,6 +550,39 @@ mod tests {
         assert_eq!(
             hosts,
             vec!["localhost:8001", "localhost:8002", "localhost:8003"]
+        );
+    }
+
+    /// The control port would listen on every address if a typo were taken for no value: the
+    /// settings are refused instead.
+    #[test]
+    fn an_http_control_ip_which_is_not_an_address_refuses_the_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "my-reverse-proxy-http-control-ip-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let main = dir.join("main.yaml");
+        std::fs::write(
+            &main,
+            "global_settings:\n  http_control_port: 9000\n  http_control_ip: 127.0.0.l\n",
+        )
+        .unwrap();
+
+        let settings_model = SettingsModel::load(Some(main.to_str().unwrap())).unwrap();
+        let include_settings = load_includes_block(&settings_model).unwrap();
+
+        let mut compiled = SettingsCompiled::default();
+        let err = compiled
+            .populate(settings_model, include_settings)
+            .unwrap_err();
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            err,
+            "global_settings.http_control_ip: '127.0.0.l' is not a valid ip address"
         );
     }
 }

@@ -166,6 +166,20 @@ impl HttpProxyPass {
 
             let proxy_pass_location = inner.locations.find(&location_index);
 
+            // The cut of `strip_path` can join its two sides into a segment the path did
+            // not have as it came - the location `/a` leaves `/..%2Fx` of `/a..%2Fx`.
+            // Refused as such a path is above, the same as on the h1 pipeline.
+            if proxy_pass_location.config.strip_path
+                && crate::types::has_ambiguous_segment(&crate::types::strip_location_path(
+                    req.uri().path(),
+                    &proxy_pass_location.config.path,
+                ))
+            {
+                return Ok(Ok(
+                    crate::http_content_source::RequestExecutorResult::bad_request().into(),
+                ));
+            }
+
             // The location's own IP allow-list: before `auth_header`, and before
             // anything of the request body is read.
             if !proxy_pass_location
@@ -310,6 +324,7 @@ impl HttpProxyPass {
                         )
                     }
 
+                    #[cfg(unix)]
                     super::content_source::WebSocketUpgradeStream::UnixStream(unix_stream) => {
                         spawn_websocket_pump(
                             request.web_socket_upgrade,

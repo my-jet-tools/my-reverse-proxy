@@ -159,18 +159,21 @@ Important properties:
   Locations should be ordered with the most specific paths **first** in
   the config; otherwise a generic `/` match will shadow more specific
   ones.
-- **Case-insensitive** prefix match.
+- **Case-insensitive** prefix match (ASCII letters only).
+- **A prefix of the string, not of a segment**: the location `/a` takes
+  `/ab/x` as well. A `path` meant for a subtree should end with `/`.
 - Only the path is compared: `is_path_of_location`
-  (`src/types/request_path.rs:63`) cuts the request target at the first
+  (`src/types/request_path.rs:65`) cuts the request target at the first
   `?` or `#`, so a query never affects routing.
 - **Percent-decoded**: the path and the location's `path` are both
   decoded once before they are compared, so `/%73ecure/x` is a request
-  of the location `/secure`. The path sent upstream stays as received.
+  of the location `/secure`. The path sent upstream stays as received —
+  unless the location has `strip_path` (below).
 - A path with a `..`, a `.` or an empty segment (an empty last segment,
   `/api/`, is fine) — written as it is or percent-encoded — is answered
   `400 Bad Request` before a location is looked for, on both HTTP paths
-  (`has_ambiguous_segment`, `src/types/request_path.rs:21`;
-  `src/h1_proxy_server/pipeline/reader.rs:338-370`,
+  (`has_ambiguous_segment`, `src/types/request_path.rs:22`;
+  `src/h1_proxy_server/pipeline/reader.rs:338-358`,
   `src/http_proxy_pass/http_proxy_pass.rs:102-110`).
 - A request on `/` matches a location with `path: "/"` only. On the h1
   pipeline an empty request target is refused when the request line is
@@ -195,12 +198,42 @@ After match, the request is filtered/transformed by:
   The request's `Host` header is not changed. Applied on both HTTP paths;
   on the h1 pipeline it is also a part of the pool key.
 - `compress` — gzips the request body sent to the upstream, when it is
-  2048 bytes or more (`src/http_proxy_pass/http_request_builder.rs:618`).
+  2048 bytes or more (`src/http_proxy_pass/http_request_builder.rs:664`).
   The hyper path only: the h1 pipeline does not read it. Do not enable
   for `type: mcp` — see `docs/mcp.md`.
 - `trace_payload` — read from the settings, but not used: the hyper
   path's websocket pump traces payloads when the location's runtime debug
-  flag is on (`src/http_proxy_pass/http_proxy_pass.rs:297`).
+  flag is on (`src/http_proxy_pass/http_proxy_pass.rs:311`).
+- `strip_path` — the upstream gets the request target without the part
+  of the path the location was picked by: `strip_location_path`
+  (`src/types/request_path.rs:92`) cuts the raw target where the decoded,
+  case-insensitive match of `is_path_of_location` ends, and keeps the
+  rest — escapes and the query — as received, after a leading `/`. Both
+  HTTP paths apply it once, right where the target is decided, so every
+  transport and request shape gets it:
+  - h1 pipeline: the reader computes it right after the location is
+    found (`src/h1_proxy_server/pipeline/reader.rs:401`) and passes it to
+    `H1Reader::compile_headers` as `request_target`, in place of the MCP
+    path. The worker and its replays, the WebSocket tunnel and the files
+    answer all read the compiled head.
+  - hyper path: `HttpRequestBuilder::into_request`
+    (`src/http_proxy_pass/http_request_builder.rs:188`) rewrites the
+    path-and-query of the uri before it branches; an absolute uri stays
+    absolute. `req_parts` keeps the client's uri, so `${PATH_AND_QUERY}`
+    in a response header is the client's path; request headers are
+    filled before (`process_headers`).
+
+  A stripped path with an ambiguous segment — the cut joined its two
+  sides, as the location `/a` does with `/a..%2Fx` — is answered `400 Bad
+  Request` right after the location is found
+  (`src/h1_proxy_server/pipeline/reader.rs:412`,
+  `src/http_proxy_pass/http_proxy_pass.rs:172`). It is refused at load
+  time where it has no meaning: on `mcp` / `mcp-h2`, `static` and `drop`
+  locations, on every location of a `type: mcp` endpoint, and on a
+  location path which, decoded, is not UTF-8
+  (`src/scripts/compile_http_configuration.rs:159`); on any location of
+  a `type: tcp` endpoint (`TcpEndpointHostConfig::new`). The path of
+  `proxy_pass_to` plays no part in it.
 
 ---
 
@@ -219,7 +252,7 @@ takes a connection from the pool (`H1PoolHolder::acquire`,
 `src/h1_remote_connection/h1_pool_holder.rs`), sends the head and the
 body, and reads the response itself. A connection the pool does not have
 is dialled by `Upstream::connect_owned`
-(`src/h1_remote_connection/upstream.rs:47`), which builds the right
+(`src/h1_remote_connection/upstream.rs:48`), which builds the right
 `UpstreamInner` and handles network upstreams only. See "Upstream
 lifecycle per variant" below.
 
@@ -243,11 +276,13 @@ Plain HTTP/1 reverse proxy. Sub-cases by `remote_host`:
   `UpstreamInner::Http1OverGateway` (HTTP/1 forwarded through a
   pre-existing MyJetTools gateway connection).
 
-The first line is forwarded as received; the headers go through
-`H1Reader::compile_headers` (`modify_http_headers` of the endpoint and
-the location, `X-Forwarded-For`); the body is streamed. The worker reads
-the response and streams it to the client-writer task as
-`ResponseEvent`s.
+The first line is forwarded as received — for a location with
+`strip_path`, with the target without the location path in it (see
+"Per-location settings"); the path of `proxy_pass_to` is not used either
+way. The headers go through `H1Reader::compile_headers`
+(`modify_http_headers` of the endpoint and the location,
+`X-Forwarded-For`); the body is streamed. The worker reads the response
+and streams it to the client-writer task as `ResponseEvent`s.
 
 ### `McpHttp1(ProxyPassToModel)`
 
@@ -278,7 +313,7 @@ endpoints (`tcp_listener::http2::handle_connection`) and `https2`
 endpoints (`serve_https2` in `src/tcp_listener/https/handle_connection.rs`).
 The h1 pipeline has no h2 upstream: under an `http` / `https` endpoint
 `Upstream::connect_owned` returns an error for it
-(`src/h1_remote_connection/upstream.rs:193-202`), and the worker answers
+(`src/h1_remote_connection/upstream.rs:195-209`), and the worker answers
 503 "remote resource is not available". Nothing refuses an `http2`
 location under an http/1 endpoint at load time.
 
@@ -292,10 +327,10 @@ HTTP/1 over a unix domain socket. `Direct { remote_host }` connects to
 the socket (`UpstreamInner::Http1UnixSocket`). `Gateway` is an ordinary
 gateway upstream (`UpstreamInner::Http1OverGateway`): the peer connects
 to the socket path itself. `OverSsh` is not supported: `connect_owned`
-returns an error for it (`src/h1_remote_connection/upstream.rs:189-191`),
+returns an error for it (`src/h1_remote_connection/upstream.rs:191-193`),
 which the worker answers with a 503, and on the hyper path
 `create_data_source` panics on it
-(`src/configurations/proxy_pass_location_config.rs:412-422`).
+(`src/configurations/proxy_pass_location_config.rs:431-441`).
 
 ### `UnixHttp2(ProxyPassToModel)`
 
@@ -303,8 +338,21 @@ HTTP/2 over a unix socket. Hyper path only, like `Http2`:
 `HttpProxyPassContentSource::UnixHttp2` for `Direct`, `Http2OverGateway`
 for `Gateway` (the peer connects to the socket path itself), and a panic
 in `create_data_source` for `OverSsh`
-(`src/configurations/proxy_pass_location_config.rs:450-459`). On the h1
+(`src/configurations/proxy_pass_location_config.rs:470-479`). On the h1
 pipeline `connect_owned` returns an error for it, as for `Http2`.
+
+Both variants, and everything which carries a unix socket, are built on
+unix only. On a platform without unix sockets (Windows) compiling the
+settings refuses each unix socket with `unix sockets are not supported on
+this platform`: a `hosts:` key which is a socket path
+(`src/scripts/compile_host_configuration.rs`), a location of `type:
+unix+http` / `unix+http2` - written or read from `proxy_pass_to` - and a
+`unix+http://`, `http+unix://` or `unix://` upstream of any other type
+(`src/scripts/compile_location_proxy_pass_to.rs`), and a `type: tcp`
+endpoint to one (`src/configurations/tcp_endpoint_host_config.rs`). A
+socket path behind a gateway is refused as well, although it is the peer
+which would connect to it. The endpoint is not loaded, and the error is
+reported as any other compile error of an endpoint.
 
 ### `FilesPath(ProxyPassFilesPathModel)`
 
@@ -333,7 +381,9 @@ paths go through it:
 
 Per request:
 
-1. The request path, without the query string, is checked by
+1. The request path, without the query string — with `strip_path`,
+   without the location path: `/static/` serves `/static/css/a.css` as
+   `/css/a.css`, and `/static/` as the root — is checked by
    `FileRequestPath::parse`
    (`src/http_content_source/file_request_path.rs`). It has to start with
    `/`, and to hold no `..` segment and no control character — written as
@@ -366,7 +416,7 @@ bytes). No upstream connection at all. On the h1 pipeline the reader
 builds the response itself (`Http1ResponseBuilder`, plus what
 `modify_http_headers` of the endpoint and the location add to a
 response), drains the request body and queues the response — no worker,
-no pool (`src/h1_proxy_server/pipeline/reader.rs:580-604`). A `HEAD` gets
+no pool (`src/h1_proxy_server/pipeline/reader.rs:600-624`). A `HEAD` gets
 the head only. On the hyper path it is `HttpProxyPassContentSource::Static`.
 
 ---
@@ -376,7 +426,7 @@ the head only. On the hyper path it is `HttpProxyPassContentSource::Static`.
 How upstream connections are held on the h1 pipeline: in a pool per
 client connection, `H1PoolHolder::new_local()`
 (`src/h1_proxy_server/pipeline/reader.rs:121`), keyed by
-`connection_key` (`src/h1_remote_connection/upstream_state.rs:23`) and
+`connection_key` (`src/h1_remote_connection/upstream_state.rs:24`) and
 keeping at most one idle connection per key. A worker takes a connection
 out (`acquire`) for one request and gives it back (`release`) only when
 the response was self-delimiting (`Content-Length` or chunked), nothing
@@ -497,7 +547,7 @@ fallback applies and the request resolves to that single endpoint.
 - `src/h1_proxy_server/h1_read_part.rs` — Stage 2/3 plumbing for h1
   (`try_find_endpoint_info`, `find_location`).
 - `src/types/request_path.rs` — `is_path_of_location`,
-  `has_ambiguous_segment`.
+  `has_ambiguous_segment`, `strip_location_path`.
 - `src/h1_proxy_server/pipeline/reader.rs` — request loop: endpoint and
   location, `Drop` / `Static` / `FilesPath` / refused paths answered in
   place, a worker spawned for the rest; owns the connection's pool.
@@ -514,10 +564,13 @@ fallback applies and the request resolves to that single endpoint.
 - `src/h1_remote_connection/upstream_state.rs` — `connection_key` (the
   pool key) and `mcp_path`.
 - `src/http_proxy_pass/` — the hyper path of `http2` / `https2`
-  endpoints.
+  endpoints; `http_request_builder.rs` builds the upstream request, the
+  `strip_path` and MCP rewrites of its uri included.
 - `src/scripts/compile_http_configuration.rs` — location combinations
   refused at load time (MCP through a gateway, `mcp-h2` under an http/1
-  endpoint).
+  endpoint, `strip_path` where it has no meaning).
+- `src/configurations/tcp_endpoint_host_config.rs` — a `type: tcp`
+  endpoint, `strip_path` on any of its locations refused.
 - `src/configurations/proxy_pass_to_config.rs` — the `ProxyPassToConfig`
   enum itself.
 - `src/scripts/merge_http_configuration_with_existing_port.rs` —

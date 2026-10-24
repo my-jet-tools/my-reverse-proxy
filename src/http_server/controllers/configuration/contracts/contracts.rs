@@ -134,6 +134,7 @@ impl CurrentConfigurationHttpModel {
         for (name, ready, _total) in crate::app::APP_CTX.h1_tls_pools.snapshot() {
             remote_connections.insert(name, ready);
         }
+        #[cfg(unix)]
         for (name, ready, _total) in crate::app::APP_CTX.h1_uds_pools.snapshot() {
             remote_connections.insert(name, ready);
         }
@@ -143,6 +144,7 @@ impl CurrentConfigurationHttpModel {
         for (name, ready, _total) in crate::app::APP_CTX.h2_tls_pools.snapshot() {
             remote_connections.insert(name, ready);
         }
+        #[cfg(unix)]
         for (name, ready, _total) in crate::app::APP_CTX.h2_uds_pools.snapshot() {
             remote_connections.insert(name, ready);
         }
@@ -356,6 +358,7 @@ impl HttpEndpointInfoModel {
                 pool_alive: None,
                 pool_total: None,
                 last_status: None,
+                strip_path: false,
             }],
             allowed_user_list_id: None,
             ssl_cert_id: None,
@@ -401,6 +404,8 @@ pub struct HttpProxyPassLocationModel {
     pub pool_alive: Option<usize>,
     pub pool_total: Option<usize>,
     pub last_status: Option<i64>,
+    // The location has `strip_path`: its path is cut off the request before it goes upstream.
+    pub strip_path: bool,
 }
 
 impl HttpProxyPassLocationModel {
@@ -424,6 +429,7 @@ impl HttpProxyPassLocationModel {
             pool_alive,
             pool_total,
             last_status,
+            strip_path: src.strip_path,
         }
     }
 }
@@ -436,6 +442,7 @@ fn lookup_pool_state(location_id: i64) -> Option<(usize, usize, UpstreamStatus)>
     if let Some(p) = ctx.h1_tls_pools.get(location_id) {
         return Some((p.alive_count(), p.total_count(), p.last_status()));
     }
+    #[cfg(unix)]
     if let Some(p) = ctx.h1_uds_pools.get(location_id) {
         return Some((p.alive_count(), p.total_count(), p.last_status()));
     }
@@ -445,8 +452,56 @@ fn lookup_pool_state(location_id: i64) -> Option<(usize, usize, UpstreamStatus)>
     if let Some(p) = ctx.h2_tls_pools.get(location_id) {
         return Some((p.alive_count(), p.total_count(), p.last_status()));
     }
+    #[cfg(unix)]
     if let Some(p) = ctx.h2_uds_pools.get(location_id) {
         return Some((p.alive_count(), p.total_count(), p.last_status()));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{settings::HostSettings, settings_compiled::SettingsCompiled};
+
+    #[tokio::test]
+    async fn a_location_model_shows_whether_the_location_has_strip_path() {
+        let host_settings: HostSettings = serde_yaml::from_str(
+            [
+                "endpoint:",
+                "  type: http",
+                "locations:",
+                "- path: /stripped/",
+                "  proxy_pass_to: http://127.0.0.1:9000",
+                "  strip_path: true",
+                "- path: /",
+                "  proxy_pass_to: http://127.0.0.1:9001",
+            ]
+            .join("\n")
+            .as_str(),
+        )
+        .unwrap();
+
+        let endpoint_info = crate::scripts::compile_http_configuration(
+            &SettingsCompiled::default(),
+            EndpointHttpHostString::new("localhost:8000".to_string()).unwrap(),
+            &host_settings,
+            ListenHttpEndpointType::Http1,
+        )
+        .await
+        .unwrap();
+
+        let locations: Vec<_> = endpoint_info
+            .locations
+            .iter()
+            .map(HttpProxyPassLocationModel::new)
+            .collect();
+
+        assert!(locations[0].strip_path);
+        assert!(!locations[1].strip_path);
+
+        // The field as the UI reads it.
+        let json = serde_json::to_value(&locations[0]).unwrap();
+        assert_eq!(json["strip_path"], serde_json::Value::Bool(true));
+    }
 }

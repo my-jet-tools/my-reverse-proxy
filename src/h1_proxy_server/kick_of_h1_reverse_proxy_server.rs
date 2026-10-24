@@ -89,6 +89,7 @@ pub fn kick_h1_tcp_reverse_proxy_server_from_http(
     );
 }
 
+#[cfg(unix)]
 pub fn kick_h1_unix_reverse_proxy_server_from_http(
     accepted_connection: tokio::net::UnixStream,
     listen_config: Arc<HttpListenPortConfiguration>,

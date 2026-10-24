@@ -58,6 +58,27 @@ impl MyReverseProxyRemoteEndpoint {
             }
         }
     }
+    /// Whether the upstream is a unix socket: a `unix+http://`, `http+unix://` or `unix://` URL,
+    /// or - through a gateway, whose far side connects to a socket path it is given - the bare
+    /// path of a socket file.
+    #[cfg(not(unix))]
+    pub fn is_unix_socket(&self) -> bool {
+        let is_unix_socket_url = |remote_host: &RemoteEndpointOwned| {
+            matches!(
+                remote_host.get_scheme(),
+                Some(rust_extensions::remote_endpoint::Scheme::UnixSocket)
+            )
+        };
+
+        match self {
+            MyReverseProxyRemoteEndpoint::Gateway { remote_host, .. } => {
+                is_unix_socket_url(remote_host) || remote_host.as_str().starts_with('/')
+            }
+            MyReverseProxyRemoteEndpoint::OverSsh { .. } => false,
+            MyReverseProxyRemoteEndpoint::Direct { remote_host } => is_unix_socket_url(remote_host),
+        }
+    }
+
     pub async fn try_parse(
         remote_host: &str,
         settings_model: &SettingsCompiled,
@@ -65,7 +86,10 @@ impl MyReverseProxyRemoteEndpoint {
         if remote_host.starts_with(GATEWAY_PREFIX) {
             MyReverseProxyRemoteEndpoint::try_parse_gateway_source(remote_host)
         } else {
-            let over_ssh_connection = OverSshConnectionSettings::try_parse(remote_host);
+            // On Windows `C:/www` is a local folder as `C:\www` is. A path behind ssh is never
+            // taken for one: a source which starts with `ssh` does not start with a drive.
+            let remote_host = super::drive_path_with_backslashes(remote_host);
+            let over_ssh_connection = OverSshConnectionSettings::try_parse(remote_host.as_ref());
 
             if over_ssh_connection.is_none() {
                 return Err(format!("Invalid remote host {}", remote_host));
@@ -156,4 +180,24 @@ fn get_gateway_id(src: &str) -> Result<&str, String> {
     let result = &src[index + 1..];
 
     Ok(result)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// `RemoteEndpoint` refuses `C:/www` - a scheme `C` - and reads `C:\www` as a path.
+    #[tokio::test]
+    async fn a_drive_path_written_with_slashes_is_a_local_folder() {
+        let endpoint =
+            MyReverseProxyRemoteEndpoint::try_parse("C:/www/site", &SettingsCompiled::default())
+                .await
+                .unwrap();
+
+        let MyReverseProxyRemoteEndpoint::Direct { remote_host } = &endpoint else {
+            panic!("{endpoint}");
+        };
+
+        assert_eq!(remote_host.as_str(), r"C:\www\site");
+    }
 }

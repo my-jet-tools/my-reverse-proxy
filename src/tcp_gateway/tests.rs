@@ -418,6 +418,38 @@ async fn a_unix_socket_upstream_is_reachable_through_the_gateway() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Without unix sockets the far side refuses a socket path and says why, and the gateway
+/// connection goes on serving.
+#[cfg(not(unix))]
+#[tokio::test]
+async fn a_unix_socket_upstream_is_refused_by_the_far_side() {
+    let gateway = Gateway::start("unix-upstream-refused", false).await;
+
+    let endpoint = Arc::new(
+        RemoteEndpointOwned::try_parse("unix+http:///var/run/app.sock".to_string()).unwrap(),
+    );
+    let result = gateway
+        .client_side()
+        .connect_to_forward_proxy_connection(
+            endpoint,
+            CONNECT_TIMEOUT,
+            gateway.client.get_next_connection_id(),
+        )
+        .await;
+
+    let Err(err) = result else {
+        panic!("a unix socket is connected to");
+    };
+    assert!(
+        err.contains(crate::consts::UNIX_SOCKETS_NOT_SUPPORTED),
+        "{err}"
+    );
+
+    let upstream = start_upstream(|stream| echo(stream, None)).await;
+    let mut stream = gateway.connect_from_client(upstream).await;
+    assert_echoes(&mut stream).await;
+}
+
 /// The upstream answers early and closes with the upload unread, while the initiator keeps
 /// uploading: the write of the rest fails. The close must not read as a clean EOF - what the
 /// initiator sent did not all arrive - even when the upstream's EOF is read before the writer
@@ -2742,12 +2774,9 @@ async fn a_write_timeout_resets_both_ends_of_a_port_forward() {
         write_timeout: Duration::from_secs(1),
     };
     let (client, pumps) = port_forward(gateway.connect_from_client(upstream).await, timeouts).await;
-    let (mut client_read, mut client_write) = client.into_split();
+    let (mut client_read, client_write) = client.into_split();
 
-    let flood = tokio::spawn(async move {
-        let chunk = vec![7u8; 64 * 1024];
-        while client_write.write_all(&chunk).await.is_ok() {}
-    });
+    let flood = tokio::spawn(write_until_it_fails(client_write));
 
     for pump in pumps {
         tokio::time::timeout(Duration::from_secs(60), pump)
@@ -2756,14 +2785,17 @@ async fn a_write_timeout_resets_both_ends_of_a_port_forward() {
             .unwrap();
     }
 
-    let (_, client_end) = tokio::time::timeout(TIMEOUT, read_socket_end(&mut client_read))
+    let (_, client_read_end) = tokio::time::timeout(TIMEOUT, read_socket_end(&mut client_read))
         .await
         .expect("the client's connection did not end");
-    assert_eq!(client_end, StreamEnd::Reset);
-    tokio::time::timeout(TIMEOUT, flood)
+    let client_write_error = tokio::time::timeout(TIMEOUT, flood)
         .await
         .expect("the client's writes did not fail")
         .unwrap();
+    assert_eq!(
+        connection_end(client_read_end, &client_write_error),
+        StreamEnd::Reset
+    );
 
     // The acceptor holds a backlog for the target, and takes its time with the frames ahead of the
     // RST in a debug build: the target reads once its connection is reset.
@@ -2788,14 +2820,12 @@ async fn a_client_which_stops_reading_resets_both_ends_of_a_port_forward() {
     let upstream = start_upstream(move |stream| {
         let ended = ended_tx.clone();
         async move {
-            let (mut read, mut write) = stream.into_split();
-            let flood = tokio::spawn(async move {
-                let chunk = vec![7u8; 64 * 1024];
-                while write.write_all(&chunk).await.is_ok() {}
-            });
+            let (mut read, write) = stream.into_split();
+            let flood = tokio::spawn(write_until_it_fails(write));
 
-            let _ = ended.send(read_socket_end(&mut read).await.1);
-            let _ = flood.await;
+            let read_end = read_socket_end(&mut read).await.1;
+            let write_error = flood.await.unwrap();
+            let _ = ended.send(connection_end(read_end, &write_error));
         }
     })
     .await;
@@ -4444,6 +4474,31 @@ async fn read_socket_end(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> (V
     }
 }
 
+/// Writes to `stream` until a write fails: the error of that write.
+async fn write_until_it_fails(mut stream: impl tokio::io::AsyncWrite + Unpin) -> std::io::Error {
+    let chunk = vec![7u8; 64 * 1024];
+
+    loop {
+        if let Err(err) = stream.write_all(&chunk).await {
+            return err;
+        }
+    }
+}
+
+/// How a connection which is read and written at once ended: [`read_socket_end`] of its read half
+/// and the error of [`write_until_it_fails`] on its write half. Linux reports a reset to one call
+/// only - whichever of the read and the write comes first - and the read which comes after the
+/// write took it sees the end of the stream. A write which took the reset failed with
+/// `ConnectionReset`; the reset which answers a write after a FIN is a broken pipe on Linux, so a
+/// FIN still reads as the end of the stream.
+fn connection_end(read_end: StreamEnd, write_error: &std::io::Error) -> StreamEnd {
+    if write_error.kind() == std::io::ErrorKind::ConnectionReset {
+        StreamEnd::Reset
+    } else {
+        read_end
+    }
+}
+
 /// [`read_socket_end`] for a target which only reads, and so would never learn of a reset which got
 /// lost: the OS may drop the reset of a connection closed in the middle of a transfer (macOS does,
 /// on loopback, and rate-limits the reset it would answer the next segment with). After a second
@@ -5337,6 +5392,13 @@ async fn send_hyper_request(
     let request = hyper::Request::post(path)
         .header("host", "upstream")
         .body(http_body_util::Full::new(bytes::Bytes::from(body)))
+        .unwrap();
+
+    // The connection takes the next request only once it is done with the last response - one
+    // sent before that is refused as "connection was not ready".
+    tokio::time::timeout(Duration::from_secs(60), sender.ready())
+        .await
+        .expect("the connection did not get ready for the request")
         .unwrap();
 
     // The head of an /upload answer comes only once the whole body is up.

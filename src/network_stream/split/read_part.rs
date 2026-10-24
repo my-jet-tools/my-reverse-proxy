@@ -59,6 +59,7 @@ impl NetworkStreamReadPart for Box<dyn NetworkStreamReadPart + Send + Sync> {
 
 pub enum MyOwnedReadHalf {
     Tcp(tokio::net::tcp::OwnedReadHalf),
+    #[cfg(unix)]
     Unix(tokio::net::unix::OwnedReadHalf),
     Ssh(tokio::io::ReadHalf<SshAsyncChannel>),
 }
@@ -70,6 +71,7 @@ impl MyOwnedReadHalf {
                 use tokio::io::AsyncReadExt;
                 owned_read_half.read(buf).await
             }
+            #[cfg(unix)]
             MyOwnedReadHalf::Unix(owned_read_half) => {
                 use tokio::io::AsyncReadExt;
                 owned_read_half.read(buf).await
@@ -97,6 +99,7 @@ impl MyOwnedReadHalf {
 
         match self {
             MyOwnedReadHalf::Tcp(owned_read_half) => owned_read_half.read_buf(buf).await,
+            #[cfg(unix)]
             MyOwnedReadHalf::Unix(owned_read_half) => owned_read_half.read_buf(buf).await,
             MyOwnedReadHalf::Ssh(owned_read_half) => owned_read_half.read_buf(buf).await,
         }
@@ -109,6 +112,7 @@ impl From<tokio::net::tcp::OwnedReadHalf> for MyOwnedReadHalf {
     }
 }
 
+#[cfg(unix)]
 impl From<tokio::net::unix::OwnedReadHalf> for MyOwnedReadHalf {
     fn from(val: tokio::net::unix::OwnedReadHalf) -> Self {
         MyOwnedReadHalf::Unix(val)
@@ -165,7 +169,6 @@ impl NetworkStreamReadPart for tokio::io::ReadHalf<tokio::net::UnixStream> {
     }
 }
 
-#[cfg(unix)]
 #[async_trait::async_trait]
 impl NetworkStreamReadPart for tokio::io::ReadHalf<my_ssh::SshAsyncChannel> {
     async fn read_from_socket(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {

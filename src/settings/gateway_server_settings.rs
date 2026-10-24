@@ -28,7 +28,8 @@ impl GatewayServerSettings {
 
         let mut keys = Vec::with_capacity(self.authorized_keys.len());
         for path in &self.authorized_keys {
-            let resolved = rust_extensions::file_utils::format_path(path).to_string();
+            let resolved =
+                super::expand_home(path).map_err(|err| format!("Gateway server: {err}"))?;
             let content = std::fs::read_to_string(resolved.as_str()).map_err(|err| {
                 format!("Gateway server: cannot read pubkey file '{resolved}': {err}")
             })?;

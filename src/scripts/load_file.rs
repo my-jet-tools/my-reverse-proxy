@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{borrow::Cow, sync::Arc, time::Duration};
 
 use flurl::FlUrl;
 use http::Method;
@@ -6,17 +6,33 @@ use my_http_client::http1::{MyHttpClient, MyHttpRequestBuilder, MyHttpResponse};
 use my_ssh::{ssh_settings::OverSshConnectionSettings, SshCredentials};
 use rust_extensions::remote_endpoint::RemoteEndpoint;
 
-use crate::configurations::LocalFilePath;
+use crate::configurations::drive_path_with_backslashes;
 
 pub async fn load_file(
     content_source: &OverSshConnectionSettings,
     connect_timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    if let Some(scheme) = content_source.get_remote_endpoint().get_scheme() {
+    // A path behind ssh is one of the remote host, and is sent there as it is.
+    let source = if content_source.ssh_credentials.is_some() {
+        Cow::Borrowed(content_source.remote_resource_string.as_str())
+    } else {
+        drive_path_with_backslashes(content_source.remote_resource_string.as_str())
+    };
+
+    // Parsed here rather than with `get_remote_endpoint`, which panics on a source it can not
+    // parse: a source which is written wrong fails to load like a file which is not there.
+    let remote_endpoint = RemoteEndpoint::try_parse(source.as_ref()).map_err(|err| {
+        format!(
+            "Invalid file source {}: {}",
+            content_source.remote_resource_string, err
+        )
+    })?;
+
+    if let Some(scheme) = remote_endpoint.get_scheme() {
         match scheme {
             rust_extensions::remote_endpoint::Scheme::Http => {
                 load_from_http_or_https(
-                    content_source.get_remote_endpoint(),
+                    remote_endpoint,
                     content_source.ssh_credentials.as_ref(),
                     connect_timeout,
                 )
@@ -24,35 +40,30 @@ pub async fn load_file(
             }
             rust_extensions::remote_endpoint::Scheme::Https => {
                 load_from_http_or_https(
-                    content_source.get_remote_endpoint(),
+                    remote_endpoint,
                     content_source.ssh_credentials.as_ref(),
                     connect_timeout,
                 )
                 .await
             }
-            _ => {
-                panic!(
-                    "File can be loaded from the url: {}",
-                    content_source.get_remote_endpoint().as_str()
-                );
-            }
+            _ => Err(format!(
+                "File can not be loaded from the url: {}",
+                remote_endpoint.as_str()
+            )),
         }
     } else {
         if let Some(ssh_credentials) = content_source.ssh_credentials.as_ref() {
-            return loading_file_from_ssh(ssh_credentials, content_source.get_remote_endpoint())
-                .await;
+            return loading_file_from_ssh(ssh_credentials, remote_endpoint).await;
         } else {
-            let file_name = LocalFilePath::new(content_source.remote_resource_string.to_string());
+            let file_name = crate::settings::expand_home(source.as_ref())?;
 
-            let result = tokio::fs::read(file_name.get_value().as_str())
-                .await
-                .map_err(|err| {
-                    format!(
-                        "Error reading file: {:?}, error: {:?}",
-                        file_name.get_value().as_str(),
-                        err
-                    )
-                })?;
+            let result = tokio::fs::read(file_name.as_str()).await.map_err(|err| {
+                format!(
+                    "Error reading file: {:?}, error: {:?}",
+                    file_name.as_str(),
+                    err
+                )
+            })?;
 
             Ok(result)
         }
@@ -183,5 +194,46 @@ mod tests {
             .unwrap_err();
 
         assert!(!err.contains("UnsupportedScheme"), "{err}");
+    }
+
+    /// `certs:` is read as a scheme, and there is no such one.
+    #[tokio::test]
+    async fn a_source_which_can_not_be_parsed_is_an_error_not_a_panic() {
+        let source = OverSshConnectionSettings::try_parse("certs:/a.pem").unwrap();
+
+        let err = super::load_file(&source, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("certs:/a.pem"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_url_which_is_not_http_is_an_error_not_a_panic() {
+        let source = OverSshConnectionSettings::try_parse("ws://127.0.0.1/a.pem").unwrap();
+
+        let err = super::load_file(&source, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("ws://127.0.0.1/a.pem"), "{err}");
+    }
+
+    /// `RemoteEndpoint` refuses `C:/...` - a scheme `C` - and reads `C:\...` as a path.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_drive_path_written_with_slashes_is_a_local_file() {
+        let file = std::env::temp_dir().join(format!(
+            "my-reverse-proxy-load-file-{}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&file, b"content").unwrap();
+
+        let source = file.to_str().unwrap().replace('\\', "/");
+        let source = OverSshConnectionSettings::try_parse(&source).unwrap();
+        let result = super::load_file(&source, Duration::from_secs(2)).await;
+
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(result.unwrap(), b"content");
     }
 }

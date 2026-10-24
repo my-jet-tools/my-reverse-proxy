@@ -146,13 +146,16 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
         Ok((location, endpoint_info))
     }
 
+    /// `request_target`: the target which replaces the one of the request line - the path of
+    /// an MCP location, or the target without the location path (`strip_path`). `None`: the
+    /// first line goes on as it came.
     pub fn compile_headers(
         &mut self,
         http_headers: Http1Headers,
         kind: H1HeadersKind<'_>,
         http_connection_info: &HttpConnectionInfo,
         identity: &Option<HttpProxyPassIdentity>,
-        mcp_path: Option<&str>,
+        request_target: Option<&str>,
         dynamic_proxy_host_override: Option<&str>,
     ) -> Result<bool, ProxyServerError> {
         let modify_headers = kind.modify_headers();
@@ -163,10 +166,10 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
         self.h1_headers_builder.clear();
         let data = self.loop_buffer.get_data();
 
-        if let Some(mcp_path) = mcp_path {
+        if let Some(request_target) = request_target {
             http_headers.push_first_line_with_other_path(
                 data,
-                mcp_path,
+                request_target,
                 &mut self.h1_headers_builder,
             );
             self.h1_headers_builder.push_cl_cr();

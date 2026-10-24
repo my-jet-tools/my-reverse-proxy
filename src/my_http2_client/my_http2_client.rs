@@ -270,6 +270,7 @@ impl<
     /// path which produces an empty `:authority` (`http:///path/...`), and hyper's
     /// CONNECT validator rejects that with "invalid format". This method substitutes
     /// `localhost` as a placeholder authority.
+    #[cfg(unix)]
     pub async fn do_extended_connect_unix(
         &self,
         path: &str,

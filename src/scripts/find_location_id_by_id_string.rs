@@ -17,6 +17,7 @@ pub fn find_location_id_by_id_string(id_string: &str) -> Option<i64> {
             return Some(pool.desc.location_id);
         }
     }
+    #[cfg(unix)]
     for pool in APP_CTX.h1_uds_pools.list_pools() {
         if pool.desc.id_string == id_string {
             return Some(pool.desc.location_id);
@@ -32,6 +33,7 @@ pub fn find_location_id_by_id_string(id_string: &str) -> Option<i64> {
             return Some(pool.desc.location_id);
         }
     }
+    #[cfg(unix)]
     for pool in APP_CTX.h2_uds_pools.list_pools() {
         if pool.desc.id_string == id_string {
             return Some(pool.desc.location_id);

@@ -333,14 +333,30 @@ pub(super) async fn start_endpoint(
     endpoint_type: ListenHttpEndpointType,
     upstream_port: u16,
 ) -> u16 {
+    start_endpoint_with_locations(
+        endpoint_type,
+        &format!(
+            "- path: /open\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n\
+             - path: /secure\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n  auth_header: '{SECRET}'\n\
+             - path: /\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n"
+        ),
+    )
+    .await
+}
+
+/// The proxy under test: one endpoint on a free port with the locations given.
+///
+/// `locations`: the `locations:` list as a settings file writes it - `- ` at the start of a
+/// line, the fields of a location indented by two spaces.
+pub(super) async fn start_endpoint_with_locations(
+    endpoint_type: ListenHttpEndpointType,
+    locations: &str,
+) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listening_addr = listener.local_addr().unwrap();
 
     let host_settings: HostSettings = my_settings_reader::serde_yaml::from_str(&format!(
-        "endpoint:\n  type: {}\nlocations:\n\
-         - path: /open\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n\
-         - path: /secure\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n  auth_header: '{SECRET}'\n\
-         - path: /\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n",
+        "endpoint:\n  type: {}\nlocations:\n{locations}",
         endpoint_type.as_str(),
     ))
     .unwrap();
@@ -495,13 +511,13 @@ impl H1Client {
 }
 
 /// An h2c client: the `:path` it sends is the target as it is written.
-struct H2Client {
+pub(super) struct H2Client {
     sender: hyper::client::conn::http2::SendRequest<Empty<Bytes>>,
     port: u16,
 }
 
 impl H2Client {
-    async fn connect(port: u16) -> Self {
+    pub(super) async fn connect(port: u16) -> Self {
         let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
 
         let (sender, connection) =
@@ -514,7 +530,7 @@ impl H2Client {
         Self { sender, port }
     }
 
-    async fn get(&mut self, target: &str, authorization: Option<&str>) -> Response {
+    pub(super) async fn get(&mut self, target: &str, authorization: Option<&str>) -> Response {
         let uri: hyper::Uri = format!("http://localhost:{}{target}", self.port)
             .parse()
             .unwrap_or_else(|err| panic!("{target}: {err}"));

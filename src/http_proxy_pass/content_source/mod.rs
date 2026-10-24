@@ -8,13 +8,17 @@ mod http1;
 pub use http1::*;
 mod https1;
 pub use https1::*;
+#[cfg(unix)]
 mod unix_http1;
+#[cfg(unix)]
 pub use unix_http1::*;
 mod http2;
 pub use http2::*;
 mod https2;
 pub use https2::*;
+#[cfg(unix)]
 mod unix_http2;
+#[cfg(unix)]
 pub use unix_http2::*;
 mod h2_dispatch;
 pub use h2_dispatch::*;

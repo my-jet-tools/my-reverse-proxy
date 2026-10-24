@@ -29,6 +29,7 @@ pub async fn handle_port_forward<TRemoteNetworkStream: NetworkStream + Send + Sy
                 ),
             )
         }
+        #[cfg(unix)]
         AcceptedServerConnection::Unix(unix_stream) => {
             let (read, write) = unix_stream.into_split();
             (

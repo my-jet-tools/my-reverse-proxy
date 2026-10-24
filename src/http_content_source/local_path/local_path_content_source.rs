@@ -10,9 +10,13 @@ pub struct LocalPathContentSrc {
 }
 
 impl LocalPathContentSrc {
+    /// It is made for every request, so it does not fail: when the home directory is not known -
+    /// the process does not start without one - the folder is kept as it is, and nothing is found
+    /// in it.
     pub fn new(files_path: &str, default_file: Option<String>) -> Self {
         Self {
-            files_path: rust_extensions::file_utils::format_path(files_path).to_string(),
+            files_path: crate::settings::expand_home(files_path)
+                .unwrap_or_else(|_| files_path.to_string()),
             default_file,
         }
     }
@@ -44,7 +48,7 @@ mod tests {
 
     #[test]
     fn a_leading_tilde_of_the_folder_is_the_home_directory() {
-        let home = std::env::var("HOME").unwrap();
+        let home = crate::settings::home_dir().unwrap();
 
         let source = LocalPathContentSrc::new("~/web_content", None);
         assert_eq!(source.files_path, format!("{}/web_content", home));

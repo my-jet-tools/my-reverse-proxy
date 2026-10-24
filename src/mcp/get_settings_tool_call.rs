@@ -31,6 +31,11 @@ pub struct LocationSettingsSummary {
 
     #[property(description = "Whitelisted IP list id for this location, if any")]
     pub whitelisted_ip: String,
+
+    #[property(
+        description = "True if strip_path is set on this location: the location path is cut off the request path before it goes upstream"
+    )]
+    pub strip_path: bool,
 }
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
@@ -75,6 +80,11 @@ pub struct HostSettingsSummary {
 pub struct GlobalSettingsSummary {
     #[property(description = "HTTP control port from global_settings, if configured")]
     pub http_control_port: i64,
+
+    #[property(
+        description = "global_settings.http_control_ip of these settings, empty if not configured (0.0.0.0). The control port binds it at startup: a change takes effect after a restart"
+    )]
+    pub http_control_ip: String,
 
     #[property(description = "default_h2_livness_url from global_settings, if configured")]
     pub default_h2_livness_url: String,
@@ -158,7 +168,7 @@ impl McpToolCall<GetSettingsInputData, GetSettingsResponse> for GetSettingsHandl
 
         Ok(build_settings_summary(
             &settings,
-            resolve_settings_file_path(),
+            crate::settings::settings_file_path()?,
             current_configuration_errors,
         ))
     }
@@ -177,6 +187,11 @@ pub fn build_settings_summary(
             .get_http_control_port()
             .map(|p| p as i64)
             .unwrap_or(-1),
+        http_control_ip: settings
+            .global_settings
+            .as_ref()
+            .and_then(|global_settings| global_settings.http_control_ip.clone())
+            .unwrap_or_default(),
         default_h2_livness_url: settings.get_default_h2_livness_url().unwrap_or_default(),
         show_error_description_on_error_page: settings.get_show_error_description_on_error_page(),
     };
@@ -193,6 +208,7 @@ pub fn build_settings_summary(
                     proxy_pass_to: loc.proxy_pass_to.clone().unwrap_or_default(),
                     location_type: loc.location_type.clone().unwrap_or_default(),
                     whitelisted_ip: loc.whitelisted_ip.clone().unwrap_or_default(),
+                    strip_path: loc.get_strip_path(),
                 })
                 .collect();
 
@@ -268,15 +284,58 @@ pub async fn load_current_configuration_errors() -> Vec<ConfigurationErrorEntry>
         .await
 }
 
-pub fn resolve_settings_file_path() -> String {
-    match std::env::var("HOME") {
-        Ok(home) => format!("{}/.my-reverse-proxy", home),
-        Err(_) => ".my-reverse-proxy".to_string(),
-    }
-}
-
 fn sorted_keys<'a, I: IntoIterator<Item = &'a String>>(keys: I) -> Vec<String> {
     let mut out: Vec<String> = keys.into_iter().cloned().collect();
     out.sort();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::settings::HostSettings;
+
+    #[test]
+    fn the_summary_shows_strip_path_of_each_location() {
+        let hosts: HashMap<String, HostSettings> = serde_yaml::from_str(
+            [
+                "'localhost:8000':",
+                "  endpoint:",
+                "    type: http",
+                "  locations:",
+                "  - path: /stripped/",
+                "    proxy_pass_to: http://127.0.0.1:9000",
+                "    strip_path: true",
+                "  - path: /kept/",
+                "    proxy_pass_to: http://127.0.0.1:9001",
+                "    strip_path: false",
+                "  - path: /",
+                "    proxy_pass_to: http://127.0.0.1:9002",
+            ]
+            .join("\n")
+            .as_str(),
+        )
+        .unwrap();
+
+        let settings = SettingsCompiled {
+            hosts,
+            ..Default::default()
+        };
+
+        let summary = build_settings_summary(&settings, String::new(), vec![]);
+
+        let locations: Vec<_> = summary.hosts[0]
+            .locations
+            .iter()
+            .map(|location| (location.path.as_str(), location.strip_path))
+            .collect();
+
+        // Not set, it is off.
+        assert_eq!(
+            locations,
+            [("/stripped/", true), ("/kept/", false), ("/", false)]
+        );
+    }
 }

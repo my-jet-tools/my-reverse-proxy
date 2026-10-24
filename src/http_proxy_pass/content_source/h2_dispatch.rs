@@ -78,6 +78,7 @@ where
 
 // UDS-specific impl: `:authority` for Unix sockets must be a placeholder, not the
 // filesystem path. Routed via `do_extended_connect_unix` on the inner client.
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl<TConnector> H2Sender for Arc<MyHttp2Client<tokio::net::UnixStream, TConnector>>
 where

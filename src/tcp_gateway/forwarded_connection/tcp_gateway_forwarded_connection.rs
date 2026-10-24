@@ -422,6 +422,7 @@ async fn connect_to_tcp_socket(
     }
 }
 
+#[cfg(unix)]
 async fn connect_to_unix_socket(
     remote_endpoint: &str,
     connection_id: u32,
@@ -447,6 +448,21 @@ async fn connect_to_unix_socket(
     }
 }
 
+/// The peer asked for a socket path: it gets the reason back as the error of its `CONNECT`.
+#[cfg(not(unix))]
+async fn connect_to_unix_socket(
+    remote_endpoint: &str,
+    connection_id: u32,
+    _timeout: Duration,
+) -> Result<MyNetworkStream, String> {
+    Err(format!(
+        "Can not connect to unix socket {} with id {}. Err: {}",
+        remote_endpoint,
+        connection_id,
+        crate::consts::UNIX_SOCKETS_NOT_SUPPORTED
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,7 +478,10 @@ mod tests {
             .await
             .unwrap();
 
-        let MyNetworkStream::Tcp(stream) = stream else {
+        // Without unix sockets a tcp stream is the only kind there is.
+        #[cfg_attr(not(unix), allow(irrefutable_let_patterns))]
+        let MyNetworkStream::Tcp(stream) = stream
+        else {
             panic!("a tcp target is reached over tcp");
         };
 

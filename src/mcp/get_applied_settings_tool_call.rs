@@ -3,10 +3,7 @@ use serde::*;
 
 use crate::app::APP_CTX;
 
-use super::{
-    build_settings_summary, load_current_configuration_errors, resolve_settings_file_path,
-    GetSettingsResponse,
-};
+use super::{build_settings_summary, load_current_configuration_errors, GetSettingsResponse};
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct GetAppliedSettingsInputData {}
@@ -33,7 +30,7 @@ impl McpToolCall<GetAppliedSettingsInputData, GetSettingsResponse> for GetApplie
 
         Ok(build_settings_summary(
             applied.as_ref(),
-            resolve_settings_file_path(),
+            crate::settings::settings_file_path()?,
             current_configuration_errors,
         ))
     }

@@ -346,25 +346,13 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
     };
 
     if path_is_ambiguous {
-        // The head is still in the loop buffer: `compile_headers` drops it on the
-        // way to a location, and this request gets to none.
-        h1_reader.loop_buffer.commit_read(request_headers.end);
-
-        // The request body comes off the connection first.
-        let mut null = super::NullSink;
-        let request_was_read = h1_reader
-            .transfer_body(0, &mut null, request_headers.content_length)
-            .await
-            .is_ok();
-
-        // An ordinary response, as a files location gives to a path it refuses:
-        // the connection goes on and nothing is counted against the source IP.
-        return emit_own_response(
+        return refuse_the_path(
+            h1_reader,
+            &request_headers,
             queue_tx,
             write_timeout,
-            crate::error_templates::BAD_REQUEST.to_vec(),
             is_head,
-            keep_alive && request_was_read,
+            keep_alive,
         )
         .await;
     }
@@ -407,6 +395,38 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             .await
         }
     };
+
+    // A location with `strip_path` sends on the target without its own path. Owned:
+    // the target is in the loop buffer, which `compile_headers` takes mutably.
+    let stripped_target = if location.strip_path {
+        let first_line = request_headers.get_first_line(h1_reader.loop_buffer.get_data());
+        let (_, target) = first_line.get_verb_and_path();
+        Some(crate::types::strip_location_path(target, &location.path).into_owned())
+    } else {
+        None
+    };
+
+    // The cut can join what was on its two sides into a segment of its own - the
+    // location `/a` leaves `/..%2Fx` of `/a..%2Fx` - and such a path goes to the
+    // upstream no more than one which came so.
+    if let Some(target) = stripped_target.as_deref() {
+        let path = match target.find(['?', '#']) {
+            Some(end) => &target[..end],
+            None => target,
+        };
+
+        if crate::types::has_ambiguous_segment(path) {
+            return refuse_the_path(
+                h1_reader,
+                &request_headers,
+                queue_tx,
+                write_timeout,
+                is_head,
+                keep_alive,
+            )
+            .await;
+        }
+    }
 
     if location.proxy_pass_to.is_drop() {
         return ReaderStep::Close;
@@ -561,7 +581,8 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         H1HeadersKind::Request(&end_point_info, location),
         http_connection_info,
         &identity,
-        mcp_path(&proxy_pass_to_owned),
+        // Never both: `strip_path` is refused on an MCP location at load time.
+        mcp_path(&proxy_pass_to_owned).or(stripped_target.as_deref()),
         dynamic_host_override.as_deref(),
     );
     let is_websocket = match compiled {
@@ -715,6 +736,39 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         // Worker gone or client body read failed → connection desynced, close.
         Err(_) => ReaderStep::Close,
     }
+}
+
+/// Answers `400 Bad Request` to a request whose path names its resource in more
+/// than one way, once its body is off the connection. An ordinary response, as a
+/// files location gives to a path it refuses: the connection goes on and nothing
+/// is counted against the source IP.
+async fn refuse_the_path<ReadPart: NetworkStreamReadPart + Send + Sync + 'static>(
+    h1_reader: &mut H1Reader<ReadPart>,
+    request_headers: &crate::h1_utils::Http1Headers,
+    queue_tx: &mpsc::Sender<ResponseSlot>,
+    write_timeout: Duration,
+    is_head: bool,
+    keep_alive: bool,
+) -> ReaderStep {
+    // The head is still in the loop buffer: `compile_headers` drops it on the
+    // way to a location, and this request gets to none.
+    h1_reader.loop_buffer.commit_read(request_headers.end);
+
+    // The request body comes off the connection first.
+    let mut null = super::NullSink;
+    let request_was_read = h1_reader
+        .transfer_body(0, &mut null, request_headers.content_length)
+        .await
+        .is_ok();
+
+    emit_own_response(
+        queue_tx,
+        write_timeout,
+        crate::error_templates::BAD_REQUEST.to_vec(),
+        is_head,
+        keep_alive && request_was_read,
+    )
+    .await
 }
 
 /// Sends a response the proxy made itself - of a static or a files location, the

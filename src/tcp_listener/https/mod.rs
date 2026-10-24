@@ -11,5 +11,6 @@ mod tls_acceptor;
 pub use server_cert_resolver::*;
 pub mod utils;
 
-#[cfg(test)]
+// The upstream of these tests listens on a unix socket.
+#[cfg(all(test, unix))]
 mod websocket_tests;

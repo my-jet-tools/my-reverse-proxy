@@ -15,18 +15,21 @@ pub fn mcp_path(proxy_pass_to: &ProxyPassToConfig) -> Option<&str> {
 /// key — two locations with the same key share the upstream connection slot.
 ///
 /// MCP is the one case where the PATH is part of that identity. An ordinary
-/// location forwards the client's own path, so the upstream path plays no role
-/// in what a connection is; an MCP location rewrites every request onto the
-/// path configured in `proxy_pass_to`, which is what names the MCP server. Two
-/// MCP servers published on one `host:port` under different paths are different
-/// upstreams and get different pools.
+/// location forwards the client's own path (with `strip_path`, what is left of
+/// it without the location path), never the path of `proxy_pass_to`, so the
+/// upstream path plays no role in what a connection is; an MCP location rewrites
+/// every request onto the path configured in `proxy_pass_to`, which is what
+/// names the MCP server. Two MCP servers published on one `host:port` under
+/// different paths are different upstreams and get different pools.
 pub fn connection_key(proxy_pass_to: &ProxyPassToConfig) -> String {
     match proxy_pass_to {
         ProxyPassToConfig::Http1(model) => remote_host_key("h1", model),
         ProxyPassToConfig::McpHttp1(model) => mcp_key("mcp-h1", model),
         ProxyPassToConfig::McpHttp2(model) => mcp_key("mcp-h2", model),
         ProxyPassToConfig::Http2(model) => remote_host_key("h2", model),
+        #[cfg(unix)]
         ProxyPassToConfig::UnixHttp1(model) => remote_host_key("uds-h1", model),
+        #[cfg(unix)]
         ProxyPassToConfig::UnixHttp2(model) => remote_host_key("uds-h2", model),
         other => other.to_string(),
     }

@@ -31,6 +31,7 @@ impl ActiveListenPorts {
         self.tcp.insert(port, server_handler);
     }
 
+    #[cfg(unix)]
     pub fn kick_unix_if_needed(&mut self, host: Arc<String>) {
         if self.unix.contains_key(&host) {
             return;
@@ -41,5 +42,15 @@ impl ActiveListenPorts {
         let server_handler = crate::tcp_listener::start_listen_unix_server(host.clone());
 
         self.unix.insert(host, server_handler);
+    }
+
+    /// Never reached: compiling the settings refuses a unix socket endpoint on this platform.
+    #[cfg(not(unix))]
+    pub fn kick_unix_if_needed(&mut self, host: Arc<String>) {
+        println!(
+            "Unix socket server '{}' is not started: {}",
+            host,
+            crate::consts::UNIX_SOCKETS_NOT_SUPPORTED
+        );
     }
 }

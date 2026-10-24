@@ -1,4 +1,4 @@
-pub enum TcpOrUnixSocket<TTcp, TUnix> {
+pub enum TcpOrUnixSocket<TTcp, #[cfg(unix)] TUnix> {
     Tcp(TTcp),
     #[cfg(unix)]
     Unix(TUnix),

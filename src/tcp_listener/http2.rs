@@ -47,6 +47,7 @@ pub async fn handle_connection(
 
                 TcpOrUnixSocket::Tcp(io)
             }
+            #[cfg(unix)]
             AcceptedServerConnection::Unix(unix_stream) => {
                 let io = TokioIo::new(unix_stream);
                 TcpOrUnixSocket::Unix(io)
@@ -80,6 +81,7 @@ pub async fn handle_connection(
                     );
                 }
             }
+            #[cfg(unix)]
             TcpOrUnixSocket::Unix(io) => {
                 let result = builder
                     .serve_connection(

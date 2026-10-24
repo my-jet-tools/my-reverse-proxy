@@ -55,6 +55,13 @@ pub fn to_hyper_error(e: std::convert::Infallible) -> String {
 
 #[tokio::main]
 async fn main() {
+    // First of all, before APP_CTX reads the settings: without a home directory there is no
+    // settings file to read, and the process says why and stops rather than panics.
+    if let Err(err) = crate::settings::settings_file_path() {
+        eprintln!("Can not start. {err}");
+        std::process::exit(1);
+    }
+
     my_tls::install_default_crypto_providers();
     crate::http_server::start();
 

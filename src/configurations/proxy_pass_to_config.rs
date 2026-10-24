@@ -61,7 +61,9 @@ pub enum ProxyPassToConfig {
     /// MCP over an HTTP/2 upstream. Served by the hyper path only (the h1 byte
     /// pipeline has no h2 upstream), so it needs an `http2`/`https2` endpoint.
     McpHttp2(ProxyPassToModel),
+    #[cfg(unix)]
     UnixHttp1(ProxyPassToModel),
+    #[cfg(unix)]
     UnixHttp2(ProxyPassToModel),
     FilesPath(ProxyPassFilesPathModel),
     Static(Arc<StaticContentConfig>),
@@ -75,9 +77,12 @@ impl std::fmt::Display for ProxyPassToConfig {
             ProxyPassToConfig::Http1(proxy_pass)
             | ProxyPassToConfig::McpHttp1(proxy_pass)
             | ProxyPassToConfig::McpHttp2(proxy_pass)
-            | ProxyPassToConfig::UnixHttp1(proxy_pass)
-            | ProxyPassToConfig::UnixHttp2(proxy_pass)
             | ProxyPassToConfig::Http2(proxy_pass) => write!(f, "{}", proxy_pass.remote_host),
+            // An arm of its own: a cfg can not be put on one alternative of a pattern.
+            #[cfg(unix)]
+            ProxyPassToConfig::UnixHttp1(proxy_pass) | ProxyPassToConfig::UnixHttp2(proxy_pass) => {
+                write!(f, "{}", proxy_pass.remote_host)
+            }
 
             ProxyPassToConfig::FilesPath(model) => write!(f, "{}", model),
             ProxyPassToConfig::Static(model) => write!(f, "{}", model),
@@ -92,7 +97,9 @@ impl std::fmt::Display for ProxyPassToConfig {
 impl ProxyPassToConfig {
     pub fn get_type_as_str(&self) -> &'static str {
         match self {
+            #[cfg(unix)]
             Self::UnixHttp1(_) => "unix+http1",
+            #[cfg(unix)]
             Self::UnixHttp2(_) => "unix+http2",
             Self::Http1(_) => "http1",
             Self::McpHttp1(_) => crate::consts::location_type::MCP,
@@ -125,12 +132,12 @@ impl ProxyPassToConfig {
     /// static / drop variants that don't reach a remote.
     pub fn remote_endpoint_kind(&self) -> Option<&'static str> {
         match self {
-            Self::Http1(m)
-            | Self::McpHttp1(m)
-            | Self::McpHttp2(m)
-            | Self::Http2(m)
-            | Self::UnixHttp1(m)
-            | Self::UnixHttp2(m) => Some(m.remote_host.kind_as_str()),
+            Self::Http1(m) | Self::McpHttp1(m) | Self::McpHttp2(m) | Self::Http2(m) => {
+                Some(m.remote_host.kind_as_str())
+            }
+            // An arm of its own: a cfg can not be put on one alternative of a pattern.
+            #[cfg(unix)]
+            Self::UnixHttp1(m) | Self::UnixHttp2(m) => Some(m.remote_host.kind_as_str()),
             Self::FilesPath(m) => Some(m.files_path.kind_as_str()),
             Self::Static(_) | Self::Drop | Self::DynamicProxy(_) => None,
         }

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    net::IpAddr,
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
         Arc,
@@ -60,10 +61,12 @@ pub struct AppContext {
 
     pub h2_tcp_pools: H2PoolRegistry<TcpStream, HttpConnector>,
     pub h2_tls_pools: H2PoolRegistry<TlsStream<TcpStream>, HttpTlsConnector>,
+    #[cfg(unix)]
     pub h2_uds_pools: H2PoolRegistry<tokio::net::UnixStream, UnixSocketHttpConnector>,
 
     pub h1_tcp_pools: H1PoolRegistry<TcpStream, HttpConnector>,
     pub h1_tls_pools: H1PoolRegistry<TlsStream<TcpStream>, HttpTlsConnector>,
+    #[cfg(unix)]
     pub h1_uds_pools: H1PoolRegistry<tokio::net::UnixStream, UnixSocketHttpConnector>,
 
     id: AtomicI64,
@@ -101,6 +104,7 @@ pub struct AppContext {
     pub gateway_server: Option<TcpGatewayServer>,
     pub gateway_clients: HashMap<String, TcpGatewayClient>,
     pub http_control_port: Option<u16>,
+    pub http_control_ip: Option<IpAddr>,
 
     pub ssh_sessions_pool: SshSessionsPool,
 
@@ -118,6 +122,7 @@ pub struct AppContext {
 impl AppContext {
     pub fn new(settings_model: SettingsCompiled) -> Self {
         let http_control_port = settings_model.get_http_control_port();
+        let http_control_ip = settings_model.get_http_control_ip().unwrap();
         let connection_settings = settings_model.get_connections_settings();
         let default_h2_livness_url = settings_model.get_default_h2_livness_url();
         let pool_supervisor_interval = settings_model.get_pool_supervisor_interval();
@@ -204,13 +209,16 @@ impl AppContext {
             http2_over_gateway_clients_pool: Http2ClientPool::new(),
             h2_tcp_pools: H2PoolRegistry::new(),
             h2_tls_pools: H2PoolRegistry::new(),
+            #[cfg(unix)]
             h2_uds_pools: H2PoolRegistry::new(),
             h1_tcp_pools: H1PoolRegistry::new(),
             h1_tls_pools: H1PoolRegistry::new(),
+            #[cfg(unix)]
             h1_uds_pools: H1PoolRegistry::new(),
             gateway_server,
             gateway_clients,
             http_control_port,
+            http_control_ip,
             ssh_sessions_pool: SshSessionsPool::new(),
             self_signed_cert: Arc::new(
                 crate::self_signed_cert::generate(

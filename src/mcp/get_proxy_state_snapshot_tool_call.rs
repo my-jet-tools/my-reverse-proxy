@@ -115,6 +115,11 @@ pub struct LocationSnapshot {
     pub proxy_pass_to: String,
 
     #[property(
+        description = "True if the location has strip_path: the location path is cut off the request path before it goes upstream"
+    )]
+    pub strip_path: bool,
+
+    #[property(
         description = "True if a pool with this location_id is registered in any of the 6 pool registries. False is normal until the first request creates the pool lazily — but is suspicious if the same location had a pool earlier."
     )]
     pub has_pool: bool,
@@ -181,9 +186,11 @@ pub async fn build_proxy_state_snapshot() -> GetProxyStateSnapshotResponse {
         let mut pools: Vec<PoolSnapshot> = Vec::new();
         pools.extend(snapshot_h1_pools(&APP_CTX.h1_tcp_pools, "h1_tcp", now));
         pools.extend(snapshot_h1_pools(&APP_CTX.h1_tls_pools, "h1_tls", now));
+        #[cfg(unix)]
         pools.extend(snapshot_h1_pools(&APP_CTX.h1_uds_pools, "h1_uds", now));
         pools.extend(snapshot_h2_pools(&APP_CTX.h2_tcp_pools, "h2_tcp", now));
         pools.extend(snapshot_h2_pools(&APP_CTX.h2_tls_pools, "h2_tls", now));
+        #[cfg(unix)]
         pools.extend(snapshot_h2_pools(&APP_CTX.h2_uds_pools, "h2_uds", now));
 
         let mut locations = APP_CTX.current_configuration.get(collect_locations).await;
@@ -385,8 +392,64 @@ fn absorb_listen(
                 id_string: location.id_string.clone(),
                 proxy_pass_to_type: location.proxy_pass_to.get_type_as_str().to_string(),
                 proxy_pass_to: location.proxy_pass_to.to_string(),
+                strip_path: location.strip_path,
                 has_pool: false,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, sync::Arc};
+
+    use super::*;
+    use crate::configurations::{
+        EndpointHttpHostString, HttpListenPortConfiguration, ListenHttpEndpointType,
+    };
+    use crate::{settings::HostSettings, settings_compiled::SettingsCompiled, types::ListenHost};
+
+    #[tokio::test]
+    async fn a_location_snapshot_shows_whether_the_location_has_strip_path() {
+        let host_settings: HostSettings = serde_yaml::from_str(
+            [
+                "endpoint:",
+                "  type: http",
+                "locations:",
+                "- path: /stripped/",
+                "  proxy_pass_to: http://127.0.0.1:9000",
+                "  strip_path: true",
+                "- path: /",
+                "  proxy_pass_to: http://127.0.0.1:9001",
+            ]
+            .join("\n")
+            .as_str(),
+        )
+        .unwrap();
+
+        let endpoint_info = crate::scripts::compile_http_configuration(
+            &SettingsCompiled::default(),
+            EndpointHttpHostString::new("localhost:8000".to_string()).unwrap(),
+            &host_settings,
+            ListenHttpEndpointType::Http1,
+        )
+        .await
+        .unwrap();
+
+        let listen = ListenConfiguration::Http(Arc::new(HttpListenPortConfiguration {
+            endpoints: vec![Arc::new(endpoint_info)],
+            listen_endpoint_type: ListenHttpEndpointType::Http1,
+            listen_host: ListenHost::Tcp("127.0.0.1:8000".parse::<SocketAddr>().unwrap()),
+        }));
+
+        let mut snapshots = Vec::new();
+        absorb_listen(&listen, "tcp:8000", &mut snapshots);
+
+        let locations: Vec<_> = snapshots
+            .iter()
+            .map(|snapshot| (snapshot.path.as_str(), snapshot.strip_path))
+            .collect();
+
+        assert_eq!(locations, [("/stripped/", true), ("/", false)]);
     }
 }

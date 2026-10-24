@@ -10,6 +10,10 @@ pub struct GlobalSettings {
     pub all_http_endpoints: Option<AllHttpEndpointsGlobalSettings>,
     pub show_error_description_on_error_page: Option<bool>,
     pub http_control_port: Option<u16>,
+    /// The address the control port listens on - an IPv4 or IPv6 one. Absent = `0.0.0.0`, every
+    /// IPv4 address of the host. Nothing served there asks who is calling, so `127.0.0.1` keeps
+    /// it to the host itself.
+    pub http_control_ip: Option<String>,
     pub default_h2_livness_url: Option<String>,
     /// Global allow-list for the automatic IP block-list (fail2ban): source IPs
     /// (single addresses or `from-to` ranges) whose failed connections are never
@@ -62,6 +66,22 @@ impl GlobalSettings {
         }
 
         Ok(result)
+    }
+
+    /// Parsed `http_control_ip`. Errors on a value that is not an IP address: the control port
+    /// does not fall back to listening on every address because of a typo.
+    pub fn get_http_control_ip(&self) -> Result<Option<IpAddr>, String> {
+        let Some(ip) = self.http_control_ip.as_ref() else {
+            return Ok(None);
+        };
+
+        match ip.trim().parse::<IpAddr>() {
+            Ok(ip) => Ok(Some(ip)),
+            Err(_) => Err(format!(
+                "global_settings.http_control_ip: '{}' is not a valid ip address",
+                ip
+            )),
+        }
     }
 }
 
@@ -123,5 +143,38 @@ mod tests {
         let err = settings.get_debug_ip().unwrap_err();
 
         assert!(err.contains("10.0.0.5-10.0.0.9"), "{err}");
+    }
+
+    #[test]
+    fn http_control_ip_is_absent_by_default() {
+        let settings = parse("http_control_port: 9000");
+
+        assert_eq!(settings.get_http_control_ip().unwrap(), None);
+    }
+
+    #[test]
+    fn http_control_ip_accepts_ipv4_and_ipv6() {
+        let settings = parse("http_control_ip: 127.0.0.1");
+        assert_eq!(
+            settings.get_http_control_ip().unwrap(),
+            Some("127.0.0.1".parse::<IpAddr>().unwrap())
+        );
+
+        let settings = parse("http_control_ip: \"::1\"");
+        assert_eq!(
+            settings.get_http_control_ip().unwrap(),
+            Some("::1".parse::<IpAddr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn http_control_ip_refuses_what_is_not_an_address() {
+        for value in ["localhost", "127.0.0.1:9000", "10.0.0.300", "\"\""] {
+            let settings = parse(&format!("http_control_ip: {value}"));
+
+            let err = settings.get_http_control_ip().unwrap_err();
+
+            assert!(err.contains("global_settings.http_control_ip"), "{err}");
+        }
     }
 }

@@ -85,6 +85,7 @@ pub struct LocationSettings {
     pub trace_payload: Option<bool>,
     pub auth_header: Option<String>,
     pub allowed_hosts: Option<Vec<String>>,
+    pub strip_path: Option<bool>,
     #[serde(flatten)]
     pub timeouts: TimeoutsSettings,
 }
@@ -115,5 +116,9 @@ impl LocationSettings {
 
     pub fn get_compress(&self) -> bool {
         self.compress.unwrap_or(false)
+    }
+
+    pub fn get_strip_path(&self) -> bool {
+        self.strip_path.unwrap_or(false)
     }
 }

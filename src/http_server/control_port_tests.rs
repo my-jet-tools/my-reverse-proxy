@@ -9,12 +9,17 @@
 //! The HTTP/1.1 client is a socket written to by hand: what a test sends is what gets to the
 //! wire, a `..` in the path included.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
 };
+
+use crate::settings::GlobalSettings;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -87,7 +92,14 @@ async fn a_path_out_of_the_ui_folder_is_refused() {
 async fn a_file_of_the_host_is_not_served_by_its_absolute_path() {
     let port = start_control_port().await;
 
-    let dir = std::env::temp_dir().join(format!("control-port-{}", uuid::Uuid::new_v4().simple()));
+    // On Windows a path from the root is one of the drive the process runs on, and the temp
+    // folder may be on another one: the key goes to `target` of the crate there.
+    #[cfg(unix)]
+    let parent = std::env::temp_dir();
+    #[cfg(not(unix))]
+    let parent = std::env::current_dir().unwrap().join("target");
+
+    let dir = parent.join(format!("control-port-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
 
     let key = dir.join("id_ed25519");
@@ -99,7 +111,12 @@ async fn a_file_of_the_host_is_not_served_by_its_absolute_path() {
         std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
-    let target = format!("{}{}", "/..".repeat(32), key.to_str().unwrap());
+    // The path of the key from the root of the file system - on Windows without its drive, and
+    // with `/` between its parts: `/Users/.../id_ed25519`.
+    let key_path = key.to_str().unwrap();
+    #[cfg(not(unix))]
+    let key_path = key_path[key_path.find('\\').unwrap()..].replace('\\', "/");
+    let target = format!("{}{}", "/..".repeat(32), key_path);
 
     // The path the request is made of is the file.
     assert_eq!(std::fs::read(format!("./wwwroot{target}")).unwrap(), SECRET);
@@ -112,25 +129,97 @@ async fn a_file_of_the_host_is_not_served_by_its_absolute_path() {
     assert!(!contains(&response.body, SECRET));
 }
 
+/// `http_control_ip: 127.0.0.1` - the control port is served on the loopback address, and on no
+/// other address of the host.
+#[tokio::test]
+async fn the_control_port_listens_on_the_http_control_ip() {
+    let port = free_port().await;
+
+    let settings: GlobalSettings = serde_yaml::from_str(&format!(
+        "http_control_port: {port}\nhttp_control_ip: 127.0.0.1"
+    ))
+    .unwrap();
+
+    let addr = super::control_port_addr(
+        settings.get_http_control_ip().unwrap(),
+        settings.http_control_port,
+    );
+    assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], port)));
+
+    super::start_at(addr);
+    wait_until_served(port).await;
+
+    let response = get(port, "/index.html").await;
+    assert_eq!(response.status, 200);
+
+    // A host with an address of its own besides the loopback one: the port is closed there.
+    if let Some(ip) = an_address_which_is_not_loopback().await {
+        let connect = TcpStream::connect((ip, port));
+        let connected = tokio::time::timeout(TIMEOUT, connect).await;
+        assert!(!matches!(connected, Ok(Ok(_))), "served on {ip}:{port}");
+    }
+}
+
+/// Without `http_control_ip` the control port listens on every address, as it always did.
+#[test]
+fn the_control_port_listens_on_every_address_by_default() {
+    let settings: GlobalSettings = serde_yaml::from_str("http_control_port: 9000").unwrap();
+
+    assert_eq!(
+        super::control_port_addr(
+            settings.get_http_control_ip().unwrap(),
+            settings.http_control_port
+        ),
+        SocketAddr::from(([0, 0, 0, 0], 9000))
+    );
+
+    assert_eq!(
+        super::control_port_addr(None, None),
+        SocketAddr::from(([0, 0, 0, 0], 8000))
+    );
+}
+
 /// The control port server on a free port.
 async fn start_control_port() -> u16 {
-    let port = {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap().port()
-    };
+    let port = free_port().await;
 
     super::start_at(SocketAddr::from(([127, 0, 0, 1], port)));
 
-    // The server binds its port in a task of its own.
+    wait_until_served(port).await;
+
+    port
+}
+
+async fn free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+/// The server binds its port in a task of its own.
+async fn wait_until_served(port: u16) {
     for _ in 0..100 {
         if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-            return port;
+            return;
         }
 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     panic!("the control port did not start");
+}
+
+/// The address the host would send from to the internet - the one of its network card. A udp
+/// socket picks it on `connect`, and sends nothing. `None`: the host has no such route.
+async fn an_address_which_is_not_loopback() -> Option<IpAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    socket.connect("192.0.2.1:9").await.ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+
+    if ip.is_loopback() || ip.is_unspecified() {
+        return None;
+    }
+
+    Some(ip)
 }
 
 struct Response {

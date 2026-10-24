@@ -646,7 +646,17 @@ fn render_location(loc: &HttpProxyPassLocationModel, dialogs: DashboardDialogs) 
 
     rsx! {
         tr { class: "{row_class}",
-            td { "{loc.path}" }
+            td {
+                "{loc.path}"
+                if loc.strip_path {
+                    " "
+                    span {
+                        class: "type-badge",
+                        title: "strip_path: the location path is cut off the request before it goes upstream — /prefix/metrics?x=1 is sent as /metrics?x=1",
+                        "strip_path"
+                    }
+                }
+            }
             td {
                 span { class: "{type_class}", "{loc.r#type}" }
             }

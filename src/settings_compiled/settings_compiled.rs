@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, net::IpAddr};
 
 use rust_extensions::duration_utils::DurationExtensions;
 
@@ -35,6 +35,14 @@ impl SettingsCompiled {
         }
 
         None
+    }
+
+    /// `global_settings.http_control_ip` - checked when the settings are loaded.
+    pub fn get_http_control_ip(&self) -> Result<Option<IpAddr>, String> {
+        match self.global_settings.as_ref() {
+            Some(global_settings) => global_settings.get_http_control_ip(),
+            None => Ok(None),
+        }
     }
 
     pub fn get_connections_settings(&self) -> ConnectionsSettingsModel {

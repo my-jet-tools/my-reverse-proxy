@@ -169,7 +169,10 @@ mod tests {
             Arc::new(SshCredentials::SshAgent {
                 ssh_remote_host: "127.0.0.1".to_string(),
                 ssh_remote_port: 22,
-                ssh_user_name: std::env::var("USER").unwrap(),
+                // Windows names the user in USERNAME.
+                ssh_user_name: std::env::var("USER")
+                    .or_else(|_| std::env::var("USERNAME"))
+                    .unwrap(),
             }),
             site.root(),
             Some("index.html".to_string()),

@@ -54,6 +54,7 @@ pub trait NetworkStreamWritePart {
 
 pub enum MyOwnedWriteHalf {
     Tcp(tokio::net::tcp::OwnedWriteHalf),
+    #[cfg(unix)]
     Unix(tokio::net::unix::OwnedWriteHalf),
     Ssh(tokio::io::WriteHalf<SshAsyncChannel>),
     /// Given up by [`MyOwnedWriteHalf::reset`]: writes fail, a shutdown does nothing.
@@ -83,6 +84,7 @@ impl From<tokio::net::tcp::OwnedWriteHalf> for MyOwnedWriteHalf {
     }
 }
 
+#[cfg(unix)]
 impl From<tokio::net::unix::OwnedWriteHalf> for MyOwnedWriteHalf {
     fn from(val: tokio::net::unix::OwnedWriteHalf) -> Self {
         MyOwnedWriteHalf::Unix(val)
@@ -103,6 +105,7 @@ impl NetworkStreamWritePart for MyOwnedWriteHalf {
                 use tokio::io::AsyncWriteExt;
                 let _ = owned_write_half.shutdown().await;
             }
+            #[cfg(unix)]
             MyOwnedWriteHalf::Unix(owned_write_half) => {
                 use tokio::io::AsyncWriteExt;
                 let _ = owned_write_half.shutdown().await;
@@ -125,6 +128,7 @@ impl NetworkStreamWritePart for MyOwnedWriteHalf {
                 use tokio::io::AsyncWriteExt;
                 owned_write_half.write_all(buffer).await
             }
+            #[cfg(unix)]
             MyOwnedWriteHalf::Unix(owned_write_half) => {
                 use tokio::io::AsyncWriteExt;
                 owned_write_half.write_all(buffer).await
@@ -146,6 +150,7 @@ impl NetworkStreamWritePart for MyOwnedWriteHalf {
                 use tokio::io::AsyncWriteExt;
                 owned_write_half.flush().await?;
             }
+            #[cfg(unix)]
             MyOwnedWriteHalf::Unix(owned_write_half) => {
                 use tokio::io::AsyncWriteExt;
                 owned_write_half.flush().await?;
@@ -244,7 +249,6 @@ impl NetworkStreamWritePart for tokio::io::WriteHalf<tokio::net::UnixStream> {
     }
 }
 
-#[cfg(unix)]
 #[async_trait::async_trait]
 impl NetworkStreamWritePart for tokio::io::WriteHalf<my_ssh::SshAsyncChannel> {
     async fn shutdown_socket(&mut self) {

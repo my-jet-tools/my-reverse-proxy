@@ -11,6 +11,7 @@ use super::*;
 /// One upstream connection's write side, one variant per transport.
 pub enum UpstreamInner {
     Http1Direct(Http1ConnectionInner<tokio::io::WriteHalf<tokio::net::TcpStream>>),
+    #[cfg(unix)]
     Http1UnixSocket(Http1ConnectionInner<tokio::io::WriteHalf<tokio::net::UnixStream>>),
     Https1Direct(
         Http1ConnectionInner<
@@ -148,6 +149,7 @@ impl Upstream {
                     );
                 }
             },
+            #[cfg(unix)]
             ProxyPassToConfig::UnixHttp1(proxy_pass_to) => match &proxy_pass_to.remote_host {
                 MyReverseProxyRemoteEndpoint::Direct { remote_host } => {
                     let (result, read_part, ssh_handler) =
@@ -195,9 +197,14 @@ impl Upstream {
             // `http2` / `https2` endpoint — so this is a misconfiguration, not
             // a runtime fault, and it is refused (a `todo!()` here used to take
             // the worker task down with it).
-            ProxyPassToConfig::Http2(_)
-            | ProxyPassToConfig::McpHttp2(_)
-            | ProxyPassToConfig::UnixHttp2(_) => Err(NetworkError::OtherStr(
+            ProxyPassToConfig::Http2(_) | ProxyPassToConfig::McpHttp2(_) => {
+                Err(NetworkError::OtherStr(
+                    "an http2 upstream requires an http2/https2 endpoint — this endpoint is http/1",
+                ))
+            }
+            // An arm of its own: a cfg can not be put on one alternative of a pattern.
+            #[cfg(unix)]
+            ProxyPassToConfig::UnixHttp2(_) => Err(NetworkError::OtherStr(
                 "an http2 upstream requires an http2/https2 endpoint — this endpoint is http/1",
             )),
             ProxyPassToConfig::FilesPath(_)
@@ -216,6 +223,7 @@ impl Upstream {
     pub fn is_disconnected(&self) -> bool {
         match &self.inner {
             UpstreamInner::Http1Direct(c) => c.is_disconnected(),
+            #[cfg(unix)]
             UpstreamInner::Http1UnixSocket(c) => c.is_disconnected(),
             UpstreamInner::Https1Direct(c) => c.is_disconnected(),
             UpstreamInner::Http1OverSsh(c) => c.is_disconnected(),
@@ -236,6 +244,7 @@ impl Upstream {
         }
         match &mut self.inner {
             UpstreamInner::Http1Direct(c) => send!(c),
+            #[cfg(unix)]
             UpstreamInner::Http1UnixSocket(c) => send!(c),
             UpstreamInner::Https1Direct(c) => send!(c),
             UpstreamInner::Http1OverSsh(c) => send!(c),
@@ -254,6 +263,7 @@ impl H1Writer for Upstream {
     ) -> Result<(), NetworkError> {
         match &mut self.inner {
             UpstreamInner::Http1Direct(inner) => inner.send_with_timeout(buffer, timeout).await,
+            #[cfg(unix)]
             UpstreamInner::Http1UnixSocket(inner) => inner.send_with_timeout(buffer, timeout).await,
             UpstreamInner::Https1Direct(inner) => inner.send_with_timeout(buffer, timeout).await,
             UpstreamInner::Http1OverSsh(inner) => inner.send_with_timeout(buffer, timeout).await,

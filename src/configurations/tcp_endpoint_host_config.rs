@@ -35,6 +35,22 @@ impl TcpEndpointHostConfig {
             return Err("proxy_pass_to is required for tcp location type".to_string());
         };
 
+        // Only the first location is served, and the setting is wrong on any of them: every
+        // location is looked at.
+        if let Some(location) = host_settings
+            .locations
+            .iter()
+            .find(|location| location.get_strip_path())
+        {
+            return Err(format!(
+                "Endpoint '{}' is 'type: tcp', a forward of bytes with no HTTP layer, so \
+                 'strip_path' of its location '{}' has no meaning - there is no request path to \
+                 cut. Remove 'strip_path'",
+                host_endpoint.as_str(),
+                location.path.as_deref().unwrap_or("/")
+            ));
+        }
+
         let ip_white_list_id =
             crate::scripts::get_endpoint_white_listed_ip(settings_model, host_settings).await?;
 
@@ -56,6 +72,21 @@ impl TcpEndpointHostConfig {
 
         let remote_host =
             MyReverseProxyRemoteEndpoint::try_parse(remote_host.as_str(), settings_model).await?;
+
+        // Through a gateway it is the far side which connects to the socket, and it is refused
+        // all the same: a settings file which names a unix socket does not load here.
+        #[cfg(not(unix))]
+        if remote_host.is_unix_socket() {
+            return Err(format!(
+                "Endpoint '{}': proxy_pass_to '{}' is a unix socket: {}",
+                host_endpoint.as_str(),
+                location_settings
+                    .proxy_pass_to
+                    .as_deref()
+                    .unwrap_or_default(),
+                crate::consts::UNIX_SOCKETS_NOT_SUPPORTED
+            ));
+        }
 
         // Transport timeout cascade for this tcp endpoint: global → endpoint.
         let resolved = settings_model
@@ -122,4 +153,47 @@ fn access_settings_a_tcp_endpoint_can_not_apply(
         "a forward of bytes with no HTTP layer",
         "remove the setting, or use an http type of endpoint",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `locations`: the `locations:` list as a settings file writes it.
+    async fn compile(locations: &str) -> Result<TcpEndpointHostConfig, String> {
+        let host_settings: HostSettings = my_settings_reader::serde_yaml::from_str(&format!(
+            "endpoint:\n  type: tcp\nlocations:\n{locations}"
+        ))
+        .unwrap();
+
+        TcpEndpointHostConfig::new(
+            &SettingsCompiled::default(),
+            EndpointHttpHostString::new("8000".to_string()).unwrap(),
+            &host_settings,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn strip_path_on_any_location_of_a_tcp_endpoint_is_refused() {
+        for locations in [
+            "- proxy_pass_to: 127.0.0.1:9000\n  strip_path: true\n",
+            // Only the first location is served: the second one is looked at all the same.
+            "- proxy_pass_to: 127.0.0.1:9000\n- path: /x/\n  proxy_pass_to: 127.0.0.1:9001\n  strip_path: true\n",
+        ] {
+            let Err(err) = compile(locations).await else {
+                panic!("{locations}: strip_path is accepted");
+            };
+
+            assert!(
+                err.contains("'type: tcp'") && err.contains("'strip_path'"),
+                "{locations}: {err}"
+            );
+        }
+
+        compile("- proxy_pass_to: 127.0.0.1:9000\n").await.unwrap();
+        compile("- proxy_pass_to: 127.0.0.1:9000\n  strip_path: false\n")
+            .await
+            .unwrap();
+    }
 }

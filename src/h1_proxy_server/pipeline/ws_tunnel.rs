@@ -166,6 +166,7 @@ pub async fn run_ws_tunnel<
         UpstreamInner::Http1Direct(inner) => {
             pump_c2s!(inner.remote_write_part);
         }
+        #[cfg(unix)]
         UpstreamInner::Http1UnixSocket(inner) => {
             pump_c2s!(inner.remote_write_part);
         }

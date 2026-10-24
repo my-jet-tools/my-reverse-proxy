@@ -24,6 +24,7 @@ pub enum HttpResponse {
 
 pub enum WebSocketUpgradeStream {
     TcpStream(tokio::net::TcpStream),
+    #[cfg(unix)]
     UnixStream(tokio::net::UnixStream),
     TlsStream(Box<my_tls::tokio_rustls::client::TlsStream<tokio::net::TcpStream>>),
     SshChannel(SshAsyncChannel),

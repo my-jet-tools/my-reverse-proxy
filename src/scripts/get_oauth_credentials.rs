@@ -101,7 +101,7 @@ async fn resolve_signing_key(oauth_id: &str, settings: &OAuthSettings) -> Result
         .clone()
         .unwrap_or_else(|| default_signing_key_file(oauth_id));
 
-    let path = rust_extensions::file_utils::format_path(path.as_str()).to_string();
+    let path = crate::settings::expand_home(path.as_str())?;
 
     SigningKeyFile::load_or_create(std::path::Path::new(path.as_str())).await
 }

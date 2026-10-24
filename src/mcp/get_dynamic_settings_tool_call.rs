@@ -63,5 +63,5 @@ pub async fn resolve_dynamic_configurations_file_path() -> Result<String, String
         "dynamic_configurations_file is not configured in the main settings".to_string()
     })?;
 
-    Ok(rust_extensions::file_utils::format_path(dynamic_file.as_str()).to_string())
+    crate::settings::expand_home(dynamic_file.as_str())
 }

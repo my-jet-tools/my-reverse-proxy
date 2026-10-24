@@ -16,6 +16,7 @@ impl MyTimerTick for PoolSupervisorTimer {
         for pool in APP_CTX.h1_tls_pools.list_pools() {
             pool.supervisor_tick().await;
         }
+        #[cfg(unix)]
         for pool in APP_CTX.h1_uds_pools.list_pools() {
             pool.supervisor_tick().await;
         }
@@ -25,6 +26,7 @@ impl MyTimerTick for PoolSupervisorTimer {
         for pool in APP_CTX.h2_tls_pools.list_pools() {
             pool.supervisor_tick().await;
         }
+        #[cfg(unix)]
         for pool in APP_CTX.h2_uds_pools.list_pools() {
             pool.supervisor_tick().await;
         }

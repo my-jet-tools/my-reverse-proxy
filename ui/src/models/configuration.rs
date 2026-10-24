@@ -94,6 +94,9 @@ pub struct HttpProxyPassLocationModel {
     /// 0 = unknown, 1 = ok, 2 = error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status: Option<i64>,
+    /// The location has `strip_path`: its path is cut off the request before it goes upstream.
+    #[serde(default)]
+    pub strip_path: bool,
 }
 
 /// Mirror of `GatewayServerStatus` — the local server-side gateway endpoint and

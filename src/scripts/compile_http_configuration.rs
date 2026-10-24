@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     configurations::{
         EndpointHttpHostString, HttpEndpointInfo, HttpEndpointInfoParams, ListenHttpEndpointType,
-        NotServedReason,
+        NotServedReason, ProxyPassLocationConfig,
     },
     settings::HostSettings,
     settings_compiled::SettingsCompiled,
@@ -154,6 +154,18 @@ pub async fn compile_http_configuration(
             ));
         }
 
+        // Where the request path is not what goes on, `strip_path` has nothing to cut. Refused
+        // rather than ignored: the operator expects the upstream to see another path.
+        if proxy_pass_to.strip_path {
+            if let Some(reason) = strip_path_has_no_meaning(http_type, &proxy_pass_to) {
+                return Err(format!(
+                    "Endpoint '{}', location '{}': 'strip_path' has no meaning here - {}. Remove \
+                     'strip_path'",
+                    listen_host, proxy_pass_to.path, reason
+                ));
+            }
+        }
+
         {
             locations.push(Arc::new(proxy_pass_to));
         }
@@ -202,6 +214,44 @@ pub async fn compile_http_configuration(
     });
 
     Ok(http_endpoint_info)
+}
+
+/// Why a location with `strip_path` can not have it, if it can not: the request path is not
+/// what its upstream gets, or there is no upstream.
+fn strip_path_has_no_meaning(
+    http_type: ListenHttpEndpointType,
+    location: &ProxyPassLocationConfig,
+) -> Option<&'static str> {
+    use crate::configurations::ProxyPassToConfig;
+
+    if matches!(http_type, ListenHttpEndpointType::Mcp) {
+        return Some(
+            "the endpoint is 'type: mcp', a raw bridge with no HTTP layer, so there is no \
+             request path to cut",
+        );
+    }
+
+    let reason = match &location.proxy_pass_to {
+        ProxyPassToConfig::McpHttp1(_) | ProxyPassToConfig::McpHttp2(_) => {
+            "an mcp location sends every request to the path of its proxy_pass_to"
+        }
+        ProxyPassToConfig::Static(_) => "a static location answers by itself",
+        ProxyPassToConfig::Drop => "a drop location closes the connection",
+        _ => {
+            // The cut is made in the path as it was received, where the decoded match of the
+            // location path ends. When that is not text, the end can fall inside a letter.
+            let decoded = crate::types::percent_decode_once(location.path.as_bytes());
+
+            if std::str::from_utf8(&decoded).is_ok() {
+                return None;
+            }
+
+            "the path of the location, percent-decoded, is not UTF-8 text, so the cut could \
+             fall inside a letter"
+        }
+    };
+
+    Some(reason)
 }
 
 /// The access settings of the endpoint which its type has no way to apply. The settings load
@@ -322,5 +372,161 @@ mod tests {
         // Anything else still goes through a gateway.
         compile("http", "http").await.unwrap();
         compile("http2", "http2").await.unwrap();
+    }
+
+    /// `locations`: the `locations:` list as a settings file writes it.
+    async fn compile_locations(
+        endpoint_type: &str,
+        locations: &str,
+    ) -> Result<HttpEndpointInfo, String> {
+        let host_settings: HostSettings = my_settings_reader::serde_yaml::from_str(&format!(
+            "endpoint:\n  type: {endpoint_type}\nlocations:\n{locations}"
+        ))
+        .unwrap();
+
+        let listen_type = match endpoint_type {
+            "http" => ListenHttpEndpointType::Http1,
+            "http2" => ListenHttpEndpointType::Http2,
+            "mcp" => ListenHttpEndpointType::Mcp,
+            other => panic!("no endpoint type {other} in these tests"),
+        };
+
+        compile_http_configuration(
+            &SettingsCompiled::default(),
+            EndpointHttpHostString::new("localhost:8000".to_string()).unwrap(),
+            &host_settings,
+            listen_type,
+        )
+        .await
+    }
+
+    /// A location with `strip_path`, of the type and to the upstream given.
+    fn stripped_location(location_type: &str, proxy_pass_to: &str) -> String {
+        format!(
+            "- path: /prefix/\n  type: {location_type}\n  proxy_pass_to: '{proxy_pass_to}'\n  strip_path: true\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn strip_path_is_taken_by_a_location_which_sends_the_request_on() {
+        let mut locations = Vec::new();
+
+        for (location_type, proxy_pass_to) in [
+            ("http", "http://127.0.0.1:8000"),
+            ("http", "https://127.0.0.1:8000"),
+            ("http2", "http://127.0.0.1:8000"),
+            ("http", "gateway:gw->http://127.0.0.1:8000"),
+            ("http2", "gateway:gw->http://127.0.0.1:8000"),
+            ("http", "ssh:user@127.0.0.1:22->http://127.0.0.1:8000"),
+            ("http2", "ssh:user@127.0.0.1:22->http://127.0.0.1:8000"),
+        ] {
+            locations.push(stripped_location(location_type, proxy_pass_to));
+        }
+
+        // A folder served under a prefix, and the upstream a client names.
+        locations.push(
+            "- path: /static/\n  proxy_pass_to: '/srv/www'\n  default_file: index.html\n  strip_path: true\n"
+                .to_string(),
+        );
+        locations.push("- path: /dynamic/\n  type: dynamic\n  strip_path: true\n".to_string());
+
+        #[cfg(unix)]
+        {
+            locations.push(stripped_location("unix+http", "/var/run/app.sock"));
+            locations.push(stripped_location("unix+http2", "/var/run/app.sock"));
+        }
+
+        // Escapes in the path of the location are fine as long as it is text, decoded.
+        locations.push(
+            stripped_location("http", "http://127.0.0.1:8000").replace("/prefix/", "/caf%C3%A9/"),
+        );
+
+        for endpoint_type in ["http", "http2"] {
+            for location in &locations {
+                let endpoint_info = compile_locations(endpoint_type, location)
+                    .await
+                    .unwrap_or_else(|err| panic!("{endpoint_type}: {location}: {err}"));
+
+                assert!(
+                    endpoint_info.locations[0].strip_path,
+                    "{endpoint_type}: {location}"
+                );
+            }
+        }
+
+        // Not set, it is off.
+        let endpoint_info = compile_locations(
+            "http",
+            "- path: /prefix/\n  proxy_pass_to: 'http://127.0.0.1:8000'\n",
+        )
+        .await
+        .unwrap();
+        assert!(!endpoint_info.locations[0].strip_path);
+    }
+
+    #[tokio::test]
+    async fn strip_path_is_refused_where_the_request_path_goes_nowhere() {
+        for (endpoint_type, location) in [
+            (
+                "http",
+                stripped_location("mcp", "http://127.0.0.1:8000/mcp"),
+            ),
+            (
+                "http2",
+                stripped_location("mcp-h2", "http://127.0.0.1:8000/mcp"),
+            ),
+            (
+                "http",
+                "- path: /prefix/\n  type: static\n  strip_path: true\n".to_string(),
+            ),
+            (
+                "http2",
+                "- path: /prefix/\n  type: static\n  strip_path: true\n".to_string(),
+            ),
+            (
+                "http",
+                "- path: /prefix/\n  type: drop\n  strip_path: true\n".to_string(),
+            ),
+            (
+                "http2",
+                "- path: /prefix/\n  type: drop\n  strip_path: true\n".to_string(),
+            ),
+            // A byte bridge: no request path at all.
+            ("mcp", stripped_location("http", "http://127.0.0.1:8000")),
+            // The second location of a `type: mcp` endpoint is looked at as well.
+            (
+                "mcp",
+                format!(
+                    "- path: /\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:8000'\n{}",
+                    stripped_location("http", "http://127.0.0.1:8000")
+                ),
+            ),
+            // `%C3` alone is half a letter.
+            (
+                "http",
+                stripped_location("http", "http://127.0.0.1:8000").replace("/prefix/", "/caf%C3"),
+            ),
+            (
+                "http2",
+                stripped_location("http", "http://127.0.0.1:8000").replace("/prefix/", "/%FF/"),
+            ),
+        ] {
+            let Err(err) = compile_locations(endpoint_type, &location).await else {
+                panic!("{endpoint_type}: {location}: strip_path is accepted");
+            };
+
+            assert!(
+                err.contains("'strip_path' has no meaning here"),
+                "{endpoint_type}: {location}: {err}"
+            );
+        }
+
+        // Off, it is nothing to refuse.
+        compile_locations(
+            "http",
+            "- path: /prefix/\n  type: static\n  strip_path: false\n",
+        )
+        .await
+        .unwrap();
     }
 }

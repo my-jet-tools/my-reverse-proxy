@@ -103,8 +103,9 @@ impl Drop for TcpGatewayServer {
 
 /// `TcpListener::bind` without the `await`: [`TcpGatewayServer::new`] runs inside the `APP_CTX`
 /// initializer, which is not async. Nothing here waits - `listen` is a literal address, so
-/// nothing is resolved - and the socket is the one tokio's bind makes: std sets `SO_REUSEADDR`
-/// and the same backlog. Like the `tokio::spawn` next to it, it needs the runtime entered.
+/// nothing is resolved - and the socket is the one tokio's bind makes: on unix std sets
+/// `SO_REUSEADDR` (on Windows neither of them does), and the same backlog. Like the
+/// `tokio::spawn` next to it, it needs the runtime entered.
 fn bind(listen: &str) -> Result<TcpListener, String> {
     std::net::TcpListener::bind(listen)
         .and_then(|listener| {

@@ -69,7 +69,8 @@ impl GatewayClientSettings {
             )
         })?;
 
-        let resolved = rust_extensions::file_utils::format_path(key_path).to_string();
+        let resolved = super::expand_home(key_path)
+            .map_err(|err| format!("Gateway client '{client_id}': {err}"))?;
 
         let raw = std::fs::read(resolved.as_str()).map_err(|err| {
             format!(

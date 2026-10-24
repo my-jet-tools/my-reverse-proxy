@@ -11,9 +11,11 @@ pub use listen_server_handler::*;
 mod listen_tcp_server;
 pub use listen_tcp_server::*;
 mod http_request_handler;
+#[cfg(unix)]
 mod listen_unix_server;
 pub mod mcp;
 mod tcp_port_forward;
+#[cfg(unix)]
 pub use listen_unix_server::*;
 
 #[cfg(test)]
@@ -27,3 +29,6 @@ mod ambiguous_path_tests;
 
 #[cfg(test)]
 mod h1_malformed_request_tests;
+
+#[cfg(test)]
+mod strip_path_tests;

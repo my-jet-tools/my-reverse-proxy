@@ -20,6 +20,9 @@ pub enum BadFileRequestPath {
     /// An empty segment which is not the last one, or a `.` segment: `//x` and `/./x` are the
     /// file `/x` written another way.
     AliasSegment,
+    /// On Windows, a segment which Windows reads as another name: see [`is_windows_alias`].
+    #[cfg(windows)]
+    WindowsAlias,
 }
 
 impl<'s> FileRequestPath<'s> {
@@ -66,6 +69,13 @@ impl<'s> FileRequestPath<'s> {
             }
         }
 
+        // Windows has more spellings of one file than these, and the path goes to it as it was
+        // received.
+        #[cfg(windows)]
+        if path[1..].split('/').any(is_windows_alias) {
+            return Err(BadFileRequestPath::WindowsAlias);
+        }
+
         Ok(Self { path })
     }
 
@@ -107,6 +117,47 @@ impl<'s> FileRequestPath<'s> {
     }
 }
 
+/// A segment of a request path which Windows reads as another name than the one written - so the
+/// file would be served under a path the rules of its location are not written for, the way
+/// `//x` would be. A location `/private/` does not take `/private./x` nor `/private\x`, and to
+/// Windows both are `private\x`:
+/// - a backslash is a separator;
+/// - a `.` or a space at the end of a segment is dropped;
+/// - a `:` names a stream of a file or a folder (`private::$INDEX_ALLOCATION` is `private`);
+/// - `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` (and `COM¹`-`COM³`, `LPT¹`-`LPT³`),
+///   with an extension or without one, and `CONIN$`, `CONOUT$` are devices in every folder - a
+///   read of one waits for the device;
+/// - `~` and a digit is how a short 8.3 name ends (`PRIVAT~1` is `private-files` on a volume
+///   which keeps short names). Wider than a short name: `report~2.html` is refused too.
+///
+/// The segment is the one the file system gets: as received, not decoded.
+#[cfg(any(windows, test))]
+fn is_windows_alias(segment: &str) -> bool {
+    if segment.contains(['\\', ':']) || segment.ends_with(['.', ' ']) {
+        return true;
+    }
+
+    let stem = segment.split('.').next().unwrap_or(segment).as_bytes();
+    let is_port = |number: &[u8]| {
+        matches!(number, [b'1'..=b'9']) || ["¹", "²", "³"].iter().any(|n| number == n.as_bytes())
+    };
+    let is_device = [&b"CON"[..], b"PRN", b"AUX", b"NUL", b"CONIN$", b"CONOUT$"]
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+        || (stem.len() > 3
+            && (stem[..3].eq_ignore_ascii_case(b"COM") || stem[..3].eq_ignore_ascii_case(b"LPT"))
+            && is_port(&stem[3..]));
+
+    if is_device {
+        return true;
+    }
+
+    segment
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b'~' && pair[1].is_ascii_digit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,17 +190,12 @@ mod tests {
             "/a/",
             "/a/b/",
             "/.a",
-            "/a./b",
             "/%2e/a",
             "/a/%2e",
             "/.well-known/acme-challenge/x",
             "/.env",
             "/a..b",
             "/..a",
-            "/a..",
-            "/a../b",
-            "/...",
-            "/.../x",
             "/%2e",
             "/a%2eb",
             "/file%20name.txt",
@@ -159,7 +205,6 @@ mod tests {
             "/%zz",
             "/a%zz",
             "/a%2fb",
-            "/a\\b",
             "/файл.txt",
             "/%D1%84.txt",
             "/%ff%fe",
@@ -168,6 +213,79 @@ mod tests {
             "/..;/x",
         ] {
             ok(path);
+        }
+    }
+
+    /// Names of their own on unix, and other spellings of a name to Windows (`a.` is `a`, `a\b`
+    /// is `a/b`): there they are refused, as `//x` is everywhere.
+    #[test]
+    fn names_which_windows_reads_as_other_names() {
+        for path in [
+            "/a./b",
+            "/a..",
+            "/a../b",
+            "/...",
+            "/.../x",
+            "/a\\b",
+            "/private\\secret.txt",
+            "/private./secret.txt",
+            "/private::$INDEX_ALLOCATION/secret.txt",
+            "/secret.txt::$DATA",
+            "/a:b",
+            "/con",
+            "/CON.txt",
+            "/a/nul",
+            "/Aux.log",
+            "/com1",
+            "/LPT9.log",
+            "/COM¹",
+            "/lpt³.txt",
+            "/CONIN$",
+            "/conout$.log",
+            "/PRIVAT~1/secret.txt",
+            "/report~2.html",
+        ] {
+            #[cfg(not(windows))]
+            ok(path);
+            #[cfg(windows)]
+            refused(path, BadFileRequestPath::WindowsAlias);
+        }
+
+        // On every platform: what the rule takes for a Windows spelling, and what it does not.
+        for segment in [
+            "a.",
+            "a ",
+            "a\\b",
+            "a:b",
+            "nul",
+            "NUL.tar.gz",
+            "com9",
+            "PRIVAT~1",
+        ] {
+            assert!(is_windows_alias(segment), "{segment}");
+        }
+
+        for segment in [
+            "a",
+            ".env",
+            ".well-known",
+            "a.b",
+            "console.log",
+            "con-x",
+            "nullable",
+            "com0",
+            "com10",
+            "lpt",
+            "com⁴",
+            "conin",
+            "~backup",
+            "a~b",
+            "%2e",
+            "a%5cb",
+            "файл.txt",
+            "",
+        ] {
+            assert!(!is_windows_alias(segment), "{segment}");
         }
     }
 

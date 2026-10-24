@@ -65,7 +65,7 @@ async fn apply_ssh_config(
     }
 
     if let Some(private_key_file) = ssh_config_settings.private_key_file.as_ref() {
-        let private_key_file = rust_extensions::file_utils::format_path(private_key_file);
+        let private_key_file = crate::settings::expand_home(private_key_file)?;
         let load_result = tokio::fs::read_to_string(private_key_file.as_str()).await;
 
         if let Err(err) = load_result {
