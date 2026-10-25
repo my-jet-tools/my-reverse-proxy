@@ -1,5 +1,10 @@
-/// The settings file: `.my-reverse-proxy` in the home directory.
+/// The settings file: what `--settings` names, otherwise `.my-reverse-proxy` in the home
+/// directory.
 pub fn settings_file_path() -> Result<String, String> {
+    if let Some(settings_file) = super::explicit_settings_file() {
+        return Ok(settings_file.file.clone());
+    }
+
     Ok(format!("{}/.my-reverse-proxy", super::home_dir()?))
 }
 

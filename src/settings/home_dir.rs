@@ -1,8 +1,13 @@
-/// The home directory: the folder the settings file `.my-reverse-proxy` is read from, and what a
-/// leading `~` of a path stands for. It is `HOME` when that is set - to anything, so a second
-/// instance is started by pointing `HOME` somewhere else - and otherwise, on Windows, which does
-/// not set `HOME`, `USERPROFILE`.
+/// The home directory: the folder the settings file is read from, and what a leading `~` of a
+/// path stands for. It is the folder of the file `--settings` names, when the command line names
+/// one; otherwise `HOME` when that is set - to anything, so a second instance is started by
+/// pointing `HOME` somewhere else - and otherwise, on Windows, which does not set `HOME`,
+/// `USERPROFILE`.
 pub fn home_dir() -> Result<String, String> {
+    if let Some(settings_file) = super::explicit_settings_file() {
+        return Ok(settings_file.dir.clone());
+    }
+
     #[cfg(windows)]
     let fallback = Some(("USERPROFILE", std::env::var("USERPROFILE").ok()));
     #[cfg(not(windows))]
@@ -28,7 +33,7 @@ fn home_dir_of(
     };
 
     Err(format!(
-        "The home directory is not known: {not_set}. The settings file .my-reverse-proxy is read from the home directory - set HOME to the folder which holds it"
+        "The home directory is not known: {not_set}. The settings file .my-reverse-proxy is read from the home directory - set HOME to the folder which holds it, or name the file with --settings <file>"
     ))
 }
 
