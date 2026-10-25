@@ -54,3 +54,5 @@ mod expand_home;
 pub use expand_home::*;
 mod settings_file_path;
 pub use settings_file_path::*;
+mod explicit_settings_file;
+pub use explicit_settings_file::*;
