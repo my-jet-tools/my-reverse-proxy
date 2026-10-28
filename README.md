@@ -12,6 +12,9 @@ instance on the same machine is started by pointing `HOME` somewhere else:
 HOME=/srv/proxy-b ./target/release/my-reverse-proxy
 ```
 
+The Windows build has a command line - `--settings`, and `--install`, `--start`, `--uninstall` for running as a
+Windows service; see "Running on Windows" at the end of this file. Linux and macOS have none of it.
+
 On a settings-level error it refuses to start and prints the reason; a per-endpoint problem is reported through
 the API instead (see "How a failure is reported").
 
@@ -2190,9 +2193,10 @@ from Linux.
 - NASM on `PATH`, for `aws-lc-sys` - or set `AWS_LC_SYS_PREBUILT_NASM=1`, and it uses the NASM objects it ships;
 - Git, to get the repository.
 
-`my-ssh` 0.1.2, the version `Cargo.toml` names, does not build on Windows yet: it binds a unix socket for a port
-forward and reaches the ssh agent through a unix socket only. The Windows build needs a `my-ssh` tag with the fix for
-that, named in `Cargo.toml`.
+`my-ssh` 0.1.2, the version `Cargo.toml` names, builds on Windows: the tag points at the commit which makes the
+unix-socket port forward and the unix-socket ssh agent unix-only (on Windows the agent is the OpenSSH named pipe, see
+"Other differences"). A `Cargo.lock` written before the tag was moved there (2026-10-24) still pins the old commit,
+which does not build on Windows - `cargo generate-lockfile` refreshes it.
 
 CMake is not needed: `aws-lc-sys` needs it only for its FIPS build, which is not used here.
 
@@ -2214,7 +2218,8 @@ A release tag also builds it on GitHub: the release of the tag gets
 
 The admin ui (`wwwroot\`) and the IPv6 country database (`ip_v6\`) are read relative to the working directory, as
 in the Docker image. Start the exe from the repository root, or copy both folders into the folder you start it
-from. With the exe of a release, take them from the repository at the same tag.
+from. With the exe of a release, take them from the repository at the same tag. Installed as a service, the proxy
+makes the folder of the exe its working directory, so both folders go next to the exe.
 
 ## Settings file location
 
@@ -2222,8 +2227,15 @@ The settings are read from `%HOME%\.my-reverse-proxy` when `HOME` is set, otherw
 `%USERPROFILE%\.my-reverse-proxy` (`C:\Users\<name>\.my-reverse-proxy`). A leading `~` in the settings is the same
 folder. When neither variable is set, the proxy does not start: it prints why and exits.
 
-A second instance is started by pointing `HOME` somewhere else, as on Linux. In PowerShell (this sets `HOME` for
-the rest of that window):
+`--settings <file>` reads that file instead, and makes its folder the home directory - a service is told its
+settings this way (see "Running as a Windows service"):
+
+```powershell
+.\my-reverse-proxy.exe --settings C:\proxy-b\settings.yaml
+```
+
+A second instance is also started by pointing `HOME` somewhere else, as on Linux. In PowerShell (this sets `HOME`
+for the rest of that window):
 
 ```powershell
 $env:HOME = 'C:\proxy-b'; .\my-reverse-proxy.exe
@@ -2240,6 +2252,53 @@ A local path in the settings - a certificate, a key, a folder of files - can be 
 `C:\certs\cert.pem` or `C:/certs/cert.pem`. A path behind `ssh:` or a gateway is a path of the other host, written
 the way that host writes it. Write a path with
 `\` without quotes or in single quotes - in double quotes YAML reads `\` as an escape.
+
+## Running as a Windows service
+
+The exe registers itself with the Service Control Manager - no wrapper such as NSSM or WinSW. From an elevated
+PowerShell, with the exe in the folder it is going to stay in (`wwwroot\` and `ip_v6\` next to it):
+
+```powershell
+.\my-reverse-proxy.exe --install --settings C:\my-reverse-proxy\settings.yaml
+.\my-reverse-proxy.exe --start
+```
+
+`--install` registers the service `my-reverse-proxy`: started automatically at boot, as LocalSystem, restarted
+10 seconds after it fails - a crash, or a start which fails - for as long as it fails. Its command line is this exe
+with `--run-as-service` and the settings file as it was at install time, so a moved exe or settings file leaves a
+service which does not start - `--uninstall` and `--install` again.
+
+The settings file is required: `--settings <file>`, or a `settings.yaml` next to the exe, which is taken when
+`--settings` is not given. The service runs as LocalSystem, whose profile folder
+(`C:\Windows\system32\config\systemprofile`) holds nobody's `.my-reverse-proxy`. The folder of the file named is
+the home directory of the service - what a leading `~` in the settings stands for - so `~/.my-reverse-proxy-dynamic`
+and `~/.my-reverse-proxy-oauth` are next to the settings file, and a path which is neither absolute nor under `~`
+is read from the folder of the exe.
+
+| Command | What it does |
+|---|---|
+| `--install [--name <service>] [--description <text>] [--settings <file>]` | registers the service and exits. `--name` is the service name, `my-reverse-proxy` when not given; `--description` is what services.msc shows in its Description column |
+| `--start [--name <service>]` | starts the installed service, as `sc start my-reverse-proxy` does |
+| `--uninstall [--name <service>]` | stops the service when it runs, and removes it |
+| no option | runs in the console, as before; `--settings <file>` is honored here too |
+
+Two proxies on one machine are two services - `--name proxy-b --settings C:\proxy-b\settings.yaml` - each with a
+control port of its own.
+
+A service has no console, so what the proxy prints goes nowhere. Before installing, run the exe in the console
+with the same `--settings`: a settings error is printed there. The installed service stops right after it is
+started, and is started again every 10 seconds; the System event log records each stop - "terminated with the
+following service-specific error", event 7024, followed by 7031 for the restart - but not the reason. Once it
+runs, the admin ui and the API on
+the control port show the endpoints, their errors (`GET /api/configuration/Current`) and the proxy logs, as for a
+console run.
+
+Windows Firewall does not ask about a service the way it asks about a console program; a port the proxy listens on
+is opened with a rule for the exe:
+
+```powershell
+New-NetFirewallRule -DisplayName my-reverse-proxy -Direction Inbound -Action Allow -Program C:\my-reverse-proxy\my-reverse-proxy.exe
+```
 
 ## What is not available on Windows
 
@@ -2261,7 +2320,13 @@ other endpoints run.
   names.
 - A files location answers `400 Bad Request` to the paths Windows reads as another name - `/private./x`,
   `/private\x`, `/CON` - see "How a request picks a file".
-- Ctrl+C stops the proxy. Running it as a Windows service is not covered here.
+- A TCP reset discards what the other side has not read yet - on Linux it is read first, then the error. So
+  behind a gateway on Windows, a target which reads an upload slowly while it keeps sending, and goes on
+  sending after the client has closed, can lose the tail of the upload: the gateway lets the socket go
+  2 seconds after it has handed the target the last bytes, and the target's next send is answered with a
+  reset. A target which answers a request and then closes or waits is not concerned.
+- Ctrl+C stops a proxy run in the console; an installed service is stopped by the Service Control Manager - see
+  "Running as a Windows service".
 
 ## Example: local exporters behind one https port
 

@@ -763,6 +763,13 @@ async fn the_response_tail_reaches_a_slow_client_which_keeps_sending() {
 /// The initiator uploads and closes while the upstream keeps sending. The acceptor must keep
 /// reading the upstream until its writer has flushed the upload - closing the socket with unread
 /// input in it resets the connection and loses the upload tail.
+///
+/// Not on Windows: its loopback takes the whole upload at once, so the writer has flushed before
+/// the upstream has read any of it, and once the acceptor lets the socket go - 2 seconds later -
+/// the upstream's next send is answered with a reset, which on Windows discards what it has not
+/// read yet. Holding the socket while the upstream sends would hold a flooding upstream for the
+/// whole linger limit (see `an_acceptor_waiting_for_credit_lets_go_when_the_initiator_closes`).
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_upload_tail_reaches_an_upstream_which_keeps_sending() {
     let gateway = Gateway::start("chatty-upstream", false).await;
@@ -1212,8 +1219,8 @@ async fn allowed_ip_lets_only_the_listed_addresses_in() {
     wait_until(|| server.get_gateway_connection("listed").is_some()).await;
 }
 
-/// A port which can not be had fails the construction of the server - `AppContext::new` unwraps
-/// it, which ends the startup - instead of leaving a server which listens nowhere.
+/// A port which can not be had fails the construction of the server - `AppContext::new` returns
+/// the error, which ends the startup - instead of leaving a server which listens nowhere.
 #[tokio::test]
 async fn a_server_does_not_start_on_a_taken_port() {
     let key = signing_key();
@@ -2111,10 +2118,13 @@ async fn the_tail_before_a_close_arrives_past_the_window() {
 async fn a_failed_write_ends_the_forwarding_within_the_drain_limit_without_a_reader() {
     let gateway = Gateway::start("fc-drain", false).await;
 
+    // The upstream keeps its socket once it has sent: closed with the upload unread in it, the
+    // socket would reset the connection before the writer is failed - and on Windows, whose
+    // loopback takes all of the data at once, that is at once.
     let data = Arc::new(pseudo_random(MORE_THAN_THE_BUFFERS));
     let upstream = {
         let data = data.clone();
-        start_upstream(move |stream| send_and_close(stream, data.clone())).await
+        start_upstream(move |stream| send_and_hold(stream, data.clone())).await
     };
 
     let connection_id = gateway.client.get_next_connection_id();
@@ -4372,6 +4382,14 @@ async fn send_and_close(mut stream: TcpStream, data: Arc<Vec<u8>>) {
     let _ = stream.write_all(&data).await;
 }
 
+/// Sends `data` and keeps the connection open - for the test to end it, not a close of the socket
+/// with unread input in it, which is a reset.
+async fn send_and_hold(mut stream: TcpStream, data: Arc<Vec<u8>>) {
+    let _ = stream.write_all(&data).await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    drop(stream);
+}
+
 /// Starts reading after `delay`, reads until EOF, then sends what it got.
 async fn collect(
     mut stream: TcpStream,
@@ -5470,6 +5488,7 @@ async fn answer_then_close(stream: TcpStream, answer: Arc<Vec<u8>>) {
 
 /// Keeps writing, and starts reading - slowly - only after 1.5 s; sends what it read once the
 /// connection is closed.
+#[cfg(unix)]
 async fn chatter_then_collect(stream: TcpStream, collected: mpsc::UnboundedSender<Vec<u8>>) {
     let (mut read, mut write) = stream.into_split();
 

@@ -38,15 +38,42 @@ use super::{ActiveListenPorts, CertPassKeys, Metrics, Prometheus};
 pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+// Tests start from empty settings rather than the `~/.my-reverse-proxy` of
+// whoever runs them, and build the endpoints they need themselves.
+#[cfg(test)]
+pub static APP_CTX: std::sync::LazyLock<AppContext> =
+    std::sync::LazyLock::new(|| AppContext::new(SettingsCompiled::default()).unwrap());
+
+// The proxy has built it from the settings file in `build_app_ctx`.
+#[cfg(not(test))]
 pub static APP_CTX: std::sync::LazyLock<AppContext> = std::sync::LazyLock::new(|| {
-    // Tests start from empty settings rather than the `~/.my-reverse-proxy` of
-    // whoever runs them, and build the endpoints they need themselves.
-    #[cfg(test)]
-    let settings_model = SettingsCompiled::default();
-    #[cfg(not(test))]
-    let settings_model = SettingsCompiled::load_settings_block().unwrap();
-    AppContext::new(settings_model)
+    BUILT_APP_CTX
+        .lock()
+        .unwrap()
+        .take()
+        .expect("APP_CTX is used before build_app_ctx has built it")
 });
+
+static BUILT_APP_CTX: std::sync::Mutex<Option<AppContext>> = std::sync::Mutex::new(None);
+
+/// Builds `APP_CTX` from the settings file, before anything uses it. A settings error - a value
+/// which does not parse, a key file which is not there, a gateway port which is taken - comes
+/// back as an error for the startup to report, where in the initializer of `APP_CTX` it could
+/// only panic, and a panic aborts an installed Windows service.
+///
+/// The lock is held while the context is built: `AppContext::new` spawns the gateway loops, and
+/// one which touches `APP_CTX` before the context is in place waits for it here.
+pub fn build_app_ctx() -> Result<(), String> {
+    let settings_model = SettingsCompiled::load_settings_block()?;
+
+    let mut built = BUILT_APP_CTX.lock().unwrap();
+    *built = Some(AppContext::new(settings_model)?);
+    drop(built);
+
+    std::sync::LazyLock::force(&APP_CTX);
+
+    Ok(())
+}
 
 pub struct AppContext {
     pub http_over_ssh_clients_pool: HttpClientPool<SshAsyncChannel, HttpOverSshConnector>,
@@ -120,9 +147,9 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    pub fn new(settings_model: SettingsCompiled) -> Self {
+    pub fn new(settings_model: SettingsCompiled) -> Result<Self, String> {
         let http_control_port = settings_model.get_http_control_port();
-        let http_control_ip = settings_model.get_http_control_ip().unwrap();
+        let http_control_ip = settings_model.get_http_control_ip()?;
         let connection_settings = settings_model.get_connections_settings();
         let default_h2_livness_url = settings_model.get_default_h2_livness_url();
         let pool_supervisor_interval = settings_model.get_pool_supervisor_interval();
@@ -135,19 +162,16 @@ impl AppContext {
 
         let gateway_server =
             if let Some(gateway_server_settings) = settings_model.get_gateway_server() {
-                let authorized_keys = gateway_server_settings.load_authorized_keys().unwrap();
-                let allowed_ip = gateway_server_settings.get_allowed_ip_list().unwrap();
+                let authorized_keys = gateway_server_settings.load_authorized_keys()?;
+                let allowed_ip = gateway_server_settings.get_allowed_ip_list()?;
                 // A port which can not be bound ends the startup, as the keys above do: a
                 // proxy with no gateway listener must not come up.
-                Some(
-                    TcpGatewayServer::new(
-                        format!("0.0.0.0:{}", gateway_server_settings.port,),
-                        authorized_keys,
-                        allowed_ip,
-                        gateway_server_settings.is_debug(),
-                    )
-                    .unwrap(),
-                )
+                Some(TcpGatewayServer::new(
+                    format!("0.0.0.0:{}", gateway_server_settings.port,),
+                    authorized_keys,
+                    allowed_ip,
+                    gateway_server_settings.is_debug(),
+                )?)
             } else {
                 None
             };
@@ -156,14 +180,12 @@ impl AppContext {
 
         let ssh_registry = &settings_model.ssh;
         for (id, client_settings) in settings_model.gateway_clients.iter() {
-            let signing_key = client_settings
-                .load_signing_key(id.as_str(), ssh_registry)
-                .unwrap();
+            let signing_key = client_settings.load_signing_key(id.as_str(), ssh_registry)?;
             let client = TcpGatewayClient::new(TcpGatewayClientParams {
                 id: id.to_string(),
                 remote_endpoint: client_settings.remote_host.to_string(),
                 signing_key,
-                compression: client_settings.get_compression(id.as_str()).unwrap(),
+                compression: client_settings.get_compression(id.as_str())?,
                 allow_incoming_forward_connections: client_settings
                     .get_allow_incoming_forward_connections(),
                 connect_timeout: client_settings.get_connect_timeout(),
@@ -177,7 +199,7 @@ impl AppContext {
         let ip_blocklist = IpBlocklist::new();
         ip_blocklist.set_white_list(settings_model.get_ip_blocklist_white_list());
 
-        Self {
+        Ok(Self {
             id: AtomicI64::new(0),
             connection_settings,
             default_h2_livness_url,
@@ -220,17 +242,14 @@ impl AppContext {
             http_control_port,
             http_control_ip,
             ssh_sessions_pool: SshSessionsPool::new(),
-            self_signed_cert: Arc::new(
-                crate::self_signed_cert::generate(
-                    crate::self_signed_cert::SELF_SIGNED_CERT_NAME.to_string(),
-                )
-                .unwrap(),
-            ),
+            self_signed_cert: Arc::new(crate::self_signed_cert::generate(
+                crate::self_signed_cert::SELF_SIGNED_CERT_NAME.to_string(),
+            )?),
             rps: Arc::new(RpsAccumulator::new()),
             ip_blocklist,
             traffic: TrafficAccumulator::new(),
             resolved_domain_ips: ResolvedDomainIps::new(),
-        }
+        })
     }
 
     pub fn get_next_id(&self) -> i64 {
@@ -297,4 +316,34 @@ fn get_token_secret_key_from_settings(session_key: &[u8]) -> Vec<u8> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A setting which does not hold is returned, for the startup to report - not a panic, which
+    /// would abort an installed Windows service.
+    #[test]
+    fn a_settings_error_is_returned() {
+        let settings = SettingsCompiled {
+            global_settings: Some(serde_yaml::from_str("http_control_ip: not-an-ip").unwrap()),
+            ..Default::default()
+        };
+        let Err(err) = AppContext::new(settings) else {
+            panic!("a context was built with http_control_ip: not-an-ip");
+        };
+        assert!(err.contains("not-an-ip"), "{err}");
+
+        let settings = SettingsCompiled {
+            gateway_server: Some(
+                serde_yaml::from_str("port: 1\nauthorized_keys: [/no/such/key.pub]").unwrap(),
+            ),
+            ..Default::default()
+        };
+        let Err(err) = AppContext::new(settings) else {
+            panic!("a context was built with an authorized key which is not there");
+        };
+        assert!(err.contains("/no/such/key.pub"), "{err}");
+    }
 }

@@ -49,25 +49,61 @@ mod upstream_h2_pool;
 mod upstream_status;
 mod utils;
 
+#[cfg(windows)]
+mod win_service;
+
 pub fn to_hyper_error(e: std::convert::Infallible) -> String {
     e.to_string()
 }
 
+/// Linux and macOS: the proxy in the console, and no command line - the options are Windows-only,
+/// see `win_service`.
+#[cfg(not(windows))]
 #[tokio::main]
 async fn main() {
-    // First of all, before APP_CTX reads the settings: without a home directory there is no
-    // settings file to read, and the process says why and stops rather than panics.
-    if let Err(err) = crate::settings::settings_file_path() {
-        eprintln!("Can not start. {err}");
+    if let Err(err) = console_main().await {
+        eprintln!("{err}");
         std::process::exit(1);
     }
+}
+
+/// Windows: the console run, and the proxy as a Windows service.
+#[cfg(windows)]
+fn main() {
+    win_service::main();
+}
+
+/// The console run: up, until Ctrl+C or SIGTERM, then down.
+async fn console_main() -> Result<(), String> {
+    start_proxy()
+        .await
+        .map_err(|err| format!("Can not start. {err}"))?;
+
+    crate::app::APP_CTX.states.wait_until_shutdown().await;
+
+    stop_proxy().await;
+
+    Ok(())
+}
+
+/// Brings the proxy up - the settings, the control port, the endpoints, the timers. Shared by the
+/// console run and the Windows service, which differ only in what they wait on afterwards.
+async fn start_proxy() -> Result<(), String> {
+    // Before the settings are read: without a home directory there is no settings file to read,
+    // and the process says why.
+    crate::settings::settings_file_path()?;
 
     my_tls::install_default_crypto_providers();
+
+    // Before anything uses APP_CTX: a settings error ends the startup with an error - printed in
+    // the console, a stop of the service - instead of a panic.
+    crate::app::build_app_ctx()?;
+
     crate::http_server::start();
 
     crate::flows::load_everything_from_settings()
         .await
-        .expect("Failed to load initial settings");
+        .map_err(|err| format!("Failed to load initial settings: {err}"))?;
 
     let mut my_timer = MyTimer::new(Duration::from_secs(3600), my_logger::LOGGER.clone());
 
@@ -121,13 +157,19 @@ async fn main() {
 
     domains_resolve_timer.start();
 
-    crate::app::APP_CTX.states.wait_until_shutdown().await;
+    Ok(())
+}
 
+/// Takes the proxy down: the listeners stop accepting, and the connections in flight get three
+/// seconds before the process ends.
+async fn stop_proxy() {
     println!("Shutting down...");
+
+    crate::app::APP_CTX.states.set_shutting_down();
 
     //    app.ssh_to_http_port_forward_pool.clean_up().await;
 
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     println!("Stopped...");
 }
