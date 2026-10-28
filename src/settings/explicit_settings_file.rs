@@ -3,8 +3,8 @@
 //! the settings stands for. One argument tells an installed Windows service where everything is:
 //! a service runs as LocalSystem, whose profile folder is not where anybody keeps a settings file.
 //!
-//! Set once by `main`, before the settings are read; `settings_file_path` and `home_dir` look
-//! here first.
+//! Windows only, as the option is: set once by the `main` of Windows (`win_service`), before the
+//! settings are read; `settings_file_path` and `home_dir` look here first.
 
 use std::sync::OnceLock;
 

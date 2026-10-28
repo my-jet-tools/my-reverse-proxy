@@ -1,9 +1,10 @@
 /// The home directory: the folder the settings file is read from, and what a leading `~` of a
-/// path stands for. It is the folder of the file `--settings` names, when the command line names
-/// one; otherwise `HOME` when that is set - to anything, so a second instance is started by
-/// pointing `HOME` somewhere else - and otherwise, on Windows, which does not set `HOME`,
-/// `USERPROFILE`.
+/// path stands for. On Windows it is the folder of the file `--settings` names, when the command
+/// line names one; otherwise `HOME` when that is set - to anything, so a second instance is
+/// started by pointing `HOME` somewhere else - and otherwise, on Windows, which does not set
+/// `HOME`, `USERPROFILE`.
 pub fn home_dir() -> Result<String, String> {
+    #[cfg(windows)]
     if let Some(settings_file) = super::explicit_settings_file() {
         return Ok(settings_file.dir.clone());
     }
@@ -32,8 +33,14 @@ fn home_dir_of(
         None => "HOME is not set".to_string(),
     };
 
+    // `--settings` is an option of the Windows command line only.
+    #[cfg(windows)]
+    let or_name_the_file = ", or name the file with --settings <file>";
+    #[cfg(not(windows))]
+    let or_name_the_file = "";
+
     Err(format!(
-        "The home directory is not known: {not_set}. The settings file .my-reverse-proxy is read from the home directory - set HOME to the folder which holds it, or name the file with --settings <file>"
+        "The home directory is not known: {not_set}. The settings file .my-reverse-proxy is read from the home directory - set HOME to the folder which holds it{or_name_the_file}"
     ))
 }
 

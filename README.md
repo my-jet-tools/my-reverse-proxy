@@ -5,23 +5,15 @@ cargo build --release
 ./target/release/my-reverse-proxy
 ```
 
-The process reads `$HOME/.my-reverse-proxy` (see below), so a second instance on the same machine is started by
-pointing `HOME` somewhere else:
+The process takes no command-line arguments: it reads `$HOME/.my-reverse-proxy` (see below), so a second
+instance on the same machine is started by pointing `HOME` somewhere else:
 
 ```sh
 HOME=/srv/proxy-b ./target/release/my-reverse-proxy
 ```
 
-Or the settings file is named: `--settings <file>` reads that file instead, and its folder is then the home
-directory - what a leading `~` of a path in the settings stands for:
-
-```sh
-./target/release/my-reverse-proxy --settings /srv/proxy-b/settings.yaml
-```
-
-The other command-line options - `--install`, `--start`, `--uninstall` - run the proxy as a Windows service; see
-"Running as a Windows service" under "Running on Windows" at the end of this file. On Linux and macOS they answer
-that the service modes exist on Windows only.
+The Windows build has a command line - `--settings`, and `--install`, `--start`, `--uninstall` for running as a
+Windows service; see "Running on Windows" at the end of this file. Linux and macOS have none of it.
 
 On a settings-level error it refuses to start and prints the reason; a per-endpoint problem is reported through
 the API instead (see "How a failure is reported").
