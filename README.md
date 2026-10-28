@@ -2272,7 +2272,7 @@ PowerShell, with the exe in the folder it is going to stay in (`wwwroot\` and `i
 ```
 
 `--install` registers the service `my-reverse-proxy`: started automatically at boot, as LocalSystem, restarted
-when it fails (three times, 10 seconds apart; the count is forgotten after a day). Its command line is this exe
+10 seconds after it fails - a crash, or a start which fails - for as long as it fails. Its command line is this exe
 with `--run-as-service` and the settings file as it was at install time, so a moved exe or settings file leaves a
 service which does not start - `--uninstall` and `--install` again.
 
@@ -2294,8 +2294,10 @@ Two proxies on one machine are two services - `--name proxy-b --settings C:\prox
 control port of its own.
 
 A service has no console, so what the proxy prints goes nowhere. Before installing, run the exe in the console
-with the same `--settings`: a settings error is printed there, while the installed service only stops right after
-it is started (the System event log records the stop, not the reason). Once it runs, the admin ui and the API on
+with the same `--settings`: a settings error is printed there. The installed service stops right after it is
+started, and is started again every 10 seconds; the System event log records each stop - "terminated with the
+following service-specific error", event 7024, followed by 7031 for the restart - but not the reason. Once it
+runs, the admin ui and the API on
 the control port show the endpoints, their errors (`GET /api/configuration/Current`) and the proxy logs, as for a
 console run.
 
@@ -2326,6 +2328,11 @@ other endpoints run.
   names.
 - A files location answers `400 Bad Request` to the paths Windows reads as another name - `/private./x`,
   `/private\x`, `/CON` - see "How a request picks a file".
+- A TCP reset discards what the other side has not read yet - on Linux it is read first, then the error. So
+  behind a gateway on Windows, a target which reads an upload slowly while it keeps sending, and goes on
+  sending after the client has closed, can lose the tail of the upload: the gateway lets the socket go
+  2 seconds after it has handed the target the last bytes, and the target's next send is answered with a
+  reset. A target which answers a request and then closes or waits is not concerned.
 - Ctrl+C stops a proxy run in the console; an installed service is stopped by the Service Control Manager - see
   "Running as a Windows service".
 

@@ -186,11 +186,16 @@ async fn start_proxy(settings_file: Option<&str>) -> Result<(), String> {
         crate::settings::set_settings_file(settings_file)?;
     }
 
-    // Before APP_CTX reads the settings: without a home directory there is no settings file to
-    // read, and the process says why and stops rather than panics.
+    // Before the settings are read: without a home directory there is no settings file to read,
+    // and the process says why.
     crate::settings::settings_file_path()?;
 
     my_tls::install_default_crypto_providers();
+
+    // Before anything uses APP_CTX: a settings error ends the startup with an error - printed in
+    // the console, a stop of the service - instead of a panic.
+    crate::app::build_app_ctx()?;
+
     crate::http_server::start();
 
     crate::flows::load_everything_from_settings()

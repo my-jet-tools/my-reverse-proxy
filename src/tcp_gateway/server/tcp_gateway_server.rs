@@ -47,10 +47,10 @@ impl TcpGatewayServer {
         println!("GATEWAY spawning {}", inner.gateway_host.as_str(),);
 
         // Plain tokio::spawn here (not spawn_named): this runs inside
-        // `AppContext::new`, which executes within the `APP_CTX` LazyLock
-        // initializer. spawn_named touches APP_CTX (prometheus counter), and
-        // that re-entrant deref of the still-initializing APP_CTX would prevent
-        // the accept loop from ever being scheduled.
+        // `AppContext::new`, and `APP_CTX` is not there until it has returned.
+        // spawn_named touches APP_CTX (prometheus counter), and that deref
+        // would wait for the context being built - forever, so the accept
+        // loop would never be scheduled.
         let listener_task =
             tokio::spawn(connection_loop(inner.clone(), listener, allowed_ip, debug))
                 .abort_handle();
