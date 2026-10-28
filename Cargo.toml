@@ -42,12 +42,6 @@ flurl = { tag = "0.7.0", git = "https://github.com/MyJetTools/fl-url.git", featu
 
 my-logger = { tag = "1.3.0", git = "https://github.com/MyJetTools/my-logger.git" }
 
-# The service modes of the command line - --install, --uninstall, --start, --run-as-service: the
-# registration with the Service Control Manager (auto-start, restart-on-failure) and the SCM protocol
-# the installed service speaks. Compiles everywhere - off Windows the modes answer that they exist on
-# Windows only - so the command line is one code path, type-checked and tested on Linux.
-win-service-host = { tag = "0.1.3", git = "https://github.com/my-jet-tools/win-utils.git" }
-
 my-ssh = { git = "https://github.com/MyJetTools/my-ssh.git", tag = "0.1.2" }
 
 encryption = { git = "https://github.com/MyJetTools/encryption.git", tag = "0.1.1" }
@@ -115,6 +109,13 @@ mcp-server-middleware = { tag = "0.9.0", git = "https://github.com/my-ai-utils/m
 my-ai-agent = { tag = "0.1.0", git = "https://github.com/my-ai-utils/my-ai-agent.git", features = [
     "agent",
 ] }
+
+# The command line of Windows - --install, --uninstall, --start, --run-as-service, --settings: the
+# registration with the Service Control Manager (auto-start, restart-on-failure) and the SCM protocol
+# the installed service speaks. Windows only, as the `main` which uses it (src/win_service.rs): a
+# Linux build does not fetch it, and its `main` has no command line.
+[target.'cfg(windows)'.dependencies]
+win-service-host = { tag = "0.1.3", git = "https://github.com/my-jet-tools/win-utils.git" }
 
 [build-dependencies]
 ci-utils = { git = "https://github.com/MyJetTools/ci-utils.git", tag = "0.1.3" }

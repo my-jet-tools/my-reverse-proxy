@@ -54,5 +54,8 @@ mod expand_home;
 pub use expand_home::*;
 mod settings_file_path;
 pub use settings_file_path::*;
+// `--settings <file>`: an option of the Windows command line only.
+#[cfg(windows)]
 mod explicit_settings_file;
+#[cfg(windows)]
 pub use explicit_settings_file::*;
