@@ -46,7 +46,7 @@ my-logger = { tag = "1.3.0", git = "https://github.com/MyJetTools/my-logger.git"
 # registration with the Service Control Manager (auto-start, restart-on-failure) and the SCM protocol
 # the installed service speaks. Compiles everywhere - off Windows the modes answer that they exist on
 # Windows only - so the command line is one code path, type-checked and tested on Linux.
-win-service-host = { tag = "win-service-host-0.1.2", git = "https://github.com/my-jet-tools/win-utils.git" }
+win-service-host = { tag = "0.1.3", git = "https://github.com/my-jet-tools/win-utils.git" }
 
 my-ssh = { git = "https://github.com/MyJetTools/my-ssh.git", tag = "0.1.2" }
 

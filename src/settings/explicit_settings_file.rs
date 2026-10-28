@@ -145,10 +145,14 @@ mod tests {
 
     #[test]
     fn a_file_which_does_not_exist_is_refused_and_names_the_path() {
-        let err = set_settings_file("/no/such/folder/settings.yaml").unwrap_err();
+        let path = "/no/such/folder/settings.yaml";
+        let err = set_settings_file(path).unwrap_err();
 
+        // The error names the absolute path: the same on unix, `C:\no\such\folder\settings.yaml`
+        // - the root of the current drive - on Windows.
+        let absolute = std::path::absolute(path).unwrap();
         assert!(err.contains("does not exist"), "{err}");
-        assert!(err.contains("/no/such/folder/settings.yaml"), "{err}");
+        assert!(err.contains(absolute.to_string_lossy().as_ref()), "{err}");
         assert!(explicit_settings_file().is_none());
     }
 }
