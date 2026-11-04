@@ -73,6 +73,9 @@ impl BuiltBody {
 pub struct HttpRequestBuilder {
     pub parts: Parts,
     body: Incoming,
+    /// How long the client may go silent while it sends a body the proxy holds whole before it
+    /// sends it on: the endpoint's `read_timeout`, set by [`Self::into_request`].
+    body_idle_timeout: std::time::Duration,
 }
 
 /// Whether the client side of this exchange is HTTP/1.x ON THE WIRE. The
@@ -176,7 +179,11 @@ impl HttpRequestBuilder {
     pub fn new(src: hyper::Request<hyper::body::Incoming>) -> Self {
         let (parts, body) = src.into_parts();
 
-        Self { parts, body }
+        Self {
+            parts,
+            body,
+            body_idle_timeout: crate::consts::DEFAULT_READ_TIMEOUT,
+        }
     }
 
     /// The request to the upstream of `location`.
@@ -191,6 +198,8 @@ impl HttpRequestBuilder {
         location: &ProxyPassLocation,
     ) -> Result<TransformedRequest, ProxyPassError> {
         let client_uri = strip_location_path(&mut self.parts.uri, location);
+
+        self.body_idle_timeout = proxy_pass.endpoint_info.timeouts.read_timeout;
 
         let mut request = self.into_upstream_request(proxy_pass, location).await?;
 
@@ -516,8 +525,7 @@ impl HttpRequestBuilder {
             builder = builder.header(header.0, header.1);
         }
 
-        let collected = self.body.collect().await?;
-        let bytes = collected.to_bytes();
+        let bytes = collect_client_body(self.body, self.body_idle_timeout).await?;
 
         let req_parts = self.parts.clone();
 
@@ -656,8 +664,7 @@ impl HttpRequestBuilder {
             ));
         }
 
-        let collected = self.body.collect().await?;
-        let bytes = collected.to_bytes();
+        let bytes = collect_client_body(self.body, self.body_idle_timeout).await?;
 
         let before_compress = bytes.len();
 
@@ -835,6 +842,40 @@ impl HttpRequestReader for Parts {
     fn get_host(&self) -> Option<&str> {
         self.uri.host()
     }
+}
+
+/// The whole body of a client's request, for an upstream the proxy can not stream it to (an
+/// http/1.1 one, a body to compress, a websocket handshake). Each frame has to come within
+/// `idle_timeout` of the one before - the endpoint's `read_timeout`, as on the http/1.1 path -
+/// so a client which sends its body a byte now and then can not hold the request forever. A
+/// body that is streamed to an h2 upstream is not timed here: a gRPC stream may rightly be
+/// silent for long, and its upstream sees every byte as it comes.
+async fn collect_client_body(
+    mut body: Incoming,
+    idle_timeout: std::time::Duration,
+) -> Result<Bytes, ProxyPassError> {
+    let mut chunks: Vec<Bytes> = Vec::new();
+
+    loop {
+        let frame = match tokio::time::timeout(idle_timeout, body.frame()).await {
+            Ok(Some(frame)) => frame?,
+            Ok(None) => break,
+            Err(_) => return Err(ProxyPassError::ClientBodyTimeout),
+        };
+
+        // Trailers are dropped, as `Collected::to_bytes` drops them.
+        if let Ok(data) = frame.into_data() {
+            if !data.is_empty() {
+                chunks.push(data);
+            }
+        }
+    }
+
+    if chunks.len() == 1 {
+        return Ok(chunks.pop().unwrap());
+    }
+
+    Ok(chunks.concat().into())
 }
 
 #[cfg(test)]

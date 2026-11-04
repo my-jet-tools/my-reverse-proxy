@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use rust_extensions::slice_of_u8_utils::*;
 
@@ -78,6 +78,73 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
                 .read_part
                 .read_with_timeout(buffer, self.timeouts.read_timeout)
                 .await?;
+
+            self.loop_buffer.advance(read_size);
+        }
+    }
+
+    /// The head of the client's next request. The whole of it has to arrive within
+    /// `header_read_timeout`, whatever pace it comes at - each read is also bounded by
+    /// `read_timeout`, but that alone lets a client which sends a byte a minute hold the
+    /// connection forever (slowloris).
+    ///
+    /// The deadline starts when the connection waits for this request with no response still
+    /// going out, or at the first byte of the request, whichever comes first. So it covers the
+    /// idle wait of a keep-alive connection, but not the time an answer to the request before
+    /// it takes: the client sends the next request only after it got that one.
+    ///
+    /// Only for requests: the head of an upstream's response is read with [`Self::read_headers`].
+    pub async fn read_request_headers(
+        &mut self,
+        header_read_timeout: Duration,
+        in_flight: &crate::h1_proxy_server::pipeline::InFlightResponses,
+    ) -> Result<Http1Headers, ProxyServerError> {
+        let mut deadline: Option<tokio::time::Instant> = None;
+
+        loop {
+            {
+                let buf = self.loop_buffer.get_data();
+
+                if !buf.is_empty() {
+                    match Http1Headers::try_parse(buf) {
+                        Ok(Some(headers)) => return Ok(headers),
+                        Ok(None) => {}
+                        // Reading on would not make the line a valid one.
+                        Err(reason) => return Err(ProxyServerError::HeadersParseError(reason)),
+                    }
+                }
+
+                if deadline.is_none() && (!buf.is_empty() || in_flight.is_idle()) {
+                    deadline = Some(tokio::time::Instant::now() + header_read_timeout);
+                }
+            }
+
+            let Some(buffer) = self.loop_buffer.get_mut() else {
+                return Err(ProxyServerError::BufferAllocationFail);
+            };
+
+            let read_size = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+
+                    if left.is_zero() {
+                        return Err(ProxyServerError::NetworkError(NetworkError::Timeout(
+                            header_read_timeout,
+                        )));
+                    }
+
+                    self.read_part
+                        .read_with_timeout(buffer, left.min(self.timeouts.read_timeout))
+                        .await?
+                }
+                // A response is still going out and nothing of the next request came yet.
+                None => {
+                    tokio::select! {
+                        read = self.read_part.read_with_timeout(buffer, self.timeouts.read_timeout) => read?,
+                        _ = in_flight.wait_idle() => continue,
+                    }
+                }
+            };
 
             self.loop_buffer.advance(read_size);
         }

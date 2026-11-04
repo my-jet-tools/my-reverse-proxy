@@ -20,6 +20,12 @@ pub struct TimeoutsSettings {
     pub pool_size: Option<u8>,
     pub pool_ping_timeout: Option<u64>,
     pub pool_hot_window: Option<u64>,
+    /// Slow-client protection, endpoint-scoped (global → endpoint): see
+    /// `crate::consts::DEFAULT_HEADER_READ_TIMEOUT` and the ones next to it.
+    pub header_read_timeout: Option<u64>,
+    pub tls_handshake_timeout: Option<u64>,
+    pub h2_keep_alive_interval: Option<u64>,
+    pub h2_keep_alive_timeout: Option<u64>,
 }
 
 impl TimeoutsSettings {
@@ -35,6 +41,10 @@ impl TimeoutsSettings {
             pool_size: higher.pool_size.or(self.pool_size),
             pool_ping_timeout: higher.pool_ping_timeout.or(self.pool_ping_timeout),
             pool_hot_window: higher.pool_hot_window.or(self.pool_hot_window),
+            header_read_timeout: higher.header_read_timeout.or(self.header_read_timeout),
+            tls_handshake_timeout: higher.tls_handshake_timeout.or(self.tls_handshake_timeout),
+            h2_keep_alive_interval: higher.h2_keep_alive_interval.or(self.h2_keep_alive_interval),
+            h2_keep_alive_timeout: higher.h2_keep_alive_timeout.or(self.h2_keep_alive_timeout),
         }
     }
 
@@ -58,6 +68,24 @@ impl TimeoutsSettings {
                 crate::consts::DEFAULT_POOL_PING_TIMEOUT,
             ),
             pool_hot_window: ms_or(self.pool_hot_window, crate::consts::DEFAULT_POOL_HOT_WINDOW),
+            client: crate::types::ClientTimeouts {
+                header_read_timeout: ms_or(
+                    self.header_read_timeout,
+                    crate::consts::DEFAULT_HEADER_READ_TIMEOUT,
+                ),
+                tls_handshake_timeout: ms_or(
+                    self.tls_handshake_timeout,
+                    crate::consts::DEFAULT_TLS_HANDSHAKE_TIMEOUT,
+                ),
+                h2_keep_alive_interval: ms_or(
+                    self.h2_keep_alive_interval,
+                    crate::consts::DEFAULT_CLIENT_H2_KEEP_ALIVE_INTERVAL,
+                ),
+                h2_keep_alive_timeout: ms_or(
+                    self.h2_keep_alive_timeout,
+                    crate::consts::DEFAULT_CLIENT_H2_KEEP_ALIVE_TIMEOUT,
+                ),
+            },
         }
     }
 }
@@ -79,4 +107,5 @@ pub struct ResolvedTimeouts {
     pub pool_size: u8,
     pub pool_ping_timeout: Duration,
     pub pool_hot_window: Duration,
+    pub client: crate::types::ClientTimeouts,
 }

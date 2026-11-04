@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use rust_extensions::remote_endpoint::RemoteEndpointOwned;
-use tokio::net::TcpStream;
 
 use crate::{configurations::*, types::AcceptedServerConnection};
 
@@ -17,7 +16,7 @@ pub async fn handle_connection(
         crate::app::APP_CTX
             .connection_settings
             .remote_connect_timeout,
-        TcpStream::connect(remote_host.as_str()),
+        crate::tcp_utils::connect_tcp(remote_host.as_str()),
     )
     .await;
 

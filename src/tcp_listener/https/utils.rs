@@ -1,4 +1,4 @@
-use std::{panic::AssertUnwindSafe, sync::Arc, time::Duration};
+use std::{panic::AssertUnwindSafe, sync::Arc};
 
 use futures::FutureExt;
 use my_tls::tokio_rustls::{rustls::server::Acceptor, LazyConfigAcceptor};
@@ -8,8 +8,6 @@ use crate::{
     configurations::{HttpEndpointInfo, HttpListenPortConfiguration},
     tcp_listener::https::ClientCertificateData,
 };
-
-const RESOLVE_TLS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Why a TLS connection was rejected before it could be served. The block-list
 /// policy is derived from the variant via [`TlsAcceptError::block_severity`].
@@ -101,16 +99,22 @@ pub async fn lazy_accept_tcp_stream(
     ),
     TlsAcceptError,
 > {
+    // From the accepted connection to the finished handshake, the ClientHello included: a client
+    // which connects and sends nothing - or sends it a byte at a time - is cut by it. Which
+    // endpoint the connection is for is known only from the ClientHello, so it is the port's
+    // value (the longest of its endpoints).
+    let handshake_timeout = configuration.client_timeouts().tls_handshake_timeout;
+
     let future = lazy_accept_tcp_stream_internal(endpoint_port, tcp_stream, configuration);
 
-    let result = tokio::time::timeout(RESOLVE_TLS_TIMEOUT, future).await;
+    let result = tokio::time::timeout(handshake_timeout, future).await;
 
     if result.is_err() {
         return Err(TlsAcceptError::Other {
             endpoint_host: None,
             message: format!(
-                "Accepting TLS connection timeout for port: {}",
-                endpoint_port
+                "TLS handshake was not finished within {:?} on port {}",
+                handshake_timeout, endpoint_port
             ),
         });
     }

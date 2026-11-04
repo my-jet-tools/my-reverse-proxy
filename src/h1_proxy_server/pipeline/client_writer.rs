@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 
 use crate::network_stream::*;
 
-use super::{ResponseEvent, ResponseSlot};
+use super::{InFlightResponses, ResponseEvent, ResponseSlot};
 
 /// The single owner of the client write half. It drains an ordered queue of
 /// response slots (FIFO = response order) and writes each slot's events to the
@@ -18,6 +20,7 @@ use super::{ResponseEvent, ResponseSlot};
 pub async fn run_client_writer<WritePart: NetworkStreamWritePart + Send + Sync + 'static>(
     mut write_part: WritePart,
     mut queue: mpsc::Receiver<ResponseSlot>,
+    in_flight: Arc<InFlightResponses>,
 ) -> Option<WritePart> {
     while let Some(mut slot) = queue.recv().await {
         let mut finished_cleanly = false;
@@ -53,6 +56,10 @@ pub async fn run_client_writer<WritePart: NetworkStreamWritePart + Send + Sync +
             write_part.shutdown_socket().await;
             return None;
         }
+
+        // Written out: if it was the last one, the wait for the client's next
+        // request starts now.
+        in_flight.finished();
     }
 
     let _ = write_part.flush_it().await;

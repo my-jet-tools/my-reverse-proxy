@@ -5532,7 +5532,7 @@ async fn a_file_of_a_folder_behind_the_gateway_is_served_by_either_end() {
             .await
             .unwrap();
         assert_eq!(file.status_code, 200);
-        assert_eq!(file.content_type.unwrap().as_str(), "text/css");
+        assert_eq!(file.content_type.unwrap().as_str(), "text/css; charset=utf-8");
         assert_eq!(file.body, b"body {}");
 
         // The default file is the answer to the root.
@@ -5540,7 +5540,7 @@ async fn a_file_of_a_folder_behind_the_gateway_is_served_by_either_end() {
             .await
             .unwrap();
         assert_eq!(file.status_code, 200);
-        assert_eq!(file.content_type.unwrap().as_str(), "text/html");
+        assert_eq!(file.content_type.unwrap().as_str(), "text/html; charset=utf-8");
         assert_eq!(file.body, b"<h1>index</h1>");
 
         // Without one the root is no file: it is not asked for.

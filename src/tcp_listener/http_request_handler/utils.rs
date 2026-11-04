@@ -201,6 +201,20 @@ pub fn generate_tech_page(
                 .body(body)
                 .unwrap()
         }
+        ProxyPassError::ClientBodyTimeout => {
+            let body: Bytes = crate::error_templates::generate_layout_body(
+                408,
+                "Request Timeout",
+                second_line_error,
+            )
+            .into();
+            let body = Full::new(body).map_err(crate::to_hyper_error).boxed();
+            hyper::Response::builder()
+                .status(hyper::StatusCode::REQUEST_TIMEOUT)
+                .header(hyper::header::CONNECTION, "close")
+                .body(body)
+                .unwrap()
+        }
         ProxyPassError::NoLocationFound => {
             let body: Bytes =
                 crate::error_templates::generate_layout_body(404, "Not found", second_line_error)

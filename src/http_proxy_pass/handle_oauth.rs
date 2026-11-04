@@ -85,18 +85,32 @@ pub async fn run_oauth_gate_h2(
         };
     };
 
-    let body = match Limited::new(request.into_body(), MAX_OAUTH_BODY)
-        .collect()
-        .await
+    // At most `MAX_OAUTH_BODY`, and within the endpoint's `read_timeout` as a whole: a client
+    // which sends its form a byte now and then does not hold the request.
+    let body = match tokio::time::timeout(
+        endpoint_info.timeouts.read_timeout,
+        Limited::new(request.into_body(), MAX_OAUTH_BODY).collect(),
+    )
+    .await
     {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
+        Ok(Ok(collected)) => collected.to_bytes(),
+        Ok(Err(_)) => {
             return answered(
                 connection_ip,
                 oauth_error_response(
                     413,
                     ERROR_INVALID_REQUEST,
                     "The request body is too large for an oauth endpoint",
+                ),
+            )
+        }
+        Err(_) => {
+            return answered(
+                connection_ip,
+                oauth_error_response(
+                    408,
+                    ERROR_INVALID_REQUEST,
+                    "The request body did not arrive in time",
                 ),
             )
         }

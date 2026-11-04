@@ -86,7 +86,7 @@ prometheus = "*"
 url-utils = { tag = "0.2.0", git = "https://github.com/MyJetTools/url-utils.git" }
 ip2location = "0.6"
 arc-swap = "1"
-parking_lot = "0.12"
+parking_lot = "*"
 ahash = "0.8"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ed25519-dalek = "*"

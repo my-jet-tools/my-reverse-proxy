@@ -9,8 +9,13 @@ pub use client_certificate_ca::*;
 mod server_cert_resolver;
 mod tls_acceptor;
 pub use server_cert_resolver::*;
+mod tls_session_resumption;
+pub use tls_session_resumption::*;
 pub mod utils;
 
 // The upstream of these tests listens on a unix socket.
 #[cfg(all(test, unix))]
 mod websocket_tests;
+
+#[cfg(test)]
+mod tls_resumption_tests;

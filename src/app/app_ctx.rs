@@ -105,10 +105,17 @@ pub struct AppContext {
     pub gateway_clients: HashMap<String, TcpGatewayClient>,
     pub http_control_port: Option<u16>,
     pub http_control_ip: Option<IpAddr>,
+    /// `header_read_timeout` of `global_settings`, for the control port: my-http-server times the
+    /// head of an http/1.1 request with it (it is no endpoint, so only the global level applies).
+    pub http_control_header_read_timeout: std::time::Duration,
 
     pub ssh_sessions_pool: SshSessionsPool,
 
     pub self_signed_cert: Arc<CertifiedKey>,
+
+    /// The session cache and the ticket keys every https endpoint without a client certificate
+    /// resumes TLS sessions from. Made once: a config built per connection would start empty.
+    pub tls_session_resumption: crate::tcp_listener::https::TlsSessionResumption,
 
     pub rps: Arc<RpsAccumulator>,
 
@@ -123,6 +130,11 @@ impl AppContext {
     pub fn new(settings_model: SettingsCompiled) -> Self {
         let http_control_port = settings_model.get_http_control_port();
         let http_control_ip = settings_model.get_http_control_ip().unwrap();
+        let http_control_header_read_timeout = settings_model
+            .get_global_timeouts()
+            .resolve()
+            .client
+            .header_read_timeout;
         let connection_settings = settings_model.get_connections_settings();
         let default_h2_livness_url = settings_model.get_default_h2_livness_url();
         let pool_supervisor_interval = settings_model.get_pool_supervisor_interval();
@@ -219,6 +231,7 @@ impl AppContext {
             gateway_clients,
             http_control_port,
             http_control_ip,
+            http_control_header_read_timeout,
             ssh_sessions_pool: SshSessionsPool::new(),
             self_signed_cert: Arc::new(
                 crate::self_signed_cert::generate(
@@ -226,6 +239,7 @@ impl AppContext {
                 )
                 .unwrap(),
             ),
+            tls_session_resumption: crate::tcp_listener::https::TlsSessionResumption::new(),
             rps: Arc::new(RpsAccumulator::new()),
             ip_blocklist,
             traffic: TrafficAccumulator::new(),

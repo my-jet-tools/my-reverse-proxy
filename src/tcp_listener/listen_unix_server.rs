@@ -45,25 +45,25 @@ async fn accept_unix_connections_loop(
 
         tokio::select! {
             accepted_connection = accepted_connection_feature => {
-                if let Err(err) = &accepted_connection {
+                let (unix_stream, _) = match accepted_connection {
+                    Ok(accepted) => accepted,
+                    Err(err) => {
                         println!(
                             "Error accepting connection {}. Err: {:?}",
                             listen_host.as_str(), err
                         );
 
-                    continue;
-                }
+                        tokio::time::sleep(crate::consts::ACCEPT_ERROR_DELAY).await;
+                        continue;
+                    }
+                };
 
-
-
-                let (unix_stream, _) = accepted_connection.unwrap();
-
-
-
-
-
-                handle_accepted_connection(unix_stream, listen_host.clone()).await;
-
+                // A task of its own, as on a tcp port: a tcp endpoint connects to its remote
+                // before it forwards anything, and the next connection must not wait for that.
+                crate::app::spawn_named(
+                    "unix_accepted_connection",
+                    handle_accepted_connection(unix_stream, listen_host.clone()),
+                );
             }
             _ = stop_endpoint_feature => {
                 break;

@@ -46,6 +46,10 @@ pub fn control_port_addr(
 pub fn start_at(addr: SocketAddr) {
     let mut http_server = MyHttpServer::new(addr);
 
+    // The head of an http/1.1 request, and the first bytes of a connection, within the
+    // `header_read_timeout` of the global settings - a slow client is not held for ever.
+    http_server.set_header_read_timeout(crate::app::APP_CTX.http_control_header_read_timeout);
+
     let controllers = Arc::new(super::builder::build_controllers());
 
     let swagger_middleware = SwaggerMiddleware::new(

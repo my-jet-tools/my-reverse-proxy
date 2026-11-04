@@ -156,7 +156,7 @@ impl NetworkStream for tokio::net::TcpStream {
         timeout: Duration,
     ) -> Result<Self, NetworkError> {
         let host_port = remote_endpoint.get_host_port();
-        let connect = tokio::net::TcpStream::connect(host_port.as_str());
+        let connect = crate::tcp_utils::connect_tcp(host_port.as_str());
         let Ok(result) = tokio::time::timeout(timeout, connect).await else {
             return Err(NetworkError::Timeout(timeout));
         };
@@ -262,5 +262,37 @@ impl NetworkStream for TcpGatewayProxyForwardStream {
             }
             Err(err) => Err(NetworkError::Other(format!("{:?}", err))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use rust_extensions::remote_endpoint::RemoteEndpointOwned;
+
+    use super::NetworkStream;
+
+    /// The tcp connection of an http/1.1 upstream (`h1_remote_connection`) relays a request as
+    /// it comes: it does not hold a small write back until the one before it is acknowledged.
+    #[tokio::test]
+    async fn the_tcp_connection_to_an_upstream_sends_without_delay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let remote_endpoint =
+            Arc::new(RemoteEndpointOwned::try_parse(format!("http://127.0.0.1:{port}")).unwrap());
+
+        let stream = <tokio::net::TcpStream as NetworkStream>::connect(
+            None,
+            None,
+            None,
+            &remote_endpoint,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        assert!(stream.nodelay().unwrap());
     }
 }

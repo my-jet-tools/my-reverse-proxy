@@ -58,6 +58,21 @@ impl HttpListenPortConfiguration {
         Some(result)
     }
 
+    /// The client timeouts of the port before it is known which of its endpoints a connection
+    /// is for - during the TLS handshake, and until the first request names its host: the
+    /// longest of each among the endpoints, so none of them is held to less than its own.
+    pub fn client_timeouts(&self) -> crate::types::ClientTimeouts {
+        let mut endpoints = self.endpoints.iter();
+
+        let Some(first) = endpoints.next() else {
+            return crate::types::ClientTimeouts::default();
+        };
+
+        endpoints.fold(first.client_timeouts, |result, endpoint_info| {
+            result.longest(&endpoint_info.client_timeouts)
+        })
+    }
+
     pub fn get_http_endpoint_info(
         &self,
         server_name: Option<&str>,

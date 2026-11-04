@@ -61,7 +61,9 @@ async fn http_the_query_string_is_not_a_part_of_the_file_name() {
 
     let response = client.get("/index.html?v=1").await;
     assert_eq!(response.status, 200);
-    assert!(response.head.contains("content-type: text/html\r\n"));
+    assert!(response
+        .head
+        .contains("content-type: text/html; charset=utf-8\r\n"));
     assert_eq!(response.body, INDEX_HTML);
 
     // The root with a query string is the root: the default file.
@@ -72,7 +74,9 @@ async fn http_the_query_string_is_not_a_part_of_the_file_name() {
     // It is the path which is checked: a query string is nobody's file name.
     let response = client.get("/css/site.css?back=/../secret.txt").await;
     assert_eq!(response.status, 200);
-    assert!(response.head.contains("content-type: text/css\r\n"));
+    assert!(response
+        .head
+        .contains("content-type: text/css; charset=utf-8\r\n"));
     assert_eq!(response.body, SITE_CSS);
 
     let response = client.get("/missing.html?v=1").await;
@@ -600,7 +604,9 @@ where
 {
     let response = client.get("/index.html?v=1").await;
     assert_eq!(response.status, 200);
-    assert!(response.head.contains("content-type: text/html\r\n"));
+    assert!(response
+        .head
+        .contains("content-type: text/html; charset=utf-8\r\n"));
     assert_eq!(response.body, INDEX_HTML);
 
     let response = client.get("/?utm=x").await;
@@ -624,7 +630,10 @@ where
 async fn assert_serves_the_folder_and_nothing_else_over_h2(client: &mut H2Client) {
     let response = client.get("/index.html?v=1").await;
     assert_eq!(response.status, 200);
-    assert_eq!(response.content_type.as_deref(), Some("text/html"));
+    assert_eq!(
+        response.content_type.as_deref(),
+        Some("text/html; charset=utf-8")
+    );
     assert_eq!(response.body, INDEX_HTML);
 
     let response = client.get("/?utm=x").await;
@@ -633,7 +642,10 @@ async fn assert_serves_the_folder_and_nothing_else_over_h2(client: &mut H2Client
 
     let response = client.get("/css/site.css").await;
     assert_eq!(response.status, 200);
-    assert_eq!(response.content_type.as_deref(), Some("text/css"));
+    assert_eq!(
+        response.content_type.as_deref(),
+        Some("text/css; charset=utf-8")
+    );
     assert_eq!(response.body, SITE_CSS);
 
     let response = client.get("/missing.html").await;

@@ -6,6 +6,8 @@ pub mod https;
 
 //mod handle_request;
 //pub use generate_tech_page::*;
+mod first_request_deadline;
+pub use first_request_deadline::*;
 mod listen_server_handler;
 pub use listen_server_handler::*;
 mod listen_tcp_server;
@@ -32,3 +34,9 @@ mod h1_malformed_request_tests;
 
 #[cfg(test)]
 mod strip_path_tests;
+
+#[cfg(test)]
+mod accept_loop_tests;
+
+#[cfg(test)]
+mod slow_client_tests;

@@ -153,6 +153,11 @@ pub async fn create_config(
 
         server_config.alpn_protocols =
             get_alpn_protocol(!http_endpoint_info.listen_endpoint_type.is_http1_or_mcp());
+
+        // No session resumption here: the config keeps the session cache it was built with,
+        // empty and dropped with the connection, and makes no tickets. Every connection is a
+        // full handshake, so the client certificate is verified - and reaches the request
+        // handler - every time (see `TlsSessionResumption::apply_to`).
         return Ok((server_config, http_endpoint_info, Some(client_cert_cell)));
     }
 
@@ -163,6 +168,10 @@ pub async fn create_config(
 
     server_config.alpn_protocols =
         get_alpn_protocol(!http_endpoint_info.listen_endpoint_type.is_http1_or_mcp());
+
+    crate::app::APP_CTX
+        .tls_session_resumption
+        .apply_to(&mut server_config);
 
     Ok((server_config, http_endpoint_info, None))
 }

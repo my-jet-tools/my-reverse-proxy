@@ -50,7 +50,8 @@ pub async fn connect_tls(
 
     let host_port = remote_endpoint.get_host_port();
 
-    let tcp_stream = match TcpStream::connect(host_port.as_str()).await {
+    // TCP_NODELAY is on before the handshake starts.
+    let tcp_stream = match crate::tcp_utils::connect_tcp(host_port.as_str()).await {
         Ok(tcp_stream) => tcp_stream,
         Err(err) => {
             return Err(

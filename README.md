@@ -377,6 +377,9 @@ At the TLS handshake, in this order - failing any of them rejects the connection
    the proxy, which verifies it against the presented certificate - so a copy of someone else's certificate,
    or of the ca certificate itself, is not enough to authenticate).
 
+All four run on every connection: an endpoint which requires a client certificate never resumes a TLS session
+(see [TLS session resumption](#tls-session-resumption)).
+
 Per request, two more things are checked, because mTLS is bound to the handshake and a connection can carry
 requests for another vhost (HTTP/2 coalescing, keep-alive with a different `Host`): the ca that verified the
 connection must be the ca this endpoint requires, and a certificate that was accepted **past its expiry**
@@ -669,6 +672,48 @@ hosts:
       ssl_certificate: my_ssl_cert        
 ```
 
+#### Https2 for sites
+
+A site with more than a handful of files is better served by `https2`. Over `https` a browser opens up to six
+connections per origin - six TLS handshakes - and each of them carries one request at a time. Over `https2` it
+sends all its requests at once over one connection: one handshake, no queueing behind a slow response. On an
+endpoint with `client_certificate_ca`, where every connection is a full handshake (see
+[TLS session resumption](#tls-session-resumption)), that difference is larger still.
+
+Routing by `Host`, `whitelisted_ip`, `client_certificate_ca`, `auth_header`, `google_auth`, `oauth`,
+`allowed_users`, `strip_path`, file and static locations and `hsts` all work the same on both types. `https2`
+does not take the request through the same code as `https`, though - an `https2` endpoint serves its http/1.1
+clients through its own path too - and these differences matter when a site moves:
+
+- **http/1.1 upstreams: wait for a fix first.** There is a known issue with request bodies sent from an
+  `https2` endpoint to an upstream of type `http` / `unix+http`. Until it is fixed, keep a site whose upstreams
+  are http/1.1 on `https`. Sites whose locations are `http2` / `unix+http2` are not affected, and on `https2`
+  an upload to them is streamed, not held in memory.
+- **`request_timeout` covers the wait for the response head.** On `https2` an upstream has `request_timeout`
+  (15 s by default) to start answering; on `https` the limit is `read_timeout` (3 min). Raise
+  `request_timeout` on locations that take longer, e.g. reports or long polls.
+- **Pool size.** A browser's parallel requests reach an http/1.1 upstream through the location's pool
+  (5 connections by default, one-shot connections above that). Raise `pool_size` on busy locations and on ones
+  with SSE or long downloads, which hold a connection for as long as they last.
+- **WebSockets with a subprotocol or compression stay on `https`.** A browser opens a WebSocket over h2 with an
+  extended CONNECT, and the answer it gets does not carry the upstream's `Sec-WebSocket-Protocol` /
+  `Sec-WebSocket-Extensions`: a requested subprotocol is never confirmed, and an upstream that turns on
+  `permessage-deflate` sends frames the browser did not agree to. Plain WebSockets work.
+- **`compress: true` takes effect.** It is applied only by `http2` / `https2` endpoints: a `compress: true`
+  left on a location of an `https` endpoint starts compressing request bodies after the move.
+- **`${HOST_PORT}`** is the host without the port on `https2`, and is empty for its http/1.1 clients.
+- **An `mcp` endpoint can not share a port with an `https2` endpoint that was loaded before it.** The type of
+  the first endpoint of a port decides which types may join it, and `https2` does not take `mcp`.
+- **Connection coalescing.** A browser reuses an h2 connection for another host name that resolves to the same
+  address and is covered by the same certificate (a wildcard). Such requests are routed by their `Host` and are
+  checked per request - client certificate (`421`), IP lists - but they are served by the `https2` request
+  path even when that host is `type: https`. A host which has to stay on the `https` path needs a certificate,
+  or an address, of its own.
+- `keep_alive: false` and per-domain traffic metrics are applied by `https` only; a `drop` location answers an
+  empty `403` on `https2` instead of closing the connection.
+
+`mcp` endpoints are not part of this choice: they are a byte bridge of their own type.
+
 #### WebSocket support on Http2 / Https2
 
 `Http2` and `Https2` endpoints accept WebSocket connections from the client
@@ -699,6 +744,36 @@ Notes:
   a client which sends nothing is not cut. `read_timeout` **must exceed the
   heartbeat interval** (of either side) or quiet connections will be dropped
   falsely.
+
+### TLS session resumption
+
+`https`, `https2` and `mcp` endpoints let a returning client resume its TLS session. A resumed handshake is
+abbreviated: the server sends no certificate and makes no signature, and under TLS 1.2 it is one round trip
+shorter. A browser opening several connections to a site, or coming back after an idle connection was closed,
+resumes instead of doing a full handshake every time. There is nothing to configure.
+
+- **TLS 1.3** resumes from a session ticket the client keeps. The proxy encrypts the tickets with a key which
+  rotates every 6 hours; a ticket is honoured for up to 12 hours.
+- **TLS 1.2** resumes from a ticket too, or by session id from a cache of 4096 sessions.
+- The ticket keys and the cache are shared by every endpoint and held **in memory only**: after a restart each
+  client does one full handshake, then resumes again.
+- A session is resumed only under the server name (SNI) it was made with: a session of one host never resumes
+  on another.
+- A resumed TLS 1.3 handshake still makes a fresh key exchange (`psk_dhe_ke`): forward secrecy is kept.
+- **Early data (0-RTT) is not accepted.** A request sent as early data can be replayed by anyone who recorded
+  it, and would reach the upstream twice.
+
+**Off on an endpoint with `client_certificate_ca`.** Every connection to such an endpoint is a full handshake,
+with the client certificate verified each time (see
+[How a client certificate is verified](#7-how-a-client-certificate-is-verified)). The reasons:
+
+- a resumed handshake carries no client certificate, so there would be nothing to verify - and nothing for
+  `allowed_users` or `${CLIENT_CERT_CN}` to read;
+- the cache and the ticket keys are shared, so a session made on one endpoint - verified against another ca,
+  or with no certificate at all - could be resumed on an endpoint which requires a certificate of its own ca.
+
+A client of an mTLS endpoint therefore pays a full handshake per connection. On `https2` a browser needs only
+one connection per origin, which keeps that cost low.
 
 ### Tcp
 ```yaml
@@ -1888,11 +1963,61 @@ same unit. The **Levels** column says how far down the cascade each key is read:
 | `pool_size` | int | 5 | global→endpoint→location | Connections held in the h1/h2 upstream pool. |
 | `pool_ping_timeout` | ms | 1000 | global→endpoint→location | Per-probe timeout of the h2 liveness check. **h2 + liveness URL only.** |
 | `pool_hot_window` | ms | 3000 | global→endpoint→location | Idle window after a success during which the h2 probe is skipped. **h2 + liveness URL only.** |
-| `read_timeout` | ms | 180000 (3m) | global→endpoint | Idle read timeout on every byte pump — H1 request/response body transfer, MCP tunnel, TCP port-forward, WebSocket. A TCP port-forward or WebSocket session is torn down only when neither direction has moved bytes for this long; a one-way stream keeps it open. Doubles as dead-peer detection. |
+| `read_timeout` | ms | 180000 (3m) | global→endpoint | Idle read timeout on every byte pump — H1 request/response body transfer, MCP tunnel, TCP port-forward, WebSocket. A TCP port-forward or WebSocket session is torn down only when neither direction has moved bytes for this long; a one-way stream keeps it open. Doubles as dead-peer detection. On `http2` / `https2` it is also the longest silence inside a request body the proxy holds whole before sending it on (to an http/1.1 upstream): the client gets `408`. |
 | `write_timeout` | ms | 30000 (30s) | global→endpoint | Idle write timeout on every byte pump (same paths as `read_timeout`). |
+| `header_read_timeout` | ms | 30000 (30s) | global→endpoint | The whole head of a request has to arrive within this, at whatever pace — `http`, `https`, `http2`, `https2` endpoints. Covers the wait of a keep-alive connection for its next request, and on `http2` / `https2` everything before the first request. See [Slow clients](#slow-clients). |
+| `tls_handshake_timeout` | ms | 10000 (10s) | global→endpoint | The TLS handshake of `https`, `https2` and `mcp` endpoints, from the accepted connection — the ClientHello included. |
+| `h2_keep_alive_interval` | ms | 30000 (30s) | global→endpoint | How often an h2 client of an `http2` / `https2` endpoint is sent a PING. |
+| `h2_keep_alive_timeout` | ms | 20000 (20s) | global→endpoint | How long the answer to that PING may take before the connection is closed. |
 
 Keys that don't apply to a given endpoint type (e.g. `pool_size` on a `type: tcp`
 endpoint) are simply ignored there.
+
+Until it is known which endpoint of a port a connection is for — during the TLS handshake (the
+endpoint is picked by the ClientHello), and on a port of several vhosts until the first request
+names its host — the **longest** value among the endpoints of the port applies to
+`header_read_timeout`, `tls_handshake_timeout` and `h2_keep_alive_*`, so no endpoint is held to
+less than its own setting.
+
+### Slow clients
+
+A client that opens a connection and never finishes what it has to send — sends nothing, or a
+request head a byte at a time (slowloris), or a body that stops coming — must not hold a socket
+and a task for ever: a few thousand of them would use up the file descriptors of the process.
+What cuts each of them, by default:
+
+| What the client does | Endpoints | Cut by | Default |
+|---|---|---|---|
+| Connects to a TLS port, sends nothing (or a ClientHello a byte at a time) | `https`, `https2`, `mcp` | `tls_handshake_timeout` | 10 s |
+| Sends a request head that does not end, at any pace | `http`, `https`, `http2`, `https2` | `header_read_timeout` | 30 s |
+| Keeps a keep-alive connection open and sends no next request | `http`, `https`, and http/1.1 clients of `https2` | `header_read_timeout` | 30 s |
+| Finishes the TLS handshake (or connects to `http2`) and sends no request | `http2`, `https2` | `header_read_timeout` | 30 s |
+| Stops answering h2 PINGs (gone without a FIN) | `http2`, `https2` | `h2_keep_alive_interval` + `h2_keep_alive_timeout` | 30 s + 20 s |
+| Goes silent in the middle of a request body | `http`, `https`; `http2`, `https2` to an http/1.1 upstream | `read_timeout` (between two pieces) | 3 min |
+
+What is deliberately **not** cut, so that long-lived exchanges keep working:
+
+- `header_read_timeout` is about the head only. On `http` / `https` the wait for the next request
+  starts when the answer to the previous one is out: a slow upstream, a long download or a long
+  poll is not timed as the client's wait. A body, a websocket or an SSE stream is never timed by
+  it.
+- A request body the proxy streams to an h2 upstream (an `http2` location) is not timed: a gRPC
+  stream may rightly be silent for long, and its upstream sees every byte as it comes. A client
+  that is gone is still noticed by the PINGs.
+- An h2 connection whose client answers the PINGs but sends nothing more stays open, as browsers
+  keep it.
+- `tcp` and `mcp` endpoints forward bytes and never read a head: only `tls_handshake_timeout`
+  (for `mcp`) and `read_timeout` apply to them.
+
+The number of connections is not limited by the proxy. The head of a request is limited in size
+by the read buffer: 1 MB on `http` / `https`, hyper's limits on `http2` / `https2` (about 400 KB
+and 100 headers for http/1.1, 16 KB of h2 headers).
+
+The **control port** (`global_settings.http_control_port`: the admin ui, the API, MCP) is served
+by `my-http-server`, which times the head of every http/1.1 request and the first bytes of a
+connection itself; it takes `header_read_timeout` from `global_settings`. An h2 client of it is
+not timed past its preface, and the other keys above do not apply there. It is not meant for the
+internet: `http_control_ip: 127.0.0.1`, or a firewall.
 
 ### Outside the cascade (fixed scope)
 
@@ -1936,6 +2061,9 @@ hosts:
 - **WebSocket drops while idle (no app traffic)** → raise `read_timeout`, or make either side send a heartbeat shorter than `read_timeout`.
 - **`type: tcp` forward hangs connecting** → lower `connect_to_remote_timeout`.
 - **Gateway link slow to fail** → `connect_timeout` on the gateway client.
+- **Clients behind slow links cut while sending a request head** → raise `header_read_timeout`.
+- **Idle keep-alive connections closed too early / kept too long** → `header_read_timeout` (it is also the keep-alive idle time of http/1.1 clients).
+- **Many half-open connections to a TLS port** → lower `tls_handshake_timeout`.
 
 Detailed sections: [Remote HTTP endpoint timeouts](#timeouts-for-remote-http-endpoints),
 MCP **Connection Settings** (under the MCP endpoint docs), and

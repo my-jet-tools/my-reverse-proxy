@@ -36,6 +36,9 @@ pub struct HttpEndpointInfo {
     /// Endpoint-scoped transport read/write idle timeouts (resolved cascade,
     /// global → endpoint). Used by every byte pump of this endpoint.
     pub timeouts: crate::types::HttpTimeouts,
+    /// How long a client of this endpoint is waited for - its request heads, its TLS handshake,
+    /// its h2 PINGs (resolved cascade, global → endpoint).
+    pub client_timeouts: crate::types::ClientTimeouts,
     /// `Some`: the endpoint was given an access setting it can not apply, and serves nobody.
     pub not_served_reason: Option<NotServedReason>,
 }
@@ -65,6 +68,7 @@ pub struct HttpEndpointInfoParams {
     pub hsts: bool,
     pub mcp_settings: McpEndpointSettings,
     pub timeouts: crate::types::HttpTimeouts,
+    pub client_timeouts: crate::types::ClientTimeouts,
     pub not_served_reason: Option<NotServedReason>,
 }
 
@@ -89,6 +93,7 @@ impl HttpEndpointInfo {
             hsts,
             mcp_settings,
             timeouts,
+            client_timeouts,
             not_served_reason,
         } = params;
 
@@ -129,6 +134,7 @@ impl HttpEndpointInfo {
             hsts,
             mcp_settings,
             timeouts,
+            client_timeouts,
             not_served_reason,
         }
     }

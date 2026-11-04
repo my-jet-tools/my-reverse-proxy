@@ -182,7 +182,7 @@ async fn serve_https2(
     use hyper::service::service_fn;
     use hyper_util::server::conn::auto::Builder;
 
-    use hyper_util::rt::TokioExecutor;
+    use hyper_util::rt::{TokioExecutor, TokioTimer};
 
     let endpoint_name = format!("https://{}", listening_addr);
 
@@ -196,8 +196,22 @@ async fn serve_https2(
         itm.connection_by_endpoint.inc(&endpoint_host_key);
     });
 
+    // Slow-client protection: hyper applies `header_read_timeout` - the head of every request
+    // of an http/1.1 client, and the idle wait of a keep-alive connection for its next one - and
+    // the h2 PINGs only with a timer. What comes before the first request is timed below.
+    let client_timeouts = endpoint_info.client_timeouts;
+
     let mut http_builder = Builder::new(TokioExecutor::new());
-    http_builder.http2().enable_connect_protocol();
+    http_builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(client_timeouts.header_read_timeout);
+    http_builder
+        .http2()
+        .enable_connect_protocol()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(client_timeouts.h2_keep_alive_interval)
+        .keep_alive_timeout(client_timeouts.h2_keep_alive_timeout);
 
     // Per-request HttpProxyPasses are built lazily by the handler (keyed by the
     // request's Host), so there is no pre-seeded entry to build here.
@@ -213,17 +227,22 @@ async fn serve_https2(
     // Origin" on. Without it hyper sends the `101` and then closes the
     // connection, so the upgrade never resolves and the pump drops the upstream.
     // The h2 side (extended CONNECT) is served the same either way.
-    let _ = http_builder
-        .clone()
-        .serve_connection_with_upgrades(
-            TokioIo::new(tls_stream),
-            service_fn(move |req| {
-                super::super::http_request_handler::https::handle_request(
-                    https_requests_handler.clone(),
-                    req,
-                )
-            }),
-        )
+    let first_request = crate::tcp_listener::FirstRequestDeadline::new();
+    let first_request_seen = first_request.clone();
+
+    let connection = http_builder.serve_connection_with_upgrades(
+        TokioIo::new(tls_stream),
+        service_fn(move |req| {
+            first_request_seen.request_arrived();
+            super::super::http_request_handler::https::handle_request(
+                https_requests_handler.clone(),
+                req,
+            )
+        }),
+    );
+
+    let _ = first_request
+        .serve(connection, client_timeouts.header_read_timeout)
         .await;
 
     crate::app::APP_CTX

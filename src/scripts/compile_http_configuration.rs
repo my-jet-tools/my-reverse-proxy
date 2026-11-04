@@ -210,6 +210,7 @@ pub async fn compile_http_configuration(
         hsts: host_settings.endpoint.hsts.unwrap_or(false),
         mcp_settings,
         timeouts: http_timeouts,
+        client_timeouts: endpoint_resolved.client,
         not_served_reason,
     });
 

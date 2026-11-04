@@ -4,6 +4,11 @@ pub const DEFAULT_HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duratio
 
 pub const DEFAULT_HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Pause of an accept loop after a failed `accept`. It fails when the process is out of file
+/// descriptors (`EMFILE`), and retrying at once would only spin a core on the same error and
+/// flood the log with it.
+pub const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(100);
+
 // Transport-level idle read/write timeouts, applied to every byte-pump path
 // (H1 request/response transfer, MCP tunnel, TCP port-forward). Endpoint-scoped
 // and overridable via the timeout cascade (global → endpoint). The read timeout
@@ -12,6 +17,23 @@ pub const DEFAULT_HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duratio
 // (e.g. an MCP client that only speaks when it issues a request).
 pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60 * 3);
 pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+// Slow-client protection of the http/https endpoints (`header_read_timeout`,
+// `tls_handshake_timeout`, `h2_keep_alive_*` in the timeout cascade, global → endpoint).
+//
+// The whole head of a request has to arrive within this - counted from the moment the
+// connection waits for that request with no response of its own still going out (so the
+// wait for the next request of a keep-alive connection counts too), or from its first byte.
+// `read_timeout` alone would let a client that sends one byte a minute hold a connection
+// forever (slowloris).
+pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+// The TLS handshake, from the accepted connection to the finished handshake - the ClientHello
+// included, so a client that opens a connection and sends nothing is cut by it.
+pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+// h2 PINGs to the clients of http2/https2 endpoints: a connection whose client stopped
+// answering is closed instead of being held until TCP itself gives up on it.
+pub const DEFAULT_CLIENT_H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+pub const DEFAULT_CLIENT_H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 pub const DEFAULT_MCP_BUFFER_SIZE: usize = 512 * 1024;
 
 // H1/H2 upstream pool defaults (used when not overridden in the location config).

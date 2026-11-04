@@ -31,24 +31,24 @@ async fn accept_connections_loop(
     let mut connection_id: u64 = 0;
 
     while !crate::app::APP_CTX.states.is_shutting_down() {
-        let accepted_connection_feature = listener.accept();
+        let accepted_connection_feature = accept_connection(&listener);
 
         let stop_endpoint_feature = listen_server_handler.await_stop();
 
         tokio::select! {
             accepted_connection = accepted_connection_feature => {
-                if let Err(err) = &accepted_connection {
+                let (tcp_stream, addr) = match accepted_connection {
+                    Ok(accepted) => accepted,
+                    Err(err) => {
                         println!(
                             "Error accepting connection {}. Err: {:?}",
                             listening_addr, err
                         );
 
-                    continue;
-                }
-
-
-
-                let (tcp_stream, addr) = accepted_connection.unwrap();
+                        tokio::time::sleep(crate::consts::ACCEPT_ERROR_DELAY).await;
+                        continue;
+                    }
+                };
 
                 if crate::app::APP_CTX.ip_blocklist.is_blocked(&addr.ip()) {
                     crate::app::APP_CTX.proxy_logs.write_port(
@@ -61,8 +61,14 @@ async fn accept_connections_loop(
                 }
 
                 connection_id += 1;
-                handle_accepted_connection(tcp_stream, addr, listening_addr, connection_id).await;
 
+                // The connection is served by a task of its own: a tcp endpoint connects to its
+                // remote before it forwards anything - up to `remote_connect_timeout` - and the
+                // next connection on the port must not wait for that.
+                crate::app::spawn_named(
+                    "tcp_accepted_connection",
+                    handle_accepted_connection(tcp_stream, addr, listening_addr, connection_id),
+                );
             }
             _ = stop_endpoint_feature => {
                 break;
@@ -73,6 +79,21 @@ async fn accept_connections_loop(
     if listen_server_handler.is_shutting_down() {
         listen_server_handler.set_tcp_thread_stopped();
     }
+}
+
+/// The next connection of the port, with TCP_NODELAY on.
+///
+/// Every endpoint on a port - http, https, tcp - writes what it has as soon as it has it: a
+/// response body goes out piece by piece as it comes from the upstream. With Nagle's algorithm
+/// on, a small piece which follows another waits for the client to acknowledge the first, and a
+/// client which delays its ACKs makes that tens to hundreds of milliseconds. A failed
+/// `set_nodelay` is not an error: the connection is served either way.
+pub(super) async fn accept_connection(
+    listener: &tokio::net::TcpListener,
+) -> std::io::Result<(tokio::net::TcpStream, SocketAddr)> {
+    let (tcp_stream, addr) = listener.accept().await?;
+    let _ = tcp_stream.set_nodelay(true);
+    Ok((tcp_stream, addr))
 }
 
 async fn handle_accepted_connection(

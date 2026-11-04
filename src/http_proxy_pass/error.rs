@@ -22,6 +22,9 @@ pub enum ProxyPassError {
     IpRestricted(String),
     Disconnected,
     Timeout,
+    /// The client went silent in the middle of a request body the proxy waits for whole -
+    /// longer than the endpoint's `read_timeout`. Answered `408`.
+    ClientBodyTimeout,
     Disposed,
     GatewayError,
     NoWebSocketUpgrade,

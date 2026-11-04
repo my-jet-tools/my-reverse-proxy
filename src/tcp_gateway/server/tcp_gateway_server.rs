@@ -1,7 +1,6 @@
 use std::net::IpAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ed25519_dalek::VerifyingKey;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
@@ -9,12 +8,9 @@ use tokio::net::{TcpListener, TcpStream};
 
 use super::super::*;
 use super::*;
+use crate::consts::ACCEPT_ERROR_DELAY;
 use crate::tcp_gateway::handshake::{perform_server_handshake, HANDSHAKE_TIMEOUT};
 use crate::types::WhiteListedIpList;
-
-/// Pause after a failed `accept`. It fails when the process is out of file descriptors, and
-/// retrying at once would only spin on the same error.
-const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(100);
 
 pub struct TcpGatewayServer {
     inner: Arc<TcpGatewayInner>,

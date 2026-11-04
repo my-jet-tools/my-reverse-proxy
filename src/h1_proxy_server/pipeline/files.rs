@@ -155,7 +155,7 @@ mod tests {
             answer.bytes,
             response(
                 &format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/css\r\ncontent-length: {}\r\n\r\n",
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/css; charset=utf-8\r\ncontent-length: {}\r\n\r\n",
                     SITE_CSS.len()
                 ),
                 SITE_CSS
@@ -174,7 +174,7 @@ mod tests {
             answer.bytes,
             response(
                 &format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\n\r\n",
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\n\r\n",
                     INDEX_HTML.len()
                 ),
                 INDEX_HTML

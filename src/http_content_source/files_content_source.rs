@@ -158,12 +158,18 @@ mod tests {
 
         let file = get_file(&source, "/index.html").await;
         assert_eq!(file.status_code, 200);
-        assert_eq!(file.content_type.unwrap().as_str(), "text/html");
+        assert_eq!(
+            file.content_type.unwrap().as_str(),
+            "text/html; charset=utf-8"
+        );
         assert_eq!(file.body, INDEX_HTML);
 
         let file = get_file(&source, "/css/site.css").await;
         assert_eq!(file.status_code, 200);
-        assert_eq!(file.content_type.unwrap().as_str(), "text/css");
+        assert_eq!(
+            file.content_type.unwrap().as_str(),
+            "text/css; charset=utf-8"
+        );
         assert_eq!(file.body, SITE_CSS);
     }
 
@@ -174,7 +180,10 @@ mod tests {
         let source = source_of(&site.root(), Some("index.html")).await;
         let file = get_file(&source, "/").await;
         assert_eq!(file.status_code, 200);
-        assert_eq!(file.content_type.unwrap().as_str(), "text/html");
+        assert_eq!(
+            file.content_type.unwrap().as_str(),
+            "text/html; charset=utf-8"
+        );
         assert_eq!(file.body, INDEX_HTML);
 
         // For the root only: a folder inside has no default file - also when a file of that
@@ -297,7 +306,7 @@ mod tests {
 
         let (status, content_type, body) = execute(&source, "/index.html?v=1").await;
         assert_eq!(status, 200);
-        assert_eq!(content_type.as_deref(), Some("text/html"));
+        assert_eq!(content_type.as_deref(), Some("text/html; charset=utf-8"));
         assert_eq!(body, INDEX_HTML);
 
         let (status, _, body) = execute(&source, "/?utm=x").await;

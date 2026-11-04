@@ -13,7 +13,7 @@ use super::super::{
 };
 use super::{
     run_client_writer, run_oauth_gate, run_upstream_request, run_ws_tunnel, BodyChannelSink,
-    OAuthGateOutcome, ResponseEvent, ResponseSlot, UpgradeContext, UpstreamRequest,
+    OAuthGateOutcome, ResponseEvent, ResponseQueue, ResponseSlot, UpgradeContext, UpstreamRequest,
     REQUEST_BODY_CHANNEL_CAPACITY, RESPONSE_CHANNEL_CAPACITY,
 };
 
@@ -120,10 +120,10 @@ pub async fn serve_reverse_proxy_pipelined<
     // interface.
     let pool = H1PoolHolder::new_local();
 
-    let (queue_tx, queue_rx) = mpsc::channel::<ResponseSlot>(RESPONSE_QUEUE_CAPACITY);
+    let (queue_tx, queue_rx, in_flight) = ResponseQueue::new(RESPONSE_QUEUE_CAPACITY);
     let writer = crate::app::spawn_named(
         "h1_client_writer",
-        run_client_writer(server_write_part, queue_rx),
+        run_client_writer(server_write_part, queue_rx, in_flight),
     );
 
     loop {
@@ -164,16 +164,31 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
     h1_reader: &mut H1Reader<ReadPart>,
     http_connection_info: &mut HttpConnectionInfo,
     pool: &Arc<H1PoolHolder>,
-    queue_tx: &mpsc::Sender<ResponseSlot>,
+    queue_tx: &ResponseQueue,
     conn_gauge: &ConnGauge,
 ) -> ReaderStep {
     if let Some(endpoint_info) = http_connection_info.endpoint_info.as_ref() {
         conn_gauge.attribute_to_endpoint(endpoint_info.host_endpoint.as_str());
     }
 
-    let request_headers = match h1_reader.read_headers().await {
+    // Before the request names its host, the endpoint of the connection - or, on a port of
+    // several vhosts that none was picked for yet, the longest of theirs.
+    let header_read_timeout = match http_connection_info.endpoint_info.as_ref() {
+        Some(endpoint_info) => endpoint_info.client_timeouts.header_read_timeout,
+        None => {
+            http_connection_info
+                .listen_config
+                .client_timeouts()
+                .header_read_timeout
+        }
+    };
+
+    let request_headers = match h1_reader
+        .read_request_headers(header_read_timeout, queue_tx.in_flight())
+        .await
+    {
         Ok(h) => h,
-        // No bytes / transport gone — just close.
+        // No bytes / transport gone / the head did not come in time — just close.
         Err(_) => return ReaderStep::Close,
     };
 
@@ -745,7 +760,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
 async fn refuse_the_path<ReadPart: NetworkStreamReadPart + Send + Sync + 'static>(
     h1_reader: &mut H1Reader<ReadPart>,
     request_headers: &crate::h1_utils::Http1Headers,
-    queue_tx: &mpsc::Sender<ResponseSlot>,
+    queue_tx: &ResponseQueue,
     write_timeout: Duration,
     is_head: bool,
     keep_alive: bool,
@@ -783,7 +798,7 @@ async fn refuse_the_path<ReadPart: NetworkStreamReadPart + Send + Sync + 'static
 /// left of it on the connection would be read as the next request. The response
 /// is sent all the same, and the connection is closed behind it.
 async fn emit_own_response(
-    queue_tx: &mpsc::Sender<ResponseSlot>,
+    queue_tx: &ResponseQueue,
     write_timeout: Duration,
     mut response: Vec<u8>,
     is_head: bool,
@@ -846,7 +861,7 @@ fn headers_added_to_a_response(
 /// Push a single fully-formed response (already-built bytes) as one ordered
 /// slot and keep the connection open. Returns `Close` only if the writer is gone.
 async fn emit_single_response(
-    queue_tx: &mpsc::Sender<ResponseSlot>,
+    queue_tx: &ResponseQueue,
     write_timeout: Duration,
     bytes: Vec<u8>,
 ) -> ReaderStep {
@@ -870,7 +885,7 @@ async fn emit_single_response(
 /// Push an ordered error response (per `ProxyServerError::error_handling`) and
 /// close the connection.
 async fn respond_error(
-    queue_tx: &mpsc::Sender<ResponseSlot>,
+    queue_tx: &ResponseQueue,
     http_connection_info: &HttpConnectionInfo,
     endpoint: Option<&str>,
     err: ProxyServerError,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 
 use crate::{
     configurations::HttpListenPortConfiguration,
@@ -19,8 +19,18 @@ pub async fn handle_connection(
     let listening_addr_str =
         listen_host.to_pretty_string(configuration.listen_endpoint_type.is_https());
 
+    // Which endpoint of the port a connection is for is known only from its requests: until
+    // then the port's client timeouts (the longest of its endpoints') apply.
+    let client_timeouts = configuration.client_timeouts();
+
+    // The h2 PINGs need a timer; a client which stopped answering them is cut. What comes before
+    // the first request - the client preface, the first HEADERS - is timed below.
     let mut http2_builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
-    http2_builder.enable_connect_protocol();
+    http2_builder
+        .enable_connect_protocol()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(client_timeouts.h2_keep_alive_interval)
+        .keep_alive_timeout(client_timeouts.h2_keep_alive_timeout);
     let http2_builder = Arc::new(http2_builder);
 
     let builder = http2_builder.clone();
@@ -62,19 +72,25 @@ pub async fn handle_connection(
 
         match io {
             TcpOrUnixSocket::Tcp(io) => {
-                let result = builder
-                    .serve_connection(
-                        io,
-                        service_fn(move |req| {
-                            super::http_request_handler::http::handle_request(
-                                http_request_handler.clone(),
-                                req,
-                            )
-                        }),
-                    )
+                let first_request = super::FirstRequestDeadline::new();
+                let first_request_seen = first_request.clone();
+
+                let connection = builder.serve_connection(
+                    io,
+                    service_fn(move |req| {
+                        first_request_seen.request_arrived();
+                        super::http_request_handler::http::handle_request(
+                            http_request_handler.clone(),
+                            req,
+                        )
+                    }),
+                );
+
+                let result = first_request
+                    .serve(connection, client_timeouts.header_read_timeout)
                     .await;
 
-                if let Err(err) = result {
+                if let Some(Err(err)) = result {
                     println!(
                         "Error serving H2 connection on [{}]. Err{:?}",
                         listening_addr_str, err
@@ -83,19 +99,25 @@ pub async fn handle_connection(
             }
             #[cfg(unix)]
             TcpOrUnixSocket::Unix(io) => {
-                let result = builder
-                    .serve_connection(
-                        io,
-                        service_fn(move |req| {
-                            super::http_request_handler::http::handle_request(
-                                http_request_handler.clone(),
-                                req,
-                            )
-                        }),
-                    )
+                let first_request = super::FirstRequestDeadline::new();
+                let first_request_seen = first_request.clone();
+
+                let connection = builder.serve_connection(
+                    io,
+                    service_fn(move |req| {
+                        first_request_seen.request_arrived();
+                        super::http_request_handler::http::handle_request(
+                            http_request_handler.clone(),
+                            req,
+                        )
+                    }),
+                );
+
+                let result = first_request
+                    .serve(connection, client_timeouts.header_read_timeout)
                     .await;
 
-                if let Err(err) = result {
+                if let Some(Err(err)) = result {
                     println!(
                         "Error serving H2 connection on [{}]. Err{:?}",
                         listening_addr_str, err

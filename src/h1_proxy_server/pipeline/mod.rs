@@ -22,6 +22,8 @@ mod oauth_gate;
 pub use oauth_gate::*;
 mod response_event;
 pub use response_event::*;
+mod response_queue;
+pub use response_queue::*;
 mod client_writer;
 pub use client_writer::*;
 mod worker;

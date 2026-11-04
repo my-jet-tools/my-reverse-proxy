@@ -1,3 +1,5 @@
+mod connect_tcp;
+pub use connect_tcp::*;
 mod connection_pumps;
 pub use connection_pumps::*;
 mod copy_streams;

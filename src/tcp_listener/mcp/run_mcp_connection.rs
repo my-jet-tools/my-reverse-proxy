@@ -57,7 +57,7 @@ pub async fn run_mcp_connection(
         remote_host
     );
 
-    let connect_result = tokio::net::TcpStream::connect(remote_host).await;
+    let connect_result = crate::tcp_utils::connect_tcp(remote_host).await;
 
     let tcp_stream = match connect_result {
         Ok(remote_host) => remote_host,
