@@ -40,3 +40,6 @@ mod accept_loop_tests;
 
 #[cfg(test)]
 mod slow_client_tests;
+
+#[cfg(test)]
+mod h1_to_h2_upstream_tests;

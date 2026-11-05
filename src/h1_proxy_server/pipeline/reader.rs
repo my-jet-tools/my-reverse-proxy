@@ -12,9 +12,10 @@ use super::super::{
     H1HeadersKind, H1Reader, HttpConnectionInfo, HttpHeadersReader, ProxyServerError,
 };
 use super::{
-    run_client_writer, run_oauth_gate, run_upstream_request, run_ws_tunnel, BodyChannelSink,
-    OAuthGateOutcome, ResponseEvent, ResponseQueue, ResponseSlot, UpgradeContext, UpstreamRequest,
-    REQUEST_BODY_CHANNEL_CAPACITY, RESPONSE_CHANNEL_CAPACITY,
+    run_client_writer, run_h2_upstream_request, run_oauth_gate, run_upstream_request,
+    run_ws_tunnel, BodyChannelSink, H2UpstreamRequest, OAuthGateOutcome, ResponseEvent,
+    ResponseQueue, ResponseSlot, UpgradeContext, UpstreamRequest, REQUEST_BODY_CHANNEL_CAPACITY,
+    RESPONSE_CHANNEL_CAPACITY,
 };
 
 /// How many response slots may be queued ahead of the writer. H1 serves one
@@ -723,20 +724,43 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         return ReaderStep::Close;
     }
 
-    crate::app::spawn_named(
-        "h1_upstream_worker",
-        run_upstream_request(UpstreamRequest {
-            pool: pool.clone(),
-            proxy_pass_to: proxy_pass_to_owned,
-            end_point_info,
-            location,
-            http_connection_info: conn_info,
-            location_id,
-            head,
-            body_rx,
-            response_tx,
-        }),
-    );
+    // An h2 upstream gets the request through its h2 pool, everything before this point -
+    // the head compiled, the body streamed - is the same as for an h1 one.
+    if location.is_remote_content_http1() == Some(false) {
+        let content_source = location.h2_upstream(end_point_info.debug).await;
+
+        crate::app::spawn_named(
+            "h1_to_h2_upstream_worker",
+            run_h2_upstream_request(H2UpstreamRequest {
+                content_source,
+                is_mcp: proxy_pass_to_owned.is_mcp(),
+                end_point_info,
+                location,
+                http_connection_info: conn_info,
+                location_id,
+                head,
+                request_content_length: content_length,
+                is_head,
+                body_rx,
+                response_tx,
+            }),
+        );
+    } else {
+        crate::app::spawn_named(
+            "h1_upstream_worker",
+            run_upstream_request(UpstreamRequest {
+                pool: pool.clone(),
+                proxy_pass_to: proxy_pass_to_owned,
+                end_point_info,
+                location,
+                http_connection_info: conn_info,
+                location_id,
+                head,
+                body_rx,
+                response_tx,
+            }),
+        );
+    }
 
     // Stream the request body to the worker. When done, drop body_tx so the
     // worker's body_rx closes.

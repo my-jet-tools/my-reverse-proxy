@@ -131,21 +131,20 @@ pub async fn compile_http_configuration(
             ));
         }
 
-        // `mcp-h2` talks h2 to the upstream, and the h2 upstream pools are only
-        // reachable from the hyper request path — which runs for `http2` /
-        // `https2` endpoints. Under an http/1 endpoint the request goes through
-        // the byte pipeline, which has no h2 upstream at all, so every request
-        // to this location would fail. Say it at config time.
-        if http_type.is_http1_or_mcp()
+        // `mcp-h2` talks h2 to the upstream. An `http` / `https` endpoint gets it there - the
+        // h1 pipeline sends to an h2 upstream as well - but a `type: mcp` endpoint is a byte
+        // bridge which parses no HTTP: it would relay the client's h1 bytes to an h2 server, and
+        // every request to this location would fail. Say it at config time.
+        if matches!(http_type, ListenHttpEndpointType::Mcp)
             && matches!(
                 proxy_pass_to.proxy_pass_to,
                 crate::configurations::ProxyPassToConfig::McpHttp2(_)
             )
         {
             return Err(format!(
-                "Endpoint '{}' is 'type: {}' (http/1), but its location '{}' is 'type: {}', which \
-                 requires an http/2 upstream. Use 'type: {}' here, or move the location to an \
-                 endpoint of 'type: http2' / 'type: https2'",
+                "Endpoint '{}' is 'type: {}', a byte bridge, but its location '{}' is 'type: {}', \
+                 which requires an http/2 upstream. Use 'type: {}' here, or move the location to \
+                 an endpoint of 'type: http' / 'type: https'",
                 listen_host,
                 http_type.as_str(),
                 proxy_pass_to.path,
@@ -373,6 +372,22 @@ mod tests {
         // Anything else still goes through a gateway.
         compile("http", "http").await.unwrap();
         compile("http2", "http2").await.unwrap();
+    }
+
+    /// The h1 pipeline sends to an h2 upstream, so an `mcp-h2` location is served under an
+    /// `http` endpoint. A `type: mcp` endpoint relays bytes and can not serve one.
+    #[tokio::test]
+    async fn an_mcp_h2_location_is_refused_only_under_a_byte_bridge() {
+        let location =
+            "- path: /mcp\n  type: mcp-h2\n  proxy_pass_to: 'http://127.0.0.1:8000/mcp'\n";
+
+        compile_locations("http", location).await.unwrap();
+        compile_locations("http2", location).await.unwrap();
+
+        let Err(err) = compile_locations("mcp", location).await else {
+            panic!("an mcp-h2 location under a byte bridge is accepted");
+        };
+        assert!(err.contains("requires an http/2 upstream"), "{err}");
     }
 
     /// `locations`: the `locations:` list as a settings file writes it.

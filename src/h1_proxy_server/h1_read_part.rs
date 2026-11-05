@@ -225,162 +225,20 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
         request_target: Option<&str>,
         dynamic_proxy_host_override: Option<&str>,
     ) -> Result<bool, ProxyServerError> {
-        let modify_headers = kind.modify_headers();
-        let request_endpoint = match &kind {
-            H1HeadersKind::Request(info, _) => Some(*info),
-            H1HeadersKind::Response(..) => None,
-        };
         self.h1_headers_builder.clear();
-        let data = self.loop_buffer.get_data();
 
-        if let Some(request_target) = request_target {
-            http_headers.push_first_line_with_other_path(
-                data,
-                request_target,
-                &mut self.h1_headers_builder,
-            );
-            self.h1_headers_builder.push_cl_cr();
-        } else {
-            self.h1_headers_builder.push_raw_payload(
-                &data[..http_headers.first_line_end + crate::consts::HTTP_CR_LF.len()],
-            );
-        }
-
-        let mut pos = http_headers.first_line_end + crate::consts::HTTP_CR_LF.len();
-
-        let is_request = request_endpoint.is_some();
-        let client_ip = if is_request {
-            http_connection_info.connection_ip.get_ip_addr()
-        } else {
-            None
-        };
-        let inject_country_enabled = request_endpoint.map(|e| e.inject_country).unwrap_or(false);
-        let mut xff_written = false;
-
-        loop {
-            let next_pos = data
-                .find_sequence_pos(crate::consts::HTTP_CR_LF, pos)
-                .unwrap();
-
-            if next_pos == pos {
-                break;
-            }
-
-            let header = &data[pos..next_pos];
-            //println!("{:?}", std::str::from_utf8(header));
-
-            let Some(header_name_end_pos) = header.find_byte_pos(b':', 0) else {
-                return Err(ProxyServerError::HeadersParseError(
-                    "Header does not have end `:` symbol",
-                ));
-            };
-
-            let Ok(header_name) = std::str::from_utf8(&header[..header_name_end_pos]) else {
-                return Err(ProxyServerError::HeadersParseError(
-                    "Header name is not valid UTF-8",
-                ));
-            };
-
-            let skip_for_dynamic_proxy = dynamic_proxy_host_override.is_some()
-                && (header_name.eq_ignore_ascii_case("host")
-                    || header_name.eq_ignore_ascii_case("proxy-to"));
-
-            let has_to_be_removed = modify_headers
-                .iter()
-                .any(|rules| rules.has_to_be_removed(header_name));
-
-            if !skip_for_dynamic_proxy && !has_to_be_removed {
-                if header_name.eq_ignore_ascii_case("x-forwarded-for") {
-                    if let Some(ip) = client_ip {
-                        let value_bytes = &header[header_name_end_pos + 1..];
-                        let value_str = std::str::from_utf8(value_bytes).unwrap_or("").trim();
-                        let new_value = format!("{},{}", value_str, ip);
-                        self.h1_headers_builder
-                            .push_header("X-Forwarded-For", &new_value);
-                        xff_written = true;
-                    } else {
-                        self.h1_headers_builder.push_raw_payload(header);
-                        self.h1_headers_builder
-                            .push_raw_payload(crate::consts::HTTP_CR_LF);
-                        xff_written = true;
-                    }
-                } else if inject_country_enabled && header_name.eq_ignore_ascii_case("cf-ipcountry")
-                {
-                    // drop client-supplied value; we'll write our own below
-                } else {
-                    self.h1_headers_builder.push_raw_payload(header);
-                    self.h1_headers_builder
-                        .push_raw_payload(crate::consts::HTTP_CR_LF);
-                }
-            }
-
-            pos = next_pos + crate::consts::HTTP_CR_LF.len();
-        }
-
-        if !xff_written {
-            if let Some(ip) = client_ip {
-                self.h1_headers_builder
-                    .push_header("X-Forwarded-For", &ip.to_string());
-            }
-        }
-
-        if inject_country_enabled {
-            if let Some(ip) = http_connection_info.connection_ip.get_ip_addr() {
-                if let Some(code) = crate::ip_db::lookup_country(ip) {
-                    let code_str = std::str::from_utf8(&code).unwrap();
-                    self.h1_headers_builder
-                        .push_header("CF-IPCountry", code_str);
-                }
-            }
-        }
-
-        if let Some(host_override) = dynamic_proxy_host_override {
-            self.h1_headers_builder.push_header("Host", host_override);
-        }
-
-        let http_request_reader = HttpHeadersReader {
-            http_headers: &http_headers,
-            payload: self.loop_buffer.get_data(),
-        };
-
-        for add_header in modify_headers.iter().flat_map(|rules| rules.iter_add()) {
-            if add_header.1.is_empty() {
-                continue;
-            }
-            let value = crate::scripts::populate_value(
-                http_request_reader,
-                http_connection_info,
-                identity,
-                add_header.1.as_str(),
-            );
-            if value.as_str().is_empty() {
-                continue;
-            }
-            self.h1_headers_builder
-                .push_header(add_header.0, value.as_str());
-        }
-
-        if let H1HeadersKind::Response(info, _) = &kind {
-            if !info.keep_alive {
-                self.h1_headers_builder.push_header("Connection", "close");
-            }
-
-            if info.hsts && info.listen_endpoint_type.is_https() {
-                self.h1_headers_builder
-                    .push_header("Strict-Transport-Security", crate::consts::HSTS_VALUE);
-            }
-        }
-
-        self.h1_headers_builder.push_cl_cr();
-
-        let mut web_socket_upgrade = false;
-
-        if let Some(upgrade_position) = http_headers.upgrade_value.as_ref() {
-            let upgrade_value = &data[upgrade_position.start..upgrade_position.end];
-
-            web_socket_upgrade =
-                crate::h1_utils::compare_case_insensitive(upgrade_value, b"websocket");
-        }
+        let web_socket_upgrade = compile_head(
+            HttpHeadersReader {
+                http_headers: &http_headers,
+                payload: self.loop_buffer.get_data(),
+            },
+            &mut self.h1_headers_builder,
+            kind,
+            http_connection_info,
+            identity,
+            request_target,
+            dynamic_proxy_host_override,
+        )?;
 
         self.loop_buffer.commit_read(http_headers.end);
 
@@ -426,4 +284,166 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
     pub fn into_read_part(self) -> (TNetworkReadPart, LoopBuffer) {
         (self.read_part, self.loop_buffer)
     }
+}
+
+/// Writes `head` - parsed, in the buffer it was parsed from - to `out` the way it goes on: with
+/// the `modify_http_headers` of `kind` applied, `X-Forwarded-For` and `CF-IPCountry` on a request,
+/// `Connection: close` and HSTS on a response. Returns whether the head asks for a websocket
+/// upgrade.
+///
+/// The head of an h1 upstream's response is compiled where it was read - in the loop buffer of
+/// its reader. The head of an h2 upstream's response is first written as h1 and compiled from
+/// there, so both get the very same rules.
+pub fn compile_head(
+    head: HttpHeadersReader<'_>,
+    out: &mut Http1HeadersBuilder,
+    kind: H1HeadersKind<'_>,
+    http_connection_info: &HttpConnectionInfo,
+    identity: &Option<HttpProxyPassIdentity>,
+    request_target: Option<&str>,
+    dynamic_proxy_host_override: Option<&str>,
+) -> Result<bool, ProxyServerError> {
+    let HttpHeadersReader {
+        http_headers,
+        payload: data,
+    } = head;
+
+    let modify_headers = kind.modify_headers();
+    let request_endpoint = match &kind {
+        H1HeadersKind::Request(info, _) => Some(*info),
+        H1HeadersKind::Response(..) => None,
+    };
+
+    if let Some(request_target) = request_target {
+        http_headers.push_first_line_with_other_path(data, request_target, out);
+        out.push_cl_cr();
+    } else {
+        out.push_raw_payload(
+            &data[..http_headers.first_line_end + crate::consts::HTTP_CR_LF.len()],
+        );
+    }
+
+    let mut pos = http_headers.first_line_end + crate::consts::HTTP_CR_LF.len();
+
+    let is_request = request_endpoint.is_some();
+    let client_ip = if is_request {
+        http_connection_info.connection_ip.get_ip_addr()
+    } else {
+        None
+    };
+    let inject_country_enabled = request_endpoint.map(|e| e.inject_country).unwrap_or(false);
+    let mut xff_written = false;
+
+    loop {
+        let next_pos = data
+            .find_sequence_pos(crate::consts::HTTP_CR_LF, pos)
+            .unwrap();
+
+        if next_pos == pos {
+            break;
+        }
+
+        let header = &data[pos..next_pos];
+        //println!("{:?}", std::str::from_utf8(header));
+
+        let Some(header_name_end_pos) = header.find_byte_pos(b':', 0) else {
+            return Err(ProxyServerError::HeadersParseError(
+                "Header does not have end `:` symbol",
+            ));
+        };
+
+        let Ok(header_name) = std::str::from_utf8(&header[..header_name_end_pos]) else {
+            return Err(ProxyServerError::HeadersParseError(
+                "Header name is not valid UTF-8",
+            ));
+        };
+
+        let skip_for_dynamic_proxy = dynamic_proxy_host_override.is_some()
+            && (header_name.eq_ignore_ascii_case("host")
+                || header_name.eq_ignore_ascii_case("proxy-to"));
+
+        let has_to_be_removed = modify_headers
+            .iter()
+            .any(|rules| rules.has_to_be_removed(header_name));
+
+        if !skip_for_dynamic_proxy && !has_to_be_removed {
+            if header_name.eq_ignore_ascii_case("x-forwarded-for") {
+                if let Some(ip) = client_ip {
+                    let value_bytes = &header[header_name_end_pos + 1..];
+                    let value_str = std::str::from_utf8(value_bytes).unwrap_or("").trim();
+                    let new_value = format!("{},{}", value_str, ip);
+                    out.push_header("X-Forwarded-For", &new_value);
+                    xff_written = true;
+                } else {
+                    out.push_raw_payload(header);
+                    out.push_raw_payload(crate::consts::HTTP_CR_LF);
+                    xff_written = true;
+                }
+            } else if inject_country_enabled && header_name.eq_ignore_ascii_case("cf-ipcountry") {
+                // drop client-supplied value; we'll write our own below
+            } else {
+                out.push_raw_payload(header);
+                out.push_raw_payload(crate::consts::HTTP_CR_LF);
+            }
+        }
+
+        pos = next_pos + crate::consts::HTTP_CR_LF.len();
+    }
+
+    if !xff_written {
+        if let Some(ip) = client_ip {
+            out.push_header("X-Forwarded-For", &ip.to_string());
+        }
+    }
+
+    if inject_country_enabled {
+        if let Some(ip) = http_connection_info.connection_ip.get_ip_addr() {
+            if let Some(code) = crate::ip_db::lookup_country(ip) {
+                let code_str = std::str::from_utf8(&code).unwrap();
+                out.push_header("CF-IPCountry", code_str);
+            }
+        }
+    }
+
+    if let Some(host_override) = dynamic_proxy_host_override {
+        out.push_header("Host", host_override);
+    }
+
+    for add_header in modify_headers.iter().flat_map(|rules| rules.iter_add()) {
+        if add_header.1.is_empty() {
+            continue;
+        }
+        let value = crate::scripts::populate_value(
+            head,
+            http_connection_info,
+            identity,
+            add_header.1.as_str(),
+        );
+        if value.as_str().is_empty() {
+            continue;
+        }
+        out.push_header(add_header.0, value.as_str());
+    }
+
+    if let H1HeadersKind::Response(info, _) = &kind {
+        if !info.keep_alive {
+            out.push_header("Connection", "close");
+        }
+
+        if info.hsts && info.listen_endpoint_type.is_https() {
+            out.push_header("Strict-Transport-Security", crate::consts::HSTS_VALUE);
+        }
+    }
+
+    out.push_cl_cr();
+
+    let mut web_socket_upgrade = false;
+
+    if let Some(upgrade_position) = http_headers.upgrade_value.as_ref() {
+        let upgrade_value = &data[upgrade_position.start..upgrade_position.end];
+
+        web_socket_upgrade = crate::h1_utils::compare_case_insensitive(upgrade_value, b"websocket");
+    }
+
+    Ok(web_socket_upgrade)
 }

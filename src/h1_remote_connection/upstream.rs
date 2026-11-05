@@ -8,6 +8,9 @@ use crate::{network_stream::*, tcp_gateway::forwarded_connection::TcpGatewayProx
 
 use super::*;
 
+const H2_WEBSOCKET_IS_NOT_SUPPORTED: &str =
+    "a websocket to an http2 upstream is not supported for an http/1 client";
+
 /// One upstream connection's write side, one variant per transport.
 pub enum UpstreamInner {
     Http1Direct(Http1ConnectionInner<tokio::io::WriteHalf<tokio::net::TcpStream>>),
@@ -192,21 +195,19 @@ impl Upstream {
                     "a unix+http upstream over ssh is not supported",
                 )),
             },
-            // This pipeline speaks h1 to the upstream and nothing else. An h2
-            // upstream is served by the hyper path, which only runs under an
-            // `http2` / `https2` endpoint — so this is a misconfiguration, not
-            // a runtime fault, and it is refused (a `todo!()` here used to take
-            // the worker task down with it).
+            // An owned connection speaks h1. A request to an h2 upstream goes
+            // through its h2 pool instead (`run_h2_upstream_request`); what still
+            // gets here is a websocket handshake to one, which this pipeline can
+            // not tunnel yet - refused rather than a `todo!()`, which used to
+            // take the worker task down with it.
             ProxyPassToConfig::Http2(_) | ProxyPassToConfig::McpHttp2(_) => {
-                Err(NetworkError::OtherStr(
-                    "an http2 upstream requires an http2/https2 endpoint — this endpoint is http/1",
-                ))
+                Err(NetworkError::OtherStr(H2_WEBSOCKET_IS_NOT_SUPPORTED))
             }
             // An arm of its own: a cfg can not be put on one alternative of a pattern.
             #[cfg(unix)]
-            ProxyPassToConfig::UnixHttp2(_) => Err(NetworkError::OtherStr(
-                "an http2 upstream requires an http2/https2 endpoint — this endpoint is http/1",
-            )),
+            ProxyPassToConfig::UnixHttp2(_) => {
+                Err(NetworkError::OtherStr(H2_WEBSOCKET_IS_NOT_SUPPORTED))
+            }
             ProxyPassToConfig::FilesPath(_)
             | ProxyPassToConfig::Static(_)
             | ProxyPassToConfig::Drop

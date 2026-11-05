@@ -28,6 +28,8 @@ mod client_writer;
 pub use client_writer::*;
 mod worker;
 pub use worker::*;
+mod h2_upstream;
+pub use h2_upstream::*;
 mod reader;
 pub use reader::*;
 mod ws_tunnel;

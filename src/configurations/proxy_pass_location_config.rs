@@ -28,6 +28,9 @@ pub struct ProxyPassLocationConfig {
     /// `strip_path` of the settings: the upstream gets the request target without the part of
     /// the path which picked this location (`crate::types::strip_location_path`).
     pub strip_path: bool,
+    /// The upstream of an h2 location as the h1 pipeline sends to it - built at the first
+    /// request and kept for as long as these settings are. See [`Self::h2_upstream`].
+    h2_upstream: tokio::sync::OnceCell<std::sync::Arc<HttpProxyPassContentSource>>,
 }
 
 /// Byte-for-byte comparison of the configured `auth_header` value against the
@@ -84,7 +87,25 @@ impl ProxyPassLocationConfig {
             compress: location_settings.get_compress(),
             auth_header: location_settings.auth_header.clone(),
             strip_path: location_settings.get_strip_path(),
+            h2_upstream: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// The upstream of an `http2`, `mcp-h2` or `unix+http2` location for the h1 pipeline. The
+    /// hyper path builds one for every connection; the pipeline takes this one for every
+    /// request, so it is built once per location and settings: a reload makes new locations,
+    /// and with them new upstreams. The connections themselves are in the pools of `APP_CTX`.
+    /// `debug` is the endpoint's: a location belongs to one endpoint.
+    pub async fn h2_upstream(&self, debug: bool) -> std::sync::Arc<HttpProxyPassContentSource> {
+        self.h2_upstream
+            .get_or_init(|| async {
+                std::sync::Arc::new(
+                    self.create_data_source(debug, crate::consts::DEFAULT_HTTP_CONNECT_TIMEOUT)
+                        .await,
+                )
+            })
+            .await
+            .clone()
     }
     pub fn get_proxy_pass_to_as_string(&self) -> String {
         self.proxy_pass_to.to_string()
