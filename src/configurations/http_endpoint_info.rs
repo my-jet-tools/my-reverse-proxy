@@ -9,6 +9,9 @@ pub enum AuthorizationRequired<'s> {
     ClientCertificate,
 }
 
+/// Cloned only to make the endpoint of a name of `additional_hosts`: see
+/// [`HttpEndpointInfo::new_additional_host`].
+#[derive(Clone)]
 pub struct HttpEndpointInfo {
     pub host_endpoint: EndpointHttpHostString,
     pub debug: bool,
@@ -44,6 +47,10 @@ pub struct HttpEndpointInfo {
     /// The host came from `dynamic_hosts.url`, not from a settings file: a read of the url
     /// replaces it, and never an endpoint of the settings files.
     pub dynamic_host: bool,
+    /// `Some`: the endpoint of a name of `additional_hosts` of the host with this id. It is that
+    /// host's endpoint under another name - the very same locations, and with them the same
+    /// upstream connections. Only the name is its own, and with it its logs and its metrics.
+    pub additional_host_of: Option<String>,
 }
 
 /// Everything an endpoint is compiled from.
@@ -142,6 +149,30 @@ impl HttpEndpointInfo {
             client_timeouts,
             not_served_reason,
             dynamic_host,
+            additional_host_of: None,
+        }
+    }
+
+    /// The endpoint of `host_endpoint`, a name of `additional_hosts` of this endpoint's host: the
+    /// same as this one in everything but the name. Nothing is compiled: the locations are the
+    /// same `Arc`s, so the name is served by the very upstream connections of the host.
+    /// `dynamic_host`: the name came from `dynamic_hosts.url` - the host may be of the files.
+    pub fn new_additional_host(
+        &self,
+        host_endpoint: EndpointHttpHostString,
+        dynamic_host: bool,
+    ) -> Self {
+        debug_assert!(
+            self.additional_host_of.is_none(),
+            "{} is a name itself",
+            self.as_str()
+        );
+
+        Self {
+            additional_host_of: Some(self.host_endpoint.as_str().to_string()),
+            host_endpoint,
+            dynamic_host,
+            ..self.clone()
         }
     }
 
@@ -154,10 +185,6 @@ impl HttpEndpointInfo {
         } else {
             self.host_endpoint.get_server_name()
         }
-    }
-
-    pub fn is_my_endpoint(&self, server_name: &str) -> bool {
-        self.host_endpoint.is_my_server_name(server_name)
     }
 
     pub fn as_str(&self) -> &str {

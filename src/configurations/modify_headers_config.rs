@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::settings::{HttpEndpointModifyHeadersSettings, ModifyHttpHeadersSettings};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ModifyHeadersConfig {
     remove: HashSet<String>,
     add_headers: HashMap<String, String>,

@@ -72,8 +72,8 @@ impl DynamicHostsSettings {
 pub struct DynamicHostsModel {
     #[serde(default, deserialize_with = "super::null_as_default")]
     pub hosts: HashMap<String, HostSettings>,
-    /// A host of the settings files - or of `hosts` above - and more hosts which are served with
-    /// its configuration, as if they were in its `additional_hosts`.
+    /// A host of the settings files - or of `hosts` above, or a name of one - and more names of
+    /// it, as if they were in its `additional_hosts`.
     #[serde(default, deserialize_with = "super::null_as_default")]
     pub additional_hosts: HashMap<String, Vec<String>>,
 }

@@ -79,6 +79,11 @@ impl SettingsCompiled {
 
         self.variables = variables;
 
+        // Once every file is read: a host written again in a later file replaces the one before,
+        // and its `additional_hosts` with it - then the names are put together, none of them
+        // depending on the order the files were read in.
+        self.resolve_additional_hosts_of_files();
+
         Ok(())
     }
 
@@ -143,9 +148,9 @@ impl SettingsCompiled {
         for (host_id, host_settings) in hosts {
             let (host_id, host_settings) = compile_host(host_id, host_settings, variables)?;
 
-            for expanded in super::expand_additional_hosts(host_id, host_settings)? {
-                self.insert_host_of_files(expanded)?;
-            }
+            // A host written again replaces the one before, as it always has - and the
+            // `additional_hosts` of that one go with it.
+            self.hosts.insert(host_id, host_settings);
         }
 
         Ok(())
@@ -475,7 +480,9 @@ fn dynamic_configurations_file_exists(file_name: &str) -> Result<bool, String> {
     Ok(std::path::Path::new(path.as_str()).exists())
 }
 
-/// A host of the settings, with the variables put into its values.
+/// A host of the settings, with the variables put into its values - all but the entries of its
+/// `additional_hosts`, which are left as they are written: each is taken or ignored on its own,
+/// one with a variable which is not there as well (`get_additional_host_id`).
 pub fn compile_host(
     host_id: String,
     host_settings: HostSettings,
@@ -484,18 +491,8 @@ pub fn compile_host(
     let host_id = variables.apply_variables(host_id)?;
     let locations = compile_locations(host_settings.locations, variables)?;
 
-    let additional_hosts = match host_settings.additional_hosts {
-        Some(additional_hosts) => Some(
-            additional_hosts
-                .into_iter()
-                .map(|additional_host| variables.apply_variables(additional_host))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        None => None,
-    };
-
     let host_settings = HostSettings {
-        additional_hosts,
+        additional_hosts: host_settings.additional_hosts,
         endpoint: EndpointSettings {
             endpoint_type: variables.apply_variables(host_settings.endpoint.endpoint_type)?,
             ssl_certificate: variables
@@ -747,118 +744,171 @@ mod tests {
 
     const HOST: &str = "    endpoint:\n      type: https2\n      ssl_certificate: wildcard\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n";
 
-    /// Each host of `additional_hosts` is a host with the configuration of the one it is under:
-    /// a domain name on its port, or on a port of its own. Variables are put into them as well.
+    fn names_of(compiled: &SettingsCompiled) -> Vec<(&str, &str)> {
+        compiled
+            .additional_hosts
+            .iter()
+            .map(|(name, itm)| {
+                assert!(!itm.dynamic, "{name}");
+                (name.as_str(), itm.host_id.as_str())
+            })
+            .collect()
+    }
+
+    fn sorted_hosts(compiled: &SettingsCompiled) -> Vec<&str> {
+        let mut result: Vec<&str> = compiled.hosts.keys().map(|itm| itm.as_str()).collect();
+        result.sort();
+        result
+    }
+
+    /// The `additional_hosts` of a host are names of it on its port - not hosts of their own.
+    /// Variables are put into them as well.
     #[test]
-    fn the_additional_hosts_of_the_files_are_hosts_with_the_same_configuration() {
+    fn the_additional_hosts_of_the_files_are_names_of_their_host() {
         let compiled = compile_files(
             "additional-hosts",
             &format!(
-                "variables:\n  env: dev\nhosts:\n  example.com:443:\n    additional_hosts:\n    - www.example.com\n    - ${{env}}.example.com\n    - example.com:8443\n{HOST}"
+                "variables:\n  env: dev\nhosts:\n  example.com:443:\n    additional_hosts:\n    - www.example.com\n    - ${{env}}.example.com\n    - api.example.com:443\n{HOST}"
             ),
             &[],
         )
         .unwrap();
 
-        let mut hosts: Vec<_> = compiled.hosts.keys().cloned().collect();
-        hosts.sort();
+        assert_eq!(sorted_hosts(&compiled), ["example.com:443"]);
+        assert!(compiled.hosts["example.com:443"].additional_hosts.is_none());
         assert_eq!(
-            hosts,
+            names_of(&compiled),
             [
-                "dev.example.com:443",
-                "example.com:443",
-                "example.com:8443",
-                "www.example.com:443"
+                ("api.example.com:443", "example.com:443"),
+                ("dev.example.com:443", "example.com:443"),
+                ("www.example.com:443", "example.com:443"),
             ]
         );
+        assert!(compiled.additional_host_errors.is_empty());
 
-        for host_id in &hosts {
-            let host_settings = &compiled.hosts[host_id];
-            assert!(host_settings.additional_hosts.is_none(), "{host_id}");
-            assert_eq!(
-                host_settings.endpoint.ssl_certificate.as_deref(),
-                Some("wildcard")
-            );
-            assert!(!compiled.is_dynamic_host(host_id));
+        for host_id in ["www.example.com:443", "API.example.com:443"] {
             assert!(compiled.is_static_host(host_id));
+            assert_eq!(
+                compiled.get_host_group(host_id),
+                [
+                    "example.com:443",
+                    "api.example.com:443",
+                    "dev.example.com:443",
+                    "www.example.com:443"
+                ]
+            );
         }
-
-        assert_eq!(compiled.additional_host_of.len(), 3);
-        assert_eq!(
-            compiled.get_host_group("www.example.com:443"),
-            [
-                "example.com:443",
-                "dev.example.com:443",
-                "example.com:8443",
-                "www.example.com:443"
-            ]
-        );
     }
 
-    /// Two configurations for one host would be one of them, depending on the order the files
-    /// are read in.
+    /// An entry which can not be served is ignored with why, under the host whose list has it:
+    /// the rest of the settings is loaded.
     #[test]
-    fn a_host_in_additional_hosts_and_elsewhere_refuses_the_settings() {
-        for (name, other_host) in [
-            ("additional-hosts-key", "WWW.example.com:443"),
-            ("additional-hosts-other", "other.example.com:443"),
-        ] {
-            let other_additional_hosts = if other_host.starts_with("other") {
-                "    additional_hosts:\n    - www.example.com\n"
-            } else {
-                ""
-            };
+    fn an_entry_which_can_not_be_served_is_ignored() {
+        let compiled = compile_files(
+            "additional-hosts-ignored",
+            &format!(
+                "hosts:\n  example.com:443:\n    additional_hosts:\n    - www.example.com\n    - www.example.com:8443\n    - '*.example.com'\n    - ${{not_there}}.example.com\n    - WWW.example.com\n    - other.example.com\n    - example.com\n{HOST}  other.example.com:443:\n{HOST}  db.example.com:5432:\n    additional_hosts:\n    - db2.example.com\n    endpoint:\n      type: tcp\n    locations:\n    - proxy_pass_to: 127.0.0.1:5433\n"
+            ),
+            &[],
+        )
+        .unwrap();
 
-            let err = compile_files(
-                name,
+        assert_eq!(
+            sorted_hosts(&compiled),
+            [
+                "db.example.com:5432",
+                "example.com:443",
+                "other.example.com:443"
+            ]
+        );
+        assert_eq!(
+            names_of(&compiled),
+            [("www.example.com:443", "example.com:443")]
+        );
+
+        let errors = &compiled.additional_host_errors["example.com:443"];
+        for (entry, why) in [
+            ("www.example.com:8443", "on port 8443"),
+            ("*.example.com", "not a domain name"),
+            ("${not_there}.example.com", "not_there"),
+            ("WWW.example.com", "in the list twice"),
+            ("other.example.com", "the settings have a host with this id"),
+            ("example.com", "the settings have a host with this id"),
+        ] {
+            assert!(
+                errors
+                    .iter()
+                    .any(|err| err.contains(&format!("'{entry}' is ignored")) && err.contains(why)),
+                "{entry}: {errors:?}"
+            );
+        }
+        assert_eq!(errors.len(), 6, "{errors:?}");
+
+        assert!(compiled.additional_host_errors["db.example.com:5432"][0].contains("type: tcp"));
+    }
+
+    /// A name in the lists of two hosts is served by neither: which one would serve it is not
+    /// to depend on the order the files are read in - and it is decided the same way at every
+    /// load.
+    #[test]
+    fn a_name_in_the_lists_of_two_hosts_is_ignored_by_both() {
+        for attempt in 0..20 {
+            let compiled = compile_files(
+                &format!("additional-hosts-two-{attempt}"),
                 &format!(
-                    "include:\n- other.yaml\nhosts:\n  example.com:443:\n    additional_hosts:\n    - www.example.com\n{HOST}"
+                    "include:\n- other.yaml\nhosts:\n  example.com:443:\n    additional_hosts:\n    - www.example.com\n    - api.example.com\n{HOST}"
                 ),
                 &[(
                     "other.yaml",
-                    &format!("hosts:\n  {other_host}:\n{other_additional_hosts}{HOST}"),
+                    &format!(
+                        "hosts:\n  other.example.com:443:\n    additional_hosts:\n    - WWW.example.com\n{HOST}"
+                    ),
                 )],
             )
-            .unwrap_err();
+            .unwrap();
 
-            assert!(err.contains("declared more than once"), "{name}: {err}");
-            assert!(err.contains("additional_hosts of"), "{name}: {err}");
+            assert_eq!(
+                names_of(&compiled),
+                [("api.example.com:443", "example.com:443")]
+            );
+
+            for host_id in ["example.com:443", "other.example.com:443"] {
+                let errors = &compiled.additional_host_errors[host_id];
+                assert_eq!(errors.len(), 1, "{host_id}: {errors:?}");
+                assert!(errors[0].contains("served by one host only"), "{errors:?}");
+            }
         }
     }
 
     /// A host written again in another file replaces the one before, as it always has: the
-    /// additional hosts of that one go with it.
+    /// names of that one go with it - also when the later file has one of them as a host. The
+    /// order the hosts of a file are read in decides nothing.
     #[test]
-    fn a_host_written_again_takes_the_additional_hosts_of_the_one_before_away() {
-        let compiled = compile_files(
-            "additional-hosts-replaced",
-            &format!(
-                "include:\n- other.yaml\nhosts:\n  example.com:443:\n    additional_hosts:\n    - www.example.com\n{HOST}"
-            ),
-            &[(
-                "other.yaml",
+    fn a_host_written_again_takes_the_names_of_the_one_before_away() {
+        for attempt in 0..20 {
+            let compiled = compile_files(
+                &format!("additional-hosts-replaced-{attempt}"),
                 &format!(
-                    "hosts:\n  example.com:443:\n    additional_hosts:\n    - api.example.com\n{HOST}"
+                    "include:\n- other.yaml\nhosts:\n  example.com:443:\n    additional_hosts:\n    - www.example.com\n    - old.example.com\n{HOST}"
                 ),
-            )],
-        )
-        .unwrap();
+                &[(
+                    "other.yaml",
+                    &format!(
+                        "hosts:\n  example.com:443:\n    additional_hosts:\n    - api.example.com\n{HOST}  www.example.com:443:\n{HOST}"
+                    ),
+                )],
+            )
+            .unwrap();
 
-        let mut hosts: Vec<_> = compiled.hosts.keys().cloned().collect();
-        hosts.sort();
-        assert_eq!(hosts, ["api.example.com:443", "example.com:443"]);
-        assert_eq!(compiled.additional_host_of.len(), 1);
-    }
-
-    #[test]
-    fn additional_hosts_which_can_not_be_served_refuse_the_settings() {
-        let err = compile_files(
-            "additional-hosts-tcp",
-            "hosts:\n  db.example.com:5432:\n    additional_hosts:\n    - db2.example.com\n    endpoint:\n      type: tcp\n    locations:\n    - proxy_pass_to: 127.0.0.1:5433\n",
-            &[],
-        )
-        .unwrap_err();
-
-        assert!(err.contains("type: tcp"), "{err}");
+            assert_eq!(
+                sorted_hosts(&compiled),
+                ["example.com:443", "www.example.com:443"]
+            );
+            assert_eq!(
+                names_of(&compiled),
+                [("api.example.com:443", "example.com:443")]
+            );
+            assert!(compiled.additional_host_errors.is_empty());
+        }
     }
 }

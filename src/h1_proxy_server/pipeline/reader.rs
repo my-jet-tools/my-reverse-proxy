@@ -215,7 +215,13 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         || match http_connection_info.endpoint_info.as_ref() {
             None => true,
             Some(current) => match request_host_for_metric.as_deref() {
-                Some(host) => !current.is_my_endpoint(host),
+                Some(host) => match current.host_endpoint.get_server_name() {
+                    Some(server_name) => !server_name.eq_ignore_ascii_case(host),
+                    // The endpoint without a name serves what no other endpoint of the port is
+                    // named for: whether another one is named for this host, only the port can
+                    // tell - unless it has no other endpoint.
+                    None => http_connection_info.listen_config.endpoints.len() > 1,
+                },
                 None => false,
             },
         };

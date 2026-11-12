@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     net::IpAddr,
 };
 
@@ -7,24 +7,30 @@ use rust_extensions::duration_utils::DurationExtensions;
 
 use crate::{configurations::EndpointHttpHostString, settings::*};
 
-use super::VariablesCompiled;
+use super::{AdditionalHost, VariablesCompiled};
 
 #[derive(Debug, Default, Clone)]
 
 pub struct SettingsCompiled {
     pub ssh: HashMap<String, SshConfigSettings>,
     /// The hosts of the settings files, and the dynamic ones next to them: those are named in
-    /// `dynamic_host_ids`. The `additional_hosts` of a host are hosts of their own here, with a
-    /// copy of its settings - named in `additional_host_of`.
+    /// `dynamic_host_ids`. The names of their `additional_hosts` are not hosts of their own: they
+    /// are in `additional_hosts`, and the settings here have no `additional_hosts` left.
     pub hosts: HashMap<String, HostSettings>,
-    /// The hosts of `hosts` which are in `additional_hosts` of another host, and that host.
-    pub additional_host_of: HashMap<String, String>,
+    /// Each name of `additional_hosts` - of a host of the settings files, of a host of the url, or
+    /// of `additional_hosts:` of the url - with the host it is a name of. A request for a name is
+    /// served by the configuration of that host, under the name.
+    pub additional_hosts: BTreeMap<String, AdditionalHost>,
+    /// The entries of `additional_hosts` of the settings files which are ignored - by the host
+    /// whose list has them - each with why. The ones of the url are in `dynamic_host_errors`.
+    pub additional_host_errors: BTreeMap<String, Vec<String>>,
     /// `dynamic_hosts:` of the settings - the url more hosts are read from.
     pub dynamic_hosts: Option<DynamicHostsSettings>,
     /// The ids of `hosts` which came from `dynamic_hosts.url`.
     pub dynamic_host_ids: HashSet<String>,
-    /// The hosts of `dynamic_hosts.url` which are not in `hosts`, and why: a variable which is
-    /// not there, an id the settings files have a host of their own for.
+    /// The hosts and the names of `dynamic_hosts.url` which are not taken, and why: a variable
+    /// which is not there, an id the settings files have already, a name which is not a domain
+    /// name.
     pub dynamic_host_errors: BTreeMap<String, String>,
     /// The variables the settings were compiled with - the dynamic hosts are compiled with them
     /// as well, when they come.
@@ -54,131 +60,210 @@ impl SettingsCompiled {
         self.dynamic_host_ids.contains(host_id)
     }
 
-    /// The host whose `additional_hosts` this host is in - `None` for a host written as a key.
+    /// The host `host_id` is a name of - `None` for a host written as a key.
     pub fn get_additional_host_of(&self, host_id: &str) -> Option<&String> {
-        self.additional_host_of.get(host_id)
+        self.additional_hosts.get(host_id).map(|itm| &itm.host_id)
     }
 
-    /// The hosts served with the configuration of `host_id` - letter case aside: the host its
-    /// configuration is written under first, then its `additional_hosts`, by their ids. Empty if
-    /// the settings have no such host.
-    pub fn get_host_group(&self, host_id: &str) -> Vec<String> {
-        let Some(host_id) = self
+    /// The host whose configuration serves `host_id` - letter case aside: the host itself, or the
+    /// host it is a name of. `None` if the settings have neither.
+    pub fn get_main_host_id(&self, host_id: &str) -> Option<String> {
+        if let Some(found) = self
             .hosts
             .keys()
             .find(|existing| existing.eq_ignore_ascii_case(host_id))
-        else {
+        {
+            return Some(found.clone());
+        }
+
+        self.additional_hosts
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(host_id))
+            .map(|(_, itm)| itm.host_id.clone())
+    }
+
+    /// The names of `additional_hosts` of the host `host_id`, by their ids.
+    pub fn get_additional_hosts_of<'s>(
+        &'s self,
+        host_id: &'s str,
+    ) -> impl Iterator<Item = (&'s String, &'s AdditionalHost)> + 's {
+        self.additional_hosts
+            .iter()
+            .filter(move |(_, itm)| itm.host_id == host_id)
+    }
+
+    /// The host which serves `host_id` - letter case aside - and its names: the host first, then
+    /// its names by their ids. Empty if the settings have no such host.
+    pub fn get_host_group(&self, host_id: &str) -> Vec<String> {
+        let Some(main_host_id) = self.get_main_host_id(host_id) else {
             return Vec::new();
         };
 
-        let main_host_id = self
-            .additional_host_of
-            .get(host_id)
-            .unwrap_or(host_id)
-            .clone();
+        let mut result = Vec::new();
 
-        let mut additional_hosts: Vec<String> = self
-            .additional_host_of
-            .iter()
-            .filter(|(_, of)| **of == main_host_id)
-            .map(|(additional_host_id, _)| additional_host_id.clone())
-            .collect();
-        additional_hosts.sort();
-
-        let mut result = Vec::with_capacity(additional_hosts.len() + 1);
         if self.hosts.contains_key(&main_host_id) {
-            result.push(main_host_id);
+            result.push(main_host_id.clone());
         }
-        result.extend(additional_hosts);
+
+        result.extend(
+            self.get_additional_hosts_of(&main_host_id)
+                .map(|(name, _)| name.clone()),
+        );
+
         result
     }
 
-    /// Puts a host of the settings files into `hosts`.
-    ///
-    /// A host of `additional_hosts` is in no other place of the files - letter case aside: two
-    /// configurations for one host would be served depending on the order the files are read in.
-    /// A host written as a key again replaces the one before, as it always has - and the
-    /// additional hosts of that one go with it.
-    pub(crate) fn insert_host_of_files(
-        &mut self,
-        expanded: super::ExpandedHost,
-    ) -> Result<(), String> {
-        let super::ExpandedHost {
-            host_id,
-            host_settings,
-            additional_host_of,
-        } = expanded;
+    /// The names of `additional_hosts` in the order they are put on their ports: those of the
+    /// settings files first, then the ones of the url - each by their ids.
+    pub fn additional_hosts_in_apply_order(&self) -> Vec<(&String, &AdditionalHost)> {
+        let mut result: Vec<_> = self
+            .additional_hosts
+            .iter()
+            .filter(|(_, itm)| !itm.dynamic)
+            .collect();
 
-        let same_host = self
-            .hosts
-            .keys()
-            .find(|existing| existing.eq_ignore_ascii_case(&host_id))
-            .cloned();
+        result.extend(self.additional_hosts.iter().filter(|(_, itm)| itm.dynamic));
 
-        if let Some(same_host) = same_host {
-            let in_additional_hosts_of = additional_host_of
-                .as_ref()
-                .or_else(|| self.additional_host_of.get(&same_host));
+        result
+    }
 
-            if let Some(main_host_id) = in_additional_hosts_of {
-                return Err(format!(
-                    "Host '{host_id}' is declared more than once: it is in additional_hosts of '{main_host_id}', and the settings have another host with this id"
-                ));
-            }
+    /// Takes the `additional_hosts` of the hosts of the settings files out of their settings into
+    /// `additional_hosts`. An entry which can not be served is ignored, with why under the host
+    /// whose list has it, and the rest are taken: an entry with a variable which is not there,
+    /// which is not a domain name, names another port, is the id of a host, or is in the list
+    /// twice. A name in the lists of two hosts is ignored by both: which of them it would be
+    /// served by is not to depend on the order the files are read in - nothing here does.
+    pub(crate) fn resolve_additional_hosts_of_files(&mut self) {
+        let mut host_ids: Vec<String> = self.hosts.keys().cloned().collect();
+        host_ids.sort();
 
-            if same_host == host_id {
-                let replaced_additional_hosts: Vec<String> = self
-                    .additional_host_of
-                    .iter()
-                    .filter(|(_, of)| **of == host_id)
-                    .map(|(additional_host_id, _)| additional_host_id.clone())
-                    .collect();
+        let host_ids_lowercase: HashSet<String> = host_ids
+            .iter()
+            .map(|host_id| host_id.to_ascii_lowercase())
+            .collect();
 
-                for additional_host_id in replaced_additional_hosts {
-                    self.additional_host_of.remove(&additional_host_id);
-                    self.hosts.remove(&additional_host_id);
+        // Each name, by its id in lower case: the hosts which have it, with the id as written.
+        let mut names: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+
+        for host_id in host_ids {
+            let Some(entries) = self
+                .hosts
+                .get_mut(&host_id)
+                .and_then(|host_settings| host_settings.additional_hosts.take())
+            else {
+                continue;
+            };
+
+            let host_settings = &self.hosts[&host_id];
+            let mut own = HashSet::new();
+            let mut errors = Vec::new();
+
+            for entry in entries {
+                let ignored =
+                    |err: &str| format!("additional_hosts: '{}' is ignored: {err}", entry.trim());
+
+                let compiled_entry = match self.variables.apply_variables(entry.clone()) {
+                    Ok(compiled_entry) => compiled_entry,
+                    Err(err) => {
+                        errors.push(ignored(&err));
+                        continue;
+                    }
+                };
+
+                let name =
+                    match super::get_additional_host_id(&host_id, host_settings, &compiled_entry) {
+                        Ok(name) => name,
+                        Err(err) => {
+                            errors.push(ignored(&err));
+                            continue;
+                        }
+                    };
+
+                let lowercase = name.to_ascii_lowercase();
+
+                if host_ids_lowercase.contains(&lowercase) {
+                    errors.push(ignored("the settings have a host with this id"));
+                    continue;
                 }
+
+                if !own.insert(lowercase.clone()) {
+                    errors.push(ignored("it is in the list twice"));
+                    continue;
+                }
+
+                names
+                    .entry(lowercase)
+                    .or_default()
+                    .push((host_id.clone(), name));
+            }
+
+            if !errors.is_empty() {
+                self.additional_host_errors
+                    .entry(host_id)
+                    .or_default()
+                    .extend(errors);
             }
         }
 
-        if let Some(main_host_id) = additional_host_of {
-            self.additional_host_of
-                .insert(host_id.clone(), main_host_id);
+        for (_, hosts) in names {
+            if let [(host_id, name)] = hosts.as_slice() {
+                self.additional_hosts.insert(
+                    name.clone(),
+                    AdditionalHost {
+                        host_id: host_id.clone(),
+                        dynamic: false,
+                    },
+                );
+                continue;
+            }
+
+            let all: Vec<String> = hosts
+                .iter()
+                .map(|(host_id, _)| format!("'{host_id}'"))
+                .collect();
+
+            for (host_id, name) in &hosts {
+                self.additional_host_errors
+                    .entry(host_id.clone())
+                    .or_default()
+                    .push(format!(
+                        "additional_hosts: '{name}' is ignored: it is in additional_hosts of {} - a name is served by one host only",
+                        all.join(" and ")
+                    ));
+            }
         }
-
-        self.hosts.insert(host_id, host_settings);
-
-        Ok(())
     }
 
     /// Puts what `dynamic_hosts.url` answered with next to the hosts of the settings files, in
-    /// place of the dynamic hosts there were before: the hosts of its `hosts`, each with its own
-    /// `additional_hosts`, then the hosts of its `additional_hosts` - served with the
-    /// configuration of a host the settings files have, or its `hosts` have.
+    /// place of what it answered before: the hosts of its `hosts`, each with the names of its own
+    /// `additional_hosts`, then the names of its `additional_hosts:` - names of a host the
+    /// settings files have, or its `hosts` have.
     ///
-    /// A host of the settings files is never replaced: a dynamic host with its id - letter case
-    /// aside - is refused. Neither does one dynamic host which can not be served keep the others
-    /// out: it is put into `dynamic_host_errors`, and the rest are taken. Each additional host is
-    /// one on its own as well: a wrong entry of a long list does not take the list down.
+    /// A host or a name of the settings files is never replaced: a dynamic one with its id -
+    /// letter case aside - is refused. Neither does one which can not be taken keep the others
+    /// out: it is put into `dynamic_host_errors`, and the rest are taken. Each name is taken on
+    /// its own: a wrong entry of a long list does not take the list down.
     pub fn set_dynamic_hosts_answer(&mut self, answer: &DynamicHostsModel) {
-        for host_id in self.dynamic_host_ids.drain() {
-            self.hosts.remove(&host_id);
-            self.additional_host_of.remove(&host_id);
-        }
-        self.dynamic_host_errors.clear();
+        self.clear_dynamic_hosts();
 
         let mut taken_ids: HashSet<String> = self
             .hosts
             .keys()
+            .chain(self.additional_hosts.keys())
             .map(|host_id| host_id.to_ascii_lowercase())
             .collect();
 
-        // In the order of the ids, so two hosts which can not both be taken are decided the
-        // same way at every read.
+        // In the order of the ids, so two which can not both be taken are decided the same way
+        // at every read.
         let mut host_ids: Vec<&String> = answer.hosts.keys().collect();
         host_ids.sort();
 
         for host_id in host_ids {
+            let entries = answer.hosts[host_id]
+                .additional_hosts
+                .clone()
+                .unwrap_or_default();
+
             let compiled = super::compile_host(
                 host_id.clone(),
                 answer.hosts[host_id].clone(),
@@ -188,54 +273,56 @@ impl SettingsCompiled {
             let (main_host_id, mut host_settings) = match compiled {
                 Ok(compiled) => compiled,
                 Err(err) => {
-                    self.dynamic_host_errors
-                        .insert(host_id.clone(), format!("Dynamic host: {err}"));
+                    self.add_dynamic_host_error(host_id.clone(), format!("Dynamic host: {err}"));
+
+                    for entry in &entries {
+                        self.add_dynamic_host_error(
+                            entry.trim().to_string(),
+                            format!("Dynamic host is refused: it is in additional_hosts of '{host_id}', which is refused"),
+                        );
+                    }
                     continue;
                 }
             };
 
-            let additional_hosts = host_settings.additional_hosts.take().unwrap_or_default();
+            host_settings.additional_hosts = None;
 
-            let taken = self.take_dynamic_host(
-                &mut taken_ids,
-                main_host_id.clone(),
-                host_settings.clone(),
-                None,
-            );
+            if !taken_ids.insert(main_host_id.to_ascii_lowercase()) {
+                let err = self.get_refusal_of_taken_id(&main_host_id);
+                self.add_dynamic_host_error(main_host_id.clone(), err.to_string());
 
-            if taken {
-                self.take_dynamic_additional_hosts(
-                    &mut taken_ids,
-                    &main_host_id,
-                    &host_settings,
-                    &additional_hosts,
-                );
+                // They are not served with a configuration which is not served.
+                for entry in &entries {
+                    let key = self.get_entry_key(&main_host_id, &host_settings, entry);
+                    self.add_dynamic_host_error(
+                        key,
+                        format!("Dynamic host is refused: it is in additional_hosts of '{main_host_id}', which is refused"),
+                    );
+                }
                 continue;
             }
 
-            // They are not served with a configuration which is not served.
-            for additional_host in &additional_hosts {
-                self.dynamic_host_errors.insert(
-                    get_additional_host_error_key(&main_host_id, &host_settings, additional_host),
-                    format!(
-                        "Dynamic host is refused: it is in additional_hosts of '{main_host_id}', which is refused"
-                    ),
-                );
+            self.dynamic_host_ids.insert(main_host_id.clone());
+            self.hosts
+                .insert(main_host_id.clone(), host_settings.clone());
+
+            for entry in &entries {
+                self.take_dynamic_name(&mut taken_ids, &main_host_id, &host_settings, entry);
             }
         }
 
-        let mut main_host_ids: Vec<&String> = answer.additional_hosts.keys().collect();
-        main_host_ids.sort();
+        let mut keys: Vec<&String> = answer.additional_hosts.keys().collect();
+        keys.sort();
 
-        for main_host_id in main_host_ids {
-            let additional_hosts = &answer.additional_hosts[main_host_id];
+        for key in keys {
+            let entries = &answer.additional_hosts[key];
 
-            let main_host_id = match self.variables.apply_variables(main_host_id.clone()) {
-                Ok(main_host_id) => main_host_id,
+            let key = match self.variables.apply_variables(key.clone()) {
+                Ok(key) => key,
                 Err(err) => {
-                    for additional_host in additional_hosts {
-                        self.dynamic_host_errors.insert(
-                            additional_host.trim().to_string(),
+                    for entry in entries {
+                        self.add_dynamic_host_error(
+                            entry.trim().to_string(),
                             format!("Dynamic host: {err}"),
                         );
                     }
@@ -243,47 +330,25 @@ impl SettingsCompiled {
                 }
             };
 
-            // The host whose configuration they are served with - the one it is written under,
-            // if it is an additional host itself.
-            let configuration_host_id = self
-                .hosts
-                .keys()
-                .find(|existing| existing.eq_ignore_ascii_case(&main_host_id))
-                .map(|found| self.additional_host_of.get(found).unwrap_or(found).clone());
-
-            let Some(configuration_host_id) = configuration_host_id else {
-                for additional_host in additional_hosts {
-                    self.dynamic_host_errors.insert(
-                        additional_host.trim().to_string(),
+            // The host whose configuration they are served with - the one `key` is a name of,
+            // if it is a name itself.
+            let Some(main_host_id) = self.get_main_host_id(&key) else {
+                for entry in entries {
+                    self.add_dynamic_host_error(
+                        entry.trim().to_string(),
                         format!(
-                            "Dynamic host is refused: it is in additional_hosts of '{main_host_id}', which neither the settings files nor the hosts of the url have"
+                            "Dynamic host is refused: it is in additional_hosts of '{key}', which neither the settings files nor the hosts of the url have"
                         ),
                     );
                 }
                 continue;
             };
 
-            let host_settings = self.hosts[&configuration_host_id].clone();
+            let host_settings = self.hosts[&main_host_id].clone();
 
-            let mut compiled_additional_hosts = Vec::with_capacity(additional_hosts.len());
-            for additional_host in additional_hosts {
-                match self.variables.apply_variables(additional_host.clone()) {
-                    Ok(additional_host) => compiled_additional_hosts.push(additional_host),
-                    Err(err) => {
-                        self.dynamic_host_errors.insert(
-                            additional_host.trim().to_string(),
-                            format!("Dynamic host: {err}"),
-                        );
-                    }
-                }
+            for entry in entries {
+                self.take_dynamic_name(&mut taken_ids, &main_host_id, &host_settings, entry);
             }
-
-            self.take_dynamic_additional_hosts(
-                &mut taken_ids,
-                &configuration_host_id,
-                &host_settings,
-                &compiled_additional_hosts,
-            );
         }
     }
 
@@ -296,70 +361,96 @@ impl SettingsCompiled {
         });
     }
 
-    /// Takes the dynamic host `host_id`, unless a host with its id - letter case aside - is
-    /// there already: then it is refused, and `false` is returned.
-    fn take_dynamic_host(
-        &mut self,
-        taken_ids: &mut HashSet<String>,
-        host_id: String,
-        host_settings: HostSettings,
-        additional_host_of: Option<&str>,
-    ) -> bool {
-        if !taken_ids.insert(host_id.to_ascii_lowercase()) {
-            let err = if self.is_static_host(&host_id) {
-                "Dynamic host is refused: the settings files have a host with this id"
-            } else {
-                "Dynamic host is refused: the url gives another host with this id"
-            };
-
-            let err = match additional_host_of {
-                Some(main_host_id) => {
-                    format!("{err} (it is in additional_hosts of '{main_host_id}')")
-                }
-                None => err.to_string(),
-            };
-
-            self.dynamic_host_errors.insert(host_id, err);
-            return false;
+    /// Takes away what the url answered with: its hosts, its names, and their errors.
+    fn clear_dynamic_hosts(&mut self) {
+        for host_id in self.dynamic_host_ids.drain() {
+            self.hosts.remove(&host_id);
         }
 
-        if let Some(main_host_id) = additional_host_of {
-            self.additional_host_of
-                .insert(host_id.clone(), main_host_id.to_string());
-        }
-
-        self.dynamic_host_ids.insert(host_id.clone());
-        self.hosts.insert(host_id, host_settings);
-
-        true
+        self.additional_hosts.retain(|_, itm| !itm.dynamic);
+        self.dynamic_host_errors.clear();
     }
 
-    /// Takes each of `additional_hosts` as a dynamic host with `host_settings` - the
-    /// configuration of `main_host_id` - on its own: one which can not be is refused, and the
-    /// others are taken.
-    fn take_dynamic_additional_hosts(
+    /// Takes `entry` - an entry of `additional_hosts` of `main_host_id`, given by the url - as a
+    /// name of that host, unless it is not one, or is taken already: then it is refused.
+    fn take_dynamic_name(
         &mut self,
         taken_ids: &mut HashSet<String>,
         main_host_id: &str,
         host_settings: &HostSettings,
-        additional_hosts: &[String],
+        entry: &str,
     ) {
-        for additional_host in additional_hosts {
-            match super::get_additional_host_id(main_host_id, host_settings, additional_host) {
-                Ok(additional_host_id) => {
-                    self.take_dynamic_host(
-                        taken_ids,
-                        additional_host_id,
-                        host_settings.clone(),
-                        Some(main_host_id),
-                    );
-                }
-                Err(err) => {
-                    self.dynamic_host_errors.insert(
-                        additional_host.trim().to_string(),
-                        format!("Dynamic host: {err}"),
-                    );
-                }
+        let compiled_entry = match self.variables.apply_variables(entry.to_string()) {
+            Ok(compiled_entry) => compiled_entry,
+            Err(err) => {
+                self.add_dynamic_host_error(
+                    entry.trim().to_string(),
+                    format!("Dynamic host: {err}"),
+                );
+                return;
+            }
+        };
+
+        let name = match super::get_additional_host_id(main_host_id, host_settings, &compiled_entry)
+        {
+            Ok(name) => name,
+            Err(err) => {
+                self.add_dynamic_host_error(
+                    compiled_entry.trim().to_string(),
+                    format!(
+                        "Dynamic host is refused: '{}' of additional_hosts of '{main_host_id}': {err}",
+                        compiled_entry.trim()
+                    ),
+                );
+                return;
+            }
+        };
+
+        if !taken_ids.insert(name.to_ascii_lowercase()) {
+            let err = self.get_refusal_of_taken_id(&name);
+            self.add_dynamic_host_error(
+                name,
+                format!("{err} (it is in additional_hosts of '{main_host_id}')"),
+            );
+            return;
+        }
+
+        self.additional_hosts.insert(
+            name,
+            AdditionalHost {
+                host_id: main_host_id.to_string(),
+                dynamic: true,
+            },
+        );
+    }
+
+    fn get_refusal_of_taken_id(&self, host_id: &str) -> &'static str {
+        if self.is_static_host(host_id) {
+            "Dynamic host is refused: the settings files have a host with this id"
+        } else {
+            "Dynamic host is refused: the url gives another host with this id"
+        }
+    }
+
+    /// What an entry of `additional_hosts` of `host_id` is told about under: the name it is, or
+    /// the entry as it is written if it is not one.
+    fn get_entry_key(&self, host_id: &str, host_settings: &HostSettings, entry: &str) -> String {
+        self.variables
+            .apply_variables(entry.to_string())
+            .ok()
+            .and_then(|entry| super::get_additional_host_id(host_id, host_settings, &entry).ok())
+            .unwrap_or_else(|| entry.trim().to_string())
+    }
+
+    /// Two reasons under one key - two hosts listing the same wrong entry - are both told.
+    fn add_dynamic_host_error(&mut self, key: String, err: String) {
+        match self.dynamic_host_errors.get_mut(&key) {
+            Some(existing) => {
+                existing.push_str("; ");
+                existing.push_str(&err);
+            }
+            None => {
+                self.dynamic_host_errors.insert(key, err);
             }
         }
     }
@@ -384,20 +475,142 @@ impl SettingsCompiled {
         static_hosts
     }
 
-    /// A host of the settings files - letter case aside.
+    /// A host or a name of the settings files - letter case aside.
     pub fn is_static_host(&self, host_id: &str) -> bool {
         self.hosts.keys().any(|existing| {
             existing.eq_ignore_ascii_case(host_id) && !self.dynamic_host_ids.contains(existing)
-        })
+        }) || self
+            .additional_hosts
+            .iter()
+            .any(|(name, itm)| !itm.dynamic && name.eq_ignore_ascii_case(host_id))
     }
 
-    /// The ids of the hosts of the settings files, in lower case.
+    /// The ids of the hosts and of the names of the settings files, in lower case.
     pub fn get_static_host_ids_lowercase(&self) -> HashSet<String> {
         self.hosts
             .keys()
             .filter(|host_id| !self.dynamic_host_ids.contains(*host_id))
+            .chain(
+                self.additional_hosts
+                    .iter()
+                    .filter(|(_, itm)| !itm.dynamic)
+                    .map(|(name, _)| name),
+            )
             .map(|host_id| host_id.to_ascii_lowercase())
             .collect()
+    }
+
+    /// The host of the settings files `host_id` is a name of - letter case aside.
+    fn get_static_name_owner(&self, host_id: &str) -> Option<&String> {
+        self.additional_hosts
+            .iter()
+            .find(|(name, itm)| !itm.dynamic && name.eq_ignore_ascii_case(host_id))
+            .map(|(_, itm)| &itm.host_id)
+    }
+
+    /// The host of the settings files with the id `host_id` - letter case aside.
+    fn get_static_host_id(&self, host_id: &str) -> Option<&String> {
+        self.hosts.keys().find(|existing| {
+            existing.eq_ignore_ascii_case(host_id) && !self.dynamic_host_ids.contains(*existing)
+        })
+    }
+
+    /// The hosts of the settings files to be reloaded together with `host_ids`, so that these
+    /// settings - the ones applied - and `fresh` - the settings files as they are now - agree on
+    /// every name of the hosts reloaded: a name which moved to another host, or became a host of
+    /// its own, or the other way round, takes that other host along.
+    pub fn get_hosts_of_files_reloaded_with(
+        &self,
+        fresh: &SettingsCompiled,
+        host_ids: BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        let mut result = host_ids;
+
+        loop {
+            let mut more = Vec::new();
+
+            for host_id in &result {
+                for (now, other) in [(fresh, self), (self, fresh)] {
+                    let names = now
+                        .get_additional_hosts_of(host_id)
+                        .filter(|(_, itm)| !itm.dynamic)
+                        .map(|(name, _)| name.as_str());
+
+                    for id in std::iter::once(host_id.as_str()).chain(names) {
+                        for found in [
+                            other.get_static_name_owner(id),
+                            other.get_static_host_id(id),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            if !result.contains(found) {
+                                more.push(found.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if more.is_empty() {
+                return result;
+            }
+
+            result.extend(more);
+        }
+    }
+
+    /// These settings with the hosts of the settings files `host_ids` - and their names, and the
+    /// errors of their lists - as `fresh` has them: one which `fresh` does not have is gone. What
+    /// `answer` - the answer of `dynamic_hosts.url` - gives is put next to them anew: a dynamic
+    /// host is taken or refused against the hosts of the files as they are now.
+    pub fn with_hosts_of_files_from(
+        &self,
+        fresh: &SettingsCompiled,
+        host_ids: &BTreeSet<String>,
+        answer: Option<&DynamicHostsModel>,
+    ) -> SettingsCompiled {
+        let mut result = self.clone();
+        result.clear_dynamic_hosts();
+
+        // All of them first: a name can move from one of them to another.
+        for host_id in host_ids {
+            result.hosts.remove(host_id);
+            result
+                .additional_hosts
+                .retain(|_, itm| itm.host_id != *host_id);
+            result.additional_host_errors.remove(host_id);
+        }
+
+        for host_id in host_ids {
+            if fresh.is_dynamic_host(host_id) {
+                continue;
+            }
+
+            let Some(host_settings) = fresh.hosts.get(host_id) else {
+                continue;
+            };
+
+            result.hosts.insert(host_id.clone(), host_settings.clone());
+
+            for (name, itm) in fresh.get_additional_hosts_of(host_id) {
+                if !itm.dynamic {
+                    result.additional_hosts.insert(name.clone(), itm.clone());
+                }
+            }
+
+            if let Some(errors) = fresh.additional_host_errors.get(host_id) {
+                result
+                    .additional_host_errors
+                    .insert(host_id.clone(), errors.clone());
+            }
+        }
+
+        if let Some(answer) = answer {
+            result.set_dynamic_hosts_answer(answer);
+        }
+
+        result
     }
 
     pub fn get_http_control_port(&self) -> Option<u16> {
@@ -511,17 +724,6 @@ impl SettingsCompiled {
     }
 }
 
-/// What the error of an entry of `additional_hosts` of `main_host_id` is put under: its host id,
-/// or the entry as it is written if it is not one.
-fn get_additional_host_error_key(
-    main_host_id: &str,
-    host_settings: &HostSettings,
-    additional_host: &str,
-) -> String {
-    super::get_additional_host_id(main_host_id, host_settings, additional_host)
-        .unwrap_or_else(|_| additional_host.trim().to_string())
-}
-
 #[cfg(test)]
 mod dynamic_hosts_tests {
     use std::collections::HashMap;
@@ -535,9 +737,26 @@ mod dynamic_hosts_tests {
             .hosts
     }
 
+    fn answer(yaml: &str) -> DynamicHostsModel {
+        DynamicHostsModel::parse(yaml.as_bytes()).unwrap().unwrap()
+    }
+
     fn host(host_id: &str, proxy_pass_to: &str) -> String {
         format!(
             "  '{host_id}':\n    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: '{proxy_pass_to}'\n"
+        )
+    }
+
+    fn host_with_names(
+        host_id: &str,
+        endpoint_type: &str,
+        names: &[&str],
+        proxy_pass_to: &str,
+    ) -> String {
+        let names: String = names.iter().map(|itm| format!("    - '{itm}'\n")).collect();
+
+        format!(
+            "  '{host_id}':\n    additional_hosts:\n{names}    endpoint:\n      type: {endpoint_type}\n    locations:\n    - proxy_pass_to: '{proxy_pass_to}'\n"
         )
     }
 
@@ -551,6 +770,19 @@ mod dynamic_hosts_tests {
         }
     }
 
+    fn sorted<'s>(ids: impl Iterator<Item = &'s String>) -> Vec<&'s str> {
+        let mut result: Vec<&str> = ids.map(|itm| itm.as_str()).collect();
+        result.sort();
+        result
+    }
+
+    fn name_of<'s>(settings: &'s SettingsCompiled, name: &str) -> Option<(&'s str, bool)> {
+        settings
+            .additional_hosts
+            .get(name)
+            .map(|itm| (itm.host_id.as_str(), itm.dynamic))
+    }
+
     #[test]
     fn the_dynamic_hosts_are_next_to_the_hosts_of_the_files() {
         let mut settings = settings_with_static_host();
@@ -561,10 +793,8 @@ mod dynamic_hosts_tests {
             host("b.example.com:8001", "http://127.0.0.1:9002"),
         )));
 
-        let mut host_ids: Vec<_> = settings.hosts.keys().cloned().collect();
-        host_ids.sort();
         assert_eq!(
-            host_ids,
+            sorted(settings.hosts.keys()),
             [
                 "a.example.com:8000",
                 "b.example.com:8001",
@@ -677,81 +907,59 @@ mod dynamic_hosts_tests {
         assert!(settings.dynamic_host_errors["b.example.com:8000"].contains("not_there"));
     }
 
-    fn host_with_additional_hosts(
-        host_id: &str,
-        endpoint_type: &str,
-        additional_hosts: &[&str],
-        proxy_pass_to: &str,
-    ) -> String {
-        let additional_hosts: String = additional_hosts
-            .iter()
-            .map(|itm| format!("    - '{itm}'\n"))
-            .collect();
-
-        format!(
-            "  '{host_id}':\n    additional_hosts:\n{additional_hosts}    endpoint:\n      type: {endpoint_type}\n    locations:\n    - proxy_pass_to: '{proxy_pass_to}'\n"
-        )
-    }
-
-    /// The `additional_hosts` of a dynamic host are dynamic hosts with its configuration. One the
-    /// files have already is refused, on its own; the rest are served.
+    /// The `additional_hosts` of a dynamic host are names of it - not hosts of their own. One the
+    /// files have already is refused, and so is one on another port, each on its own; the rest
+    /// are taken.
     #[test]
-    fn the_additional_hosts_of_a_dynamic_host_are_dynamic_hosts() {
+    fn the_additional_hosts_of_a_dynamic_host_are_names_of_it() {
         let mut settings = settings_with_static_host();
 
         settings.set_dynamic_hosts(&hosts(&format!(
             "hosts:\n{}",
-            host_with_additional_hosts(
+            host_with_names(
                 "a.example.com:8000",
                 "http",
-                &["b.example.com", "STATIC.example.com", "c.example.com:8001"],
+                &[
+                    "b.example.com",
+                    "STATIC.example.com",
+                    "c.example.com:8001",
+                    "d.example.com:8000"
+                ],
                 "http://127.0.0.1:9001"
             ),
         )));
 
-        for host_id in [
-            "a.example.com:8000",
-            "b.example.com:8000",
-            "c.example.com:8001",
-        ] {
-            assert!(settings.is_dynamic_host(host_id), "{host_id}");
-            assert_eq!(
-                settings.hosts[host_id].locations[0]
-                    .proxy_pass_to
-                    .as_deref(),
-                Some("http://127.0.0.1:9001"),
-                "{host_id}"
-            );
-            assert!(settings.hosts[host_id].additional_hosts.is_none());
-        }
-
-        assert_eq!(settings.get_additional_host_of("a.example.com:8000"), None);
         assert_eq!(
-            settings
-                .get_additional_host_of("b.example.com:8000")
-                .map(|itm| itm.as_str()),
-            Some("a.example.com:8000")
+            sorted(settings.hosts.keys()),
+            ["a.example.com:8000", "static.example.com:8000"]
         );
+        assert!(settings.hosts["a.example.com:8000"]
+            .additional_hosts
+            .is_none());
 
-        // The host of the files keeps its own configuration.
         assert_eq!(
-            settings.hosts["static.example.com:8000"].locations[0]
-                .proxy_pass_to
-                .as_deref(),
-            Some("http://127.0.0.1:9000")
+            name_of(&settings, "b.example.com:8000"),
+            Some(("a.example.com:8000", true))
         );
-        assert!(settings.dynamic_host_errors["STATIC.example.com:8000"]
-            .contains("additional_hosts of 'a.example.com:8000'"));
-        assert_eq!(settings.dynamic_host_errors.len(), 1);
+        assert_eq!(
+            name_of(&settings, "d.example.com:8000"),
+            Some(("a.example.com:8000", true))
+        );
+        assert_eq!(settings.additional_hosts.len(), 2);
+
+        let errors = &settings.dynamic_host_errors;
+        assert!(errors["STATIC.example.com:8000"].contains("the settings files have a host"));
+        assert!(errors["c.example.com:8001"].contains("on port 8001"));
+        assert_eq!(errors.len(), 2, "{errors:?}");
 
         // Whichever of them is named, the group is the same.
-        for host_id in ["a.example.com:8000", "C.example.com:8001"] {
+        for host_id in ["a.example.com:8000", "B.example.com:8000"] {
             assert_eq!(
                 settings.get_host_group(host_id),
                 [
                     "a.example.com:8000",
                     "b.example.com:8000",
-                    "c.example.com:8001"
+                    "d.example.com:8000"
                 ],
                 "{host_id}"
             );
@@ -764,34 +972,31 @@ mod dynamic_hosts_tests {
             .get_host_group("nobody.example.com:8000")
             .is_empty());
 
-        // The next read has no additional hosts: they go.
+        // The next read has no names: they go.
         settings.set_dynamic_hosts(&hosts(&format!(
             "hosts:\n{}",
             host("a.example.com:8000", "http://127.0.0.1:9001")
         )));
 
-        assert!(!settings.hosts.contains_key("b.example.com:8000"));
-        assert!(!settings.hosts.contains_key("c.example.com:8001"));
-        assert!(settings.additional_host_of.is_empty());
+        assert!(settings.additional_hosts.is_empty());
         assert!(settings.dynamic_host_errors.is_empty());
     }
 
-    /// A dynamic host which is refused takes its additional hosts with it: they are not served
-    /// with a configuration which is not served. One which can not have additional hosts is
-    /// served without them.
+    /// A dynamic host which is refused takes its names with it: they are not served with a
+    /// configuration which is not served. One which can not have names is served without them.
     #[test]
-    fn a_refused_dynamic_host_takes_its_additional_hosts_with_it() {
+    fn a_refused_dynamic_host_takes_its_names_with_it() {
         let mut settings = settings_with_static_host();
 
         settings.set_dynamic_hosts(&hosts(&format!(
             "hosts:\n{}{}{}",
-            host_with_additional_hosts(
+            host_with_names(
                 "static.example.com:8000",
                 "http",
                 &["d.example.com"],
                 "http://127.0.0.1:9001"
             ),
-            host_with_additional_hosts(
+            host_with_names(
                 "e.example.com:5432",
                 "tcp",
                 &["f.example.com"],
@@ -800,10 +1005,8 @@ mod dynamic_hosts_tests {
             host("g.example.com:8000", "http://127.0.0.1:9003"),
         )));
 
-        let mut host_ids: Vec<_> = settings.hosts.keys().cloned().collect();
-        host_ids.sort();
         assert_eq!(
-            host_ids,
+            sorted(settings.hosts.keys()),
             [
                 "e.example.com:5432",
                 "g.example.com:8000",
@@ -811,104 +1014,222 @@ mod dynamic_hosts_tests {
             ]
         );
 
-        assert!(settings.dynamic_host_errors["static.example.com:8000"]
+        let errors = &settings.dynamic_host_errors;
+        assert!(errors["static.example.com:8000"]
             .contains("the settings files have a host with this id"));
-        assert!(settings.dynamic_host_errors["d.example.com:8000"].contains("which is refused"));
-        assert!(settings.dynamic_host_errors["f.example.com"].contains("type: tcp"));
-        assert_eq!(settings.dynamic_host_errors.len(), 3);
-        assert!(settings.additional_host_of.is_empty());
+        assert!(errors["d.example.com:8000"].contains("which is refused"));
+        assert!(errors["f.example.com"].contains("type: tcp"));
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(settings.additional_hosts.is_empty());
     }
 
-    /// The url may give no configuration of its own - only more hosts for a host which has one:
-    /// in the settings files, or in the `hosts` the url gives. Each of them is taken on its own.
+    /// One entry with a variable which is not there is refused on its own: the host and the
+    /// rest of its names are served.
     #[test]
-    fn the_additional_hosts_of_the_answer_are_served_with_the_configuration_of_their_host() {
-        let mut settings = settings_with_static_host();
+    fn a_name_with_a_variable_which_is_not_there_is_refused_alone() {
+        let mut settings = SettingsCompiled::default();
 
-        let answer = DynamicHostsModel::parse(
-            format!(
-                "hosts:\n{}additional_hosts:\n  STATIC.example.com:8000:\n  - t1.example.com\n  - T1.example.com\n  - not a name\n  - static.example.com\n  - t2.example.com:8001\n  a.example.com:8000:\n  - a2.example.com\n  missing.example.com:8000:\n  - x.example.com\n",
-                host("a.example.com:8000", "http://127.0.0.1:9001"),
-            )
-            .as_bytes(),
-        )
-        .unwrap()
-        .unwrap();
-
-        settings.set_dynamic_hosts_answer(&answer);
-
-        let mut host_ids: Vec<_> = settings.hosts.keys().cloned().collect();
-        host_ids.sort();
-        assert_eq!(
-            host_ids,
-            [
+        settings.set_dynamic_hosts(&hosts(&format!(
+            "hosts:\n{}",
+            host_with_names(
                 "a.example.com:8000",
-                "a2.example.com:8000",
-                "static.example.com:8000",
-                "t1.example.com:8000",
-                "t2.example.com:8001"
-            ]
+                "http",
+                &["b.example.com", "${not_there}.example.com"],
+                "http://127.0.0.1:9001"
+            ),
+        )));
+
+        assert!(settings.is_dynamic_host("a.example.com:8000"));
+        assert_eq!(
+            name_of(&settings, "b.example.com:8000"),
+            Some(("a.example.com:8000", true))
+        );
+        assert!(settings.dynamic_host_errors["${not_there}.example.com"].contains("not_there"));
+    }
+
+    /// The url may give no configuration of its own - only names for a host which has one: in
+    /// the settings files, or in the `hosts` the url gives. Each of them is taken on its own.
+    #[test]
+    fn the_additional_hosts_of_the_answer_are_names_of_their_host() {
+        let mut settings = settings_with_static_host();
+        settings.additional_hosts.insert(
+            "www.static.example.com:8000".to_string(),
+            AdditionalHost {
+                host_id: "static.example.com:8000".to_string(),
+                dynamic: false,
+            },
         );
 
-        for (host_id, of, proxy_pass_to) in [
+        settings.set_dynamic_hosts_answer(&answer(&format!(
+            "hosts:\n{}additional_hosts:\n  STATIC.example.com:8000:\n  - t1.example.com\n  - T1.example.com\n  - not a name\n  - static.example.com\n  - www.static.example.com\n  - t2.example.com:8001\n  a.example.com:8000:\n  - a2.example.com\n  www.static.example.com:8000:\n  - t3.example.com\n  missing.example.com:8000:\n  - x.example.com\n",
+            host("a.example.com:8000", "http://127.0.0.1:9001"),
+        )));
+
+        assert_eq!(
+            sorted(settings.hosts.keys()),
+            ["a.example.com:8000", "static.example.com:8000"]
+        );
+
+        for (name, of, dynamic) in [
+            ("t1.example.com:8000", "static.example.com:8000", true),
+            ("t3.example.com:8000", "static.example.com:8000", true),
+            ("a2.example.com:8000", "a.example.com:8000", true),
             (
-                "t1.example.com:8000",
+                "www.static.example.com:8000",
                 "static.example.com:8000",
-                "http://127.0.0.1:9000",
-            ),
-            (
-                "t2.example.com:8001",
-                "static.example.com:8000",
-                "http://127.0.0.1:9000",
-            ),
-            (
-                "a2.example.com:8000",
-                "a.example.com:8000",
-                "http://127.0.0.1:9001",
+                false,
             ),
         ] {
-            assert!(settings.is_dynamic_host(host_id), "{host_id}");
-            assert_eq!(
-                settings
-                    .get_additional_host_of(host_id)
-                    .map(|itm| itm.as_str()),
-                Some(of),
-                "{host_id}"
-            );
-            assert_eq!(
-                settings.hosts[host_id].locations[0]
-                    .proxy_pass_to
-                    .as_deref(),
-                Some(proxy_pass_to),
-                "{host_id}"
-            );
+            assert_eq!(name_of(&settings, name), Some((of, dynamic)), "{name}");
         }
+        assert_eq!(settings.additional_hosts.len(), 4);
 
-        assert!(!settings.is_dynamic_host("static.example.com:8000"));
         assert_eq!(
-            settings.get_host_group("t2.example.com:8001"),
+            settings.get_host_group("t1.example.com:8000"),
             [
                 "static.example.com:8000",
                 "t1.example.com:8000",
-                "t2.example.com:8001"
+                "t3.example.com:8000",
+                "www.static.example.com:8000"
             ]
         );
 
         let errors = &settings.dynamic_host_errors;
         assert!(errors["T1.example.com:8000"].contains("the url gives another host"));
-        assert!(errors["not a name"].contains("neither a domain name"));
+        assert!(errors["not a name"].contains("not a domain name"));
         assert!(errors["static.example.com:8000"].contains("the settings files have a host"));
+        assert!(errors["www.static.example.com:8000"].contains("the settings files have a host"));
+        assert!(errors["t2.example.com:8001"].contains("on port 8001"));
         assert!(errors["x.example.com"].contains("neither the settings files nor"));
-        assert_eq!(errors.len(), 4, "{errors:?}");
+        assert_eq!(errors.len(), 6, "{errors:?}");
 
-        // The answer without them: they go, and the host of the files stays as it is.
+        // The answer without them: they go, and the host of the files keeps its own name.
         settings.set_dynamic_hosts_answer(&DynamicHostsModel::default());
 
+        assert_eq!(sorted(settings.hosts.keys()), ["static.example.com:8000"]);
         assert_eq!(
-            settings.hosts.keys().collect::<Vec<_>>(),
-            ["static.example.com:8000"]
+            sorted(settings.additional_hosts.keys()),
+            ["www.static.example.com:8000"]
         );
-        assert!(settings.additional_host_of.is_empty());
         assert!(settings.dynamic_host_errors.is_empty());
+    }
+
+    fn files(hosts_yaml: &str, names: &[(&str, &str)]) -> SettingsCompiled {
+        let mut result = SettingsCompiled {
+            hosts: hosts(&format!("hosts:\n{hosts_yaml}")),
+            ..Default::default()
+        };
+
+        for (name, host_id) in names {
+            result.additional_hosts.insert(
+                name.to_string(),
+                AdditionalHost {
+                    host_id: host_id.to_string(),
+                    dynamic: false,
+                },
+            );
+        }
+
+        result
+    }
+
+    /// A name which moved from one host to another takes the other host along into the reload -
+    /// and so does a name which became a host of its own.
+    #[test]
+    fn a_reload_takes_along_the_hosts_a_name_moved_between() {
+        let applied = files(
+            &format!(
+                "{}{}{}",
+                host("a.localhost:8000", "http://127.0.0.1:9001"),
+                host("b.localhost:8000", "http://127.0.0.1:9002"),
+                host("c.localhost:8000", "http://127.0.0.1:9003"),
+            ),
+            &[
+                ("n.localhost:8000", "a.localhost:8000"),
+                ("m.localhost:8000", "c.localhost:8000"),
+            ],
+        );
+
+        let fresh = files(
+            &format!(
+                "{}{}{}{}",
+                host("a.localhost:8000", "http://127.0.0.1:9001"),
+                host("b.localhost:8000", "http://127.0.0.1:9002"),
+                host("c.localhost:8000", "http://127.0.0.1:9003"),
+                host("m.localhost:8000", "http://127.0.0.1:9004"),
+            ),
+            &[("n.localhost:8000", "b.localhost:8000")],
+        );
+
+        let reloaded_with = |host_id: &str| -> Vec<String> {
+            applied
+                .get_hosts_of_files_reloaded_with(&fresh, BTreeSet::from([host_id.to_string()]))
+                .into_iter()
+                .collect()
+        };
+
+        assert_eq!(
+            reloaded_with("a.localhost:8000"),
+            ["a.localhost:8000", "b.localhost:8000"]
+        );
+        assert_eq!(
+            reloaded_with("b.localhost:8000"),
+            ["a.localhost:8000", "b.localhost:8000"]
+        );
+        assert_eq!(
+            reloaded_with("c.localhost:8000"),
+            ["c.localhost:8000", "m.localhost:8000"]
+        );
+
+        let patched = applied.with_hosts_of_files_from(
+            &fresh,
+            &BTreeSet::from([
+                "a.localhost:8000".to_string(),
+                "b.localhost:8000".to_string(),
+            ]),
+            None,
+        );
+
+        assert_eq!(
+            name_of(&patched, "n.localhost:8000"),
+            Some(("b.localhost:8000", false))
+        );
+        // A host which is not reloaded keeps what it had.
+        assert_eq!(
+            name_of(&patched, "m.localhost:8000"),
+            Some(("c.localhost:8000", false))
+        );
+        assert!(!patched.hosts.contains_key("m.localhost:8000"));
+    }
+
+    /// The hosts of the url are put next to the reloaded hosts of the files anew: a dynamic host
+    /// refused for the id of a host of the files is taken once that host is gone from them.
+    #[test]
+    fn a_reload_puts_the_dynamic_hosts_anew() {
+        let applied_files = files(&host("a.localhost:8000", "http://127.0.0.1:9001"), &[]);
+        let answer = answer(&format!(
+            "hosts:\n{}",
+            host("a.localhost:8000", "http://127.0.0.1:9100")
+        ));
+
+        let mut applied = applied_files.clone();
+        applied.set_dynamic_hosts_answer(&answer);
+        assert!(!applied.is_dynamic_host("a.localhost:8000"));
+
+        let fresh = SettingsCompiled::default();
+        let patched = applied.with_hosts_of_files_from(
+            &fresh,
+            &BTreeSet::from(["a.localhost:8000".to_string()]),
+            Some(&answer),
+        );
+
+        assert!(patched.is_dynamic_host("a.localhost:8000"));
+        assert_eq!(
+            patched.hosts["a.localhost:8000"].locations[0]
+                .proxy_pass_to
+                .as_deref(),
+            Some("http://127.0.0.1:9100")
+        );
+        assert!(patched.dynamic_host_errors.is_empty());
     }
 }

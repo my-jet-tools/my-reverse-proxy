@@ -157,17 +157,18 @@ name there is refused, not resolved. The part before `@` is the bare domain - th
 ip. A malformed url is reported the same way as an unreachable source. The form applies to the resources in the table above when they are fetched directly - not
 behind `ssh:...->`, and not to `proxy_pass_to`, whose upstreams are connected to by a different path.
 
-## One configuration for several hosts (`additional_hosts`)
+## More names for one host (`additional_hosts`)
 
-A host can name more hosts which are served with its configuration - the same endpoint, the same locations:
+A host can have more names. A request for any of them is served by the host's configuration - the same
+endpoint, the same locations, the same rules:
 
 ```yaml
 hosts:
   example.com:443:
     additional_hosts:
-    - www.example.com          # a domain name: served on the port of the host - www.example.com:443
+    - www.example.com          # served on the port of the host: www.example.com:443
     - ${env}.example.com       # variables are substituted, as anywhere in a host
-    - example.com:8443         # a domain name and a port: served on that port
+    - api.example.com:443      # the port may be written, and is the port of the host
     endpoint:
       type: https2
       ssl_certificate: wildcard_cert   # one certificate for all of them: it is to cover every name
@@ -175,21 +176,28 @@ hosts:
     - proxy_pass_to: http://10.0.0.5:8080
 ```
 
-- Each entry becomes a host of its own with a copy of the configuration. A request is routed by its SNI/`Host` to
-  any of them the same way as to the host it is written under.
-- The host must have a domain name and a port (`example.com:443`). A port alone, a unix socket and `type: tcp`
-  can not have `additional_hosts` - there is no name to tell the hosts apart by. Neither can an entry be
-  anything but a domain name or `domain:port`, or be there twice: each of these fails the settings load.
-- **A host is served with one configuration only.** A host in `additional_hosts` that is in the settings
-  anywhere else - a key of `hosts` or in `additional_hosts` of another host, in any file, letter case aside -
-  fails the settings load. A host written as a key again in another file replaces the one before, as it always
-  has, and the `additional_hosts` of that one go with it.
-- `POST /api/configuration/ReloadEndpoint` with any of these hosts reloads all of them, and stops serving the
-  ones the list does not have any more.
-- Each of them has its own connections to the upstream: the connection pools are kept per location.
-- `get_settings` / `get_applied_settings` (MCP) list each of them as a host, with `additional_host_of` naming
-  the host it is written under.
-- The list can also be given by a url, while the configuration stays in the settings files: see
+- A name is not a host of its own: it is the host's endpoint under another name. Nothing is compiled for it,
+  and its requests go over the very upstream connections of the host. A request is routed to it by its
+  SNI/`Host` as to the host itself.
+- Logs, the connection count, the `debug` flag and the per-domain RPS are kept per name.
+- A name is served on the port of its host only: a `domain:port` with another port is ignored.
+- **An entry which can not be served is ignored, and the rest of the settings is loaded.** It is listed with
+  the configuration errors under the host whose list has it: an entry on another port, one which is not a
+  domain name (`*.example.com` is not one: a name is matched as it is written), one with a variable which is
+  not there, one which is in the list twice, one which is the id of a host - a key of `hosts` always wins.
+  A host without a domain name (a port alone, a unix socket) and `type: tcp` can not have names: their
+  entries are ignored the same way.
+- **A name is served by one host only.** A name in the lists of two hosts - in any files, letter case aside -
+  is ignored by both: the order the files are read in decides nothing. A host written as a key again in
+  another file replaces the one before, as it always has, and the names of that one go with it.
+- A host without a name (`8000`) next to hosts with names on one port serves only what no other host or name
+  of the port is named for: a request for a name always goes to the host which has it.
+- `POST /api/configuration/ReloadEndpoint` with the host or any of its names reloads the host with all its
+  names, and stops serving the ones its list does not have any more. A name which moved to another host - or
+  became a host of its own - takes that host into the reload as well.
+- `get_settings` / `get_applied_settings` (MCP) list each name as a host, with `additional_host_of` naming
+  its host.
+- The names can also be given by a url, while the configuration stays in the settings files: see
   `additional_hosts:` in "Dynamic hosts".
 
 ## Dynamic hosts
@@ -215,26 +223,27 @@ hosts:                                  # hosts with a configuration of their ow
     locations:
     - proxy_pass_to: http://10.0.0.5:8080
 
-additional_hosts:                       # more hosts for a configuration which is there already
+additional_hosts:                       # more names for a host which is there already
   example.com:443:                      # a host of the settings files - or of `hosts` above
   - tenant2.example.com                 # served on its port: tenant2.example.com:443
-  - tenant3.example.com:8443            # served on a port of its own
+  - tenant3.example.com:443
 ```
 
 `additional_hosts:` is what makes it possible to keep the configuration in the settings files and have the url
-give only the list of hosts which are served with it - as if they were written in `additional_hosts` of that
-host (see the section above). A host which is itself in `additional_hosts` of another names that one's
-configuration.
+give only the list of names it is served under - as if they were written in `additional_hosts` of that host
+(see the section above). A name of a host names that host.
 
 - **Each read replaces the dynamic hosts of the read before.** A host the url does not give any more is no
   longer served. `hosts: {}` (or `additional_hosts: {}`, or both) means there are no dynamic hosts.
 - **A blank answer changes nothing.** A `2xx` - `204` included - whose body is empty, or nothing but spaces and
   line breaks, says nothing: the hosts read before stay served, and nothing is printed. It is not a failure.
-- **Only the ports whose dynamic hosts changed are touched.** Such a port gets the hosts of the settings files
-  it already had plus the new dynamic hosts. The settings files are not read again. A connection that is already
-  open picks up the change on its next request, and a new connection sees it right away. A dynamic host can be
-  on a port of its own: that port's listener is started, and stopped once it has no hosts left. A read
-  that gives the same hosts changes nothing.
+- **Only the ports whose dynamic hosts or names changed are touched.** Such a port keeps what it serves of the
+  settings files, and each dynamic host which did not change - its very endpoint, and its upstream connections
+  with it. A dynamic host which changed is compiled anew; the names of the url are put next to their hosts
+  anew, and nothing is compiled for them: a read which changes only names changes only names. The settings
+  files are not read again. A connection that is already open picks up the change on its next request, and a
+  new connection sees it right away. A dynamic host can be on a port of its own: that port's listener is
+  started, and stopped once it has no hosts left. A read that gives the same hosts changes nothing.
 - **A failed read changes nothing.** If the url does not answer, answers with anything but `2xx`, or with
   something that is not `hosts:`, the hosts read before stay served. The failure is printed once, and so is
   the url coming back.
@@ -244,15 +253,15 @@ configuration.
   a missing variable, a wrong type) is refused on its own, and the rest are served. Every refusal is printed. The reason is also listed with
   the configuration errors, under the host's id. A refusal for an id the settings files have is the exception:
   it is listed in `dynamic_hosts.refused_hosts` instead, so it is not mistaken for that host's own error.
-- **Each additional host - of `additional_hosts:`, or of a host of `hosts:` - is a dynamic host on its own.**
-  One which another host has already, or is not a domain name, is refused, and the rest of the list is served:
-  one wrong entry does not take a long list down. If the host they are listed for is not there, or is refused
-  itself, they are refused with it. Each is listed in the configuration errors under its host id - or under the
-  entry as it is written, if that is not a host id.
-- **Additional hosts are served with their host's configuration as the last full reload of the settings left
-  it.** A full reload, or `ReloadEndpoint` of the host, serves them with the new one. After `ReloadEndpoint`
-  alone, though, a host the url adds later is still given the configuration of the last full reload, until the
-  next one.
+- **Each name - of `additional_hosts:`, or of a host of `hosts:` - is taken on its own.** One which another
+  host or name has already, which is on another port, is not a domain name, or has a variable which is not
+  there, is refused, and the rest of the list is served: one wrong entry does not take a long list down. If
+  the host they are listed for is not there, or is refused itself, they are refused with it. Each is listed in
+  the configuration errors under the name - or under the entry as it is written, if that is not a name.
+- **A name is served by the endpoint its host is served by now.** After `ReloadEndpoint` of a host, its names
+  - those of the url as well - are served by its new endpoint, and so is a name the url gives later.
+  `ReloadEndpoint` and a reload of a port also update the settings a read of the url is checked against: a
+  host `ReloadEndpoint` adds can be given names by the url right away.
 - **An `ssl_certificate` id no settings file declares is not a refusal.** The host is served, and its TLS
   handshakes are cut until a certificate is uploaded under that id - see "Certificates provided at runtime".
   An uploaded certificate is held in memory only: after a restart it is to be uploaded again.

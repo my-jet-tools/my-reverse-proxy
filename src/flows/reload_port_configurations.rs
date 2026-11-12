@@ -1,43 +1,11 @@
-use crate::{
-    configurations::{EndpointHttpHostString, EndpointPort, ListenConfiguration},
-    settings_compiled::SettingsCompiled,
-};
+use std::{collections::BTreeSet, sync::Arc};
+
+use crate::{app::APP_CTX, configurations::EndpointPort, settings_compiled::SettingsCompiled};
+
+use super::put_together_port::*;
 
 pub async fn reload_tcp_port_configurations(port_to_refresh: u16) -> Result<String, String> {
-    let _apply_lock = crate::app::APP_CTX.settings_apply_lock.lock().await;
-
-    let settings_model = SettingsCompiled::load_settings().await?;
-
-    let compiled = compile_port(&settings_model, |endpoint_host| {
-        matches!(endpoint_host.get_port(), EndpointPort::Tcp(port) if port == port_to_refresh)
-    })
-    .await?;
-
-    let had_config = compiled.configuration.is_some();
-
-    crate::app::APP_CTX
-        .current_configuration
-        .write(move |config| {
-            config
-                .error_configurations
-                .remove(&port_to_refresh.to_string());
-
-            compiled.apply_dynamic_host_errors(&mut config.error_configurations);
-
-            match compiled.configuration {
-                Some(cfg) => {
-                    config.listen_tcp_endpoints.insert(port_to_refresh, cfg);
-                }
-                None => {
-                    config.listen_tcp_endpoints.remove(&port_to_refresh);
-                }
-            }
-        })
-        .await;
-
-    crate::scripts::sync_endpoints().await;
-
-    if had_config {
+    if reload_port(EndpointPort::Tcp(port_to_refresh)).await? {
         Ok(format!("Updated TCP port {}", port_to_refresh))
     } else {
         Ok(format!("Removed TCP port {}", port_to_refresh))
@@ -45,136 +13,119 @@ pub async fn reload_tcp_port_configurations(port_to_refresh: u16) -> Result<Stri
 }
 
 pub async fn reload_unix_configurations(host_to_refresh: &String) -> Result<String, String> {
-    let _apply_lock = crate::app::APP_CTX.settings_apply_lock.lock().await;
+    let port = EndpointPort::UnixSocket(Arc::new(host_to_refresh.clone()));
 
-    let settings_model = SettingsCompiled::load_settings().await?;
-
-    let compiled = compile_port(&settings_model, |endpoint_host| {
-        endpoint_host.is_unix_socket() && endpoint_host.as_str() == host_to_refresh.as_str()
-    })
-    .await?;
-
-    let had_config = compiled.configuration.is_some();
-    let unix_path = std::sync::Arc::new(host_to_refresh.clone());
-    let host_to_refresh_clone = host_to_refresh.clone();
-
-    crate::app::APP_CTX
-        .current_configuration
-        .write(move |config| {
-            config
-                .error_configurations
-                .remove(host_to_refresh_clone.as_str());
-
-            compiled.apply_dynamic_host_errors(&mut config.error_configurations);
-
-            match compiled.configuration {
-                Some(cfg) => {
-                    config
-                        .listen_unix_socket_endpoints
-                        .insert(unix_path.clone(), cfg);
-                }
-                None => {
-                    config.listen_unix_socket_endpoints.remove(&unix_path);
-                }
-            }
-        })
-        .await;
-
-    crate::scripts::sync_endpoints().await;
-
-    if had_config {
+    if reload_port(port).await? {
         Ok(format!("Updated Unix socket {}", host_to_refresh))
     } else {
         Ok(format!("Removed Unix socket {}", host_to_refresh))
     }
 }
 
-/// One port, compiled again from the settings.
-struct CompiledPort {
-    configuration: Option<ListenConfiguration>,
-    /// The dynamic hosts of the port, the ones which are served as well.
-    dynamic_host_ids: Vec<String>,
-    /// The dynamic hosts of the port which are not served, and why.
-    dynamic_host_errors: Vec<(String, String)>,
-}
+/// Puts one port together anew from the settings files: the hosts of the files on it - the ones
+/// it had and the ones it has now - are reloaded, with their names; the dynamic hosts and names
+/// on it are put next to them. The settings applied are updated with what is reloaded, and the
+/// hosts of `dynamic_hosts.url` are put next to them anew.
+///
+/// A host of the files which does not compile fails the reload, as it always has; a dynamic one
+/// is left out with its error - what the url gives can not keep the hosts of the files from
+/// being reloaded. Returns whether the port is served.
+async fn reload_port(port: EndpointPort) -> Result<bool, String> {
+    let _apply_lock = APP_CTX.settings_apply_lock.lock().await;
 
-impl CompiledPort {
-    /// The errors of the dynamic hosts of the port are the ones found now.
-    fn apply_dynamic_host_errors(
-        &self,
-        error_configurations: &mut std::collections::BTreeMap<String, String>,
-    ) {
-        for host_id in &self.dynamic_host_ids {
-            error_configurations.remove(host_id);
-        }
+    let fresh = SettingsCompiled::load_settings().await?;
+    let applied = APP_CTX.applied_settings.load_full();
 
-        for (host_id, err) in &self.dynamic_host_errors {
-            error_configurations.insert(host_id.clone(), err.clone());
-        }
-    }
-}
+    let is_on_port = |host_id: &str| port_of(host_id).as_ref() == Some(&port);
 
-/// The hosts of the settings on one port, compiled one next to the other: those of the files
-/// first, then the dynamic ones. A host of the files which does not compile fails the reload,
-/// as it always has; a dynamic one is left out with its error - what the url gives can not keep
-/// the hosts of the files from being reloaded.
-async fn compile_port(
-    settings_model: &SettingsCompiled,
-    is_on_port: impl Fn(&EndpointHttpHostString) -> bool,
-) -> Result<CompiledPort, String> {
-    let mut result = CompiledPort {
-        configuration: None,
-        dynamic_host_ids: Vec::new(),
-        dynamic_host_errors: Vec::new(),
+    let hosts_of_files_on_port = |settings: &SettingsCompiled| -> BTreeSet<String> {
+        settings
+            .hosts
+            .keys()
+            .filter(|host_id| !settings.is_dynamic_host(host_id) && is_on_port(host_id))
+            .cloned()
+            .collect()
     };
 
-    for (host_id, host_settings) in settings_model.hosts_in_apply_order() {
-        let dynamic_host = settings_model.is_dynamic_host(host_id);
+    let mut host_ids = hosts_of_files_on_port(&fresh);
+    if let Some(applied) = applied.as_ref() {
+        host_ids.extend(hosts_of_files_on_port(applied));
+    }
 
-        let endpoint_host = match settings_model.get_endpoint_host_string(host_id) {
-            Ok(endpoint_host) => endpoint_host,
-            // Its port is not known: it is not on this one.
-            Err(_) if dynamic_host => continue,
-            Err(err) => return Err(err),
-        };
+    let (after, host_ids) =
+        super::settings_with_reloaded_hosts(applied.as_deref(), &fresh, host_ids);
 
-        if !is_on_port(&endpoint_host) {
-            continue;
+    let mut errors = FoundErrors::default();
+
+    // Everything the port had and has is looked at anew.
+    for settings in [Some(&after), applied.as_deref()].into_iter().flatten() {
+        for host_id in settings.hosts.keys().filter(|host_id| is_on_port(host_id)) {
+            errors.look_at_host(settings, host_id);
         }
 
-        if dynamic_host {
-            result.dynamic_host_ids.push(host_id.clone());
-
-            if let Some(existing) = result.configuration.as_ref() {
-                if let Err(err) =
-                    super::check_dynamic_host_fits(existing, &endpoint_host, host_settings)
-                {
-                    result.dynamic_host_errors.push((host_id.clone(), err));
-                    continue;
-                }
+        for (name, itm) in &settings.additional_hosts {
+            if itm.dynamic && is_on_port(name) {
+                errors.look_at_dynamic(name);
             }
-        }
-
-        let compiled = crate::scripts::compile_host_configuration(
-            settings_model,
-            endpoint_host,
-            host_settings,
-            result.configuration.clone(),
-        )
-        .await;
-
-        match compiled {
-            Ok(compiled) => result.configuration = Some(compiled),
-            Err(err) if dynamic_host => result.dynamic_host_errors.push((host_id.clone(), err)),
-            Err(err) => return Err(err),
         }
     }
 
-    Ok(result)
+    for host_id in &host_ids {
+        errors.add_ignored_entries(&after, host_id);
+    }
+
+    let host_ids_here: Vec<&String> = after
+        .hosts_in_apply_order()
+        .into_iter()
+        .map(|(host_id, _)| host_id)
+        .filter(|host_id| is_on_port(host_id))
+        .collect();
+
+    let configuration = compile_port(&after, &host_ids_here, &mut errors).await?;
+
+    let names: Vec<_> = after
+        .additional_hosts_in_apply_order()
+        .into_iter()
+        .filter(|(name, _)| is_on_port(name))
+        .collect();
+
+    let configuration = put_names(configuration, &names, &mut errors);
+    let served = configuration.is_some();
+
+    publish_ports(
+        vec![(port, configuration)],
+        errors,
+        after.get_static_host_ids_lowercase(),
+    )
+    .await;
+
+    // The hosts of the url, against the hosts of the files as they are now.
+    if let Some(applied) = applied.as_ref() {
+        super::apply_dynamic_hosts_change(applied, &after).await;
+    }
+
+    APP_CTX.applied_settings.store(Some(Arc::new(after)));
+
+    crate::scripts::sync_endpoints().await;
+
+    Ok(served)
+}
+
+/// The hosts of one port, compiled one next to the other: those of the files first, then the
+/// dynamic ones. A host of the files which does not compile fails the reload, as it always has;
+/// a dynamic one is left out with its error.
+async fn compile_port(
+    settings_model: &SettingsCompiled,
+    host_ids: &[&String],
+    errors: &mut FoundErrors,
+) -> Result<Option<crate::configurations::ListenConfiguration>, String> {
+    put_hosts(settings_model, None, host_ids, true, errors).await
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::configurations::{ListenConfiguration, ListenHttpEndpointType};
+
     use super::*;
 
     fn hosts(yaml: &str) -> std::collections::HashMap<String, crate::settings::HostSettings> {
@@ -182,6 +133,15 @@ mod tests {
             .unwrap()
             .unwrap()
             .hosts
+    }
+
+    fn on_port(settings: &SettingsCompiled, port: u16) -> Vec<&String> {
+        settings
+            .hosts_in_apply_order()
+            .into_iter()
+            .map(|(host_id, _)| host_id)
+            .filter(|host_id| port_of(host_id) == Some(EndpointPort::Tcp(port)))
+            .collect()
     }
 
     /// A reload of a port is never kept from the hosts of the files by what the url gives: a
@@ -202,15 +162,19 @@ mod tests {
             "  other.localhost:7101:\n    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9001\n",
         )));
 
-        let compiled = compile_port(&settings, |endpoint_host| {
-            matches!(endpoint_host.get_port(), EndpointPort::Tcp(7100))
-        })
-        .await
-        .unwrap();
+        let mut errors = FoundErrors::default();
+        let compiled = compile_port(&settings, &on_port(&settings, 7100), &mut errors)
+            .await
+            .unwrap();
 
-        let Some(ListenConfiguration::Http(configuration)) = compiled.configuration.as_ref() else {
+        let Some(ListenConfiguration::Http(configuration)) = compiled.as_ref() else {
             panic!("port 7100 is not an http port");
         };
+        assert!(matches!(
+            configuration.listen_endpoint_type,
+            ListenHttpEndpointType::Http1
+        ));
+
         let mut served: Vec<_> = configuration
             .endpoints
             .iter()
@@ -225,19 +189,23 @@ mod tests {
             ]
         );
 
-        let mut refused: Vec<_> = compiled
-            .dynamic_host_errors
-            .iter()
-            .map(|(host_id, _)| host_id.as_str())
+        let mut refused: Vec<_> = errors
+            .describe()
+            .into_iter()
+            .map(|itm| itm.split(':').next().unwrap().to_string())
             .collect();
         refused.sort();
-        assert_eq!(refused, ["bad.localhost:7100", "tcp.localhost:7100"]);
+        assert_eq!(refused, ["bad.localhost", "tcp.localhost"]);
 
         // The errors of the port's dynamic hosts are the ones found now.
         let mut error_configurations = std::collections::BTreeMap::new();
         error_configurations.insert("good.localhost:7100".to_string(), "before".to_string());
         error_configurations.insert("files.localhost:7100".to_string(), "kept".to_string());
-        compiled.apply_dynamic_host_errors(&mut error_configurations);
+        errors.look_at_dynamic("good.localhost:7100");
+        errors.apply(
+            &mut error_configurations,
+            &settings.get_static_host_ids_lowercase(),
+        );
 
         assert!(!error_configurations.contains_key("good.localhost:7100"));
         assert!(error_configurations.contains_key("bad.localhost:7100"));
@@ -255,9 +223,11 @@ mod tests {
             ..Default::default()
         };
 
-        let result = compile_port(&settings, |endpoint_host| {
-            matches!(endpoint_host.get_port(), EndpointPort::Tcp(7102))
-        })
+        let result = compile_port(
+            &settings,
+            &on_port(&settings, 7102),
+            &mut FoundErrors::default(),
+        )
         .await;
 
         assert!(result.is_err());

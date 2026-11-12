@@ -1,116 +1,76 @@
-use std::collections::HashSet;
-
 use crate::{
     configurations::{EndpointHttpHostString, EndpointPort},
     settings::{EndpointTypeSettings, HostSettings},
 };
 
-/// One host of the settings, once its `additional_hosts` are put out as hosts of their own.
-#[derive(Debug)]
-pub struct ExpandedHost {
+/// A name of `additional_hosts`, and the host it is a name of. A request for the name is served
+/// by that host's configuration - under the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdditionalHost {
+    /// The host whose configuration the name is served with: a key of `hosts`.
     pub host_id: String,
-    pub host_settings: HostSettings,
-    /// The host whose `additional_hosts` this one is in - `None` for that host itself.
-    pub additional_host_of: Option<String>,
+    /// The name came from `dynamic_hosts.url`. Its host may be one of the settings files.
+    pub dynamic: bool,
 }
 
-/// A host and the ones of its `additional_hosts`: one configuration, served under each of these
-/// hosts - every one of them is a host of its own, with a copy of the same settings, from here on.
+/// The id of `entry`, an entry of `additional_hosts` of `host_id`: the name on the port of the
+/// host - `www.example.com` of `example.com:443` is `www.example.com:443`. A name is served on
+/// the port of its host only: `www.example.com:443` is taken as it is, `www.example.com:8443`
+/// is refused.
 ///
-/// An entry of `additional_hosts` is a domain name, served on the port of the host
-/// (`www.example.com` under `example.com:443` is `www.example.com:443`), or a domain name and a
-/// port of its own (`www.example.com:8443`). The host is first, its additional hosts follow in
-/// the order they are written in. None of them keeps `additional_hosts`.
-///
-/// Fails if the host has no domain name to stand next to (a port alone, a unix socket), is
-/// `type: tcp` - which takes its whole port - or an entry is not a domain name, or is there twice.
-pub fn expand_additional_hosts(
-    host_id: String,
-    mut host_settings: HostSettings,
-) -> Result<Vec<ExpandedHost>, String> {
-    let additional_hosts = host_settings.additional_hosts.take().unwrap_or_default();
-
-    if additional_hosts.is_empty() {
-        return Ok(vec![ExpandedHost {
-            host_id,
-            host_settings,
-            additional_host_of: None,
-        }]);
-    }
-
-    let mut taken = HashSet::new();
-    taken.insert(host_id.to_ascii_lowercase());
-
-    let mut result = Vec::with_capacity(additional_hosts.len() + 1);
-
-    for additional_host in additional_hosts {
-        let additional_host_id =
-            get_additional_host_id(&host_id, &host_settings, &additional_host)?;
-
-        if !taken.insert(additional_host_id.to_ascii_lowercase()) {
-            return Err(format!(
-                "Host '{host_id}': '{}' of additional_hosts is there twice, or is the host itself",
-                additional_host.trim()
-            ));
-        }
-
-        result.push(ExpandedHost {
-            host_id: additional_host_id,
-            host_settings: host_settings.clone(),
-            additional_host_of: Some(host_id.clone()),
-        });
-    }
-
-    result.insert(
-        0,
-        ExpandedHost {
-            host_id,
-            host_settings,
-            additional_host_of: None,
-        },
-    );
-
-    Ok(result)
-}
-
-/// The host id of `additional_host`, an entry of `additional_hosts` of `host_id`: a domain name
-/// gets the port of `host_id`, a domain name and a port is the host id as it is.
-///
-/// Fails if `host_id` can not have additional hosts - it has no domain name to stand next to
-/// (a port alone, a unix socket), or is `type: tcp`, which takes its whole port - or the entry is
-/// not a domain name.
+/// Fails - with why, to be told about with the entry - if the host can not have names (it has
+/// no domain name to stand next to: a port alone, a unix socket; or it is `type: tcp`, which
+/// takes its whole port), or the entry is not a domain name, or names another port.
 pub fn get_additional_host_id(
     host_id: &str,
     host_settings: &HostSettings,
-    additional_host: &str,
+    entry: &str,
 ) -> Result<String, String> {
     let port = get_port_of_named_host(host_id).ok_or_else(|| {
-        format!(
-            "Host '{host_id}': additional_hosts needs a host with a domain name and a port, like 'example.com:443'"
-        )
+        format!("additional_hosts needs a host with a domain name and a port, like 'example.com:443' - '{host_id}' is not one")
     })?;
 
     if let Ok(EndpointTypeSettings::Tcp) = host_settings.endpoint.get_endpoint_type() {
-        return Err(format!(
-            "Host '{host_id}': additional_hosts can not be used with type: tcp - a tcp endpoint takes its whole port"
-        ));
+        return Err(
+            "additional_hosts can not be used with type: tcp - a tcp endpoint takes its whole port"
+                .to_string(),
+        );
     }
 
-    let additional_host = additional_host.trim();
+    let entry = entry.trim();
 
-    let additional_host_id = if additional_host.contains(':') {
-        additional_host.to_string()
-    } else {
-        format!("{additional_host}:{port}")
+    let (name, entry_port) = match entry.split_once(':') {
+        Some((name, entry_port)) => (name, Some(entry_port)),
+        None => (entry, None),
     };
 
-    if get_port_of_named_host(&additional_host_id).is_none() {
-        return Err(format!(
-            "Host '{host_id}': '{additional_host}' of additional_hosts is neither a domain name nor a domain name and a port"
-        ));
+    if !is_domain_name(name) {
+        return Err("it is not a domain name".to_string());
     }
 
-    Ok(additional_host_id)
+    if let Some(entry_port) = entry_port {
+        match entry_port.parse::<u16>() {
+            Ok(entry_port) if entry_port == port => {}
+            Ok(entry_port) => {
+                return Err(format!(
+                    "it is on port {entry_port}, and a name is served on the port of its host - {port}"
+                ));
+            }
+            Err(_) => return Err("it is not a domain name".to_string()),
+        }
+    }
+
+    Ok(format!("{name}:{port}"))
+}
+
+/// A name a `Host` header or an SNI can carry: letters, digits, `-`, `_` and dots. Not digits
+/// alone - that is a port written without its colon - and no `*`: a name is matched as it is.
+fn is_domain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.chars().all(|c| c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 /// The tcp port of a `domain:port` host id - `None` for a port alone, a unix socket, or what is
@@ -140,151 +100,110 @@ fn get_port_of_named_host(host_id: &str) -> Option<u16> {
 mod tests {
     use super::*;
 
-    fn host(yaml: &str) -> HostSettings {
-        crate::settings::DynamicHostsModel::parse(format!("hosts:\n  'host':\n{yaml}").as_bytes())
-            .unwrap()
-            .unwrap()
-            .hosts
-            .remove("host")
-            .unwrap()
-    }
-
-    const HTTP: &str = "    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n";
-
-    fn with_additional_hosts(endpoint_type: &str, additional_hosts: &[&str]) -> HostSettings {
-        let mut host_settings =
-            host(&HTTP.replace("type: http", &format!("type: {endpoint_type}")));
-        host_settings.additional_hosts =
-            Some(additional_hosts.iter().map(|itm| itm.to_string()).collect());
-        host_settings
-    }
-
-    fn ids(expanded: &[ExpandedHost]) -> Vec<(&str, Option<&str>)> {
-        expanded
-            .iter()
-            .map(|itm| (itm.host_id.as_str(), itm.additional_host_of.as_deref()))
-            .collect()
+    fn host(endpoint_type: &str) -> HostSettings {
+        crate::settings::DynamicHostsModel::parse(
+            format!(
+                "hosts:\n  'host':\n    endpoint:\n      type: {endpoint_type}\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+        .unwrap()
+        .hosts
+        .remove("host")
+        .unwrap()
     }
 
     #[test]
     fn additional_hosts_are_read_from_the_settings() {
-        let host_settings = host(&format!(
-            "    additional_hosts:\n    - www.example.com\n    - api.example.com:8443\n{HTTP}"
-        ));
+        let host_settings = crate::settings::DynamicHostsModel::parse(
+            b"hosts:\n  'host':\n    additional_hosts:\n    - www.example.com\n    - api.example.com:443\n    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n",
+        )
+        .unwrap()
+        .unwrap()
+        .hosts
+        .remove("host")
+        .unwrap();
 
         assert_eq!(
             host_settings.additional_hosts.as_deref(),
             Some(
                 &[
                     "www.example.com".to_string(),
-                    "api.example.com:8443".to_string()
+                    "api.example.com:443".to_string()
                 ][..]
             )
         );
     }
 
+    /// A name is on the port of its host: written with it or without it.
     #[test]
-    fn a_host_without_additional_hosts_is_itself_only() {
-        for host_settings in [host(HTTP), with_additional_hosts("http", &[])] {
-            let expanded =
-                expand_additional_hosts("example.com:443".to_string(), host_settings).unwrap();
-
-            assert_eq!(ids(&expanded), [("example.com:443", None)]);
-        }
-
-        // Neither a port alone nor a unix socket needs a domain name without additional_hosts.
-        for host_id in ["8000", "/var/run/proxy.sock"] {
+    fn a_name_is_on_the_port_of_its_host() {
+        for (entry, expected) in [
+            ("www.example.com", "www.example.com:443"),
+            (" api.example.com ", "api.example.com:443"),
+            ("Api.Example.com:443", "Api.Example.com:443"),
+            ("api.example.com:0443", "api.example.com:443"),
+            ("10.0.0.5", "10.0.0.5:443"),
+            ("tenant_1.example.com", "tenant_1.example.com:443"),
+        ] {
             assert_eq!(
-                expand_additional_hosts(host_id.to_string(), host(HTTP))
-                    .unwrap()
-                    .len(),
-                1
+                get_additional_host_id("example.com:443", &host("https2"), entry).as_deref(),
+                Ok(expected),
+                "{entry}"
             );
         }
     }
 
     #[test]
-    fn every_additional_host_is_a_host_with_the_same_settings() {
-        let expanded = expand_additional_hosts(
-            "example.com:443".to_string(),
-            with_additional_hosts(
-                "https2",
-                &["www.example.com", " api.example.com ", "example.com:8443"],
-            ),
-        )
-        .unwrap();
-
-        assert_eq!(
-            ids(&expanded),
-            [
-                ("example.com:443", None),
-                ("www.example.com:443", Some("example.com:443")),
-                ("api.example.com:443", Some("example.com:443")),
-                ("example.com:8443", Some("example.com:443")),
-            ]
-        );
-
-        for itm in &expanded {
-            assert!(
-                itm.host_settings.additional_hosts.is_none(),
-                "{}",
-                itm.host_id
-            );
-            assert_eq!(itm.host_settings.endpoint.endpoint_type, "https2");
-            assert_eq!(
-                itm.host_settings.locations[0].proxy_pass_to.as_deref(),
-                Some("http://127.0.0.1:9000")
-            );
-        }
-    }
-
-    #[test]
-    fn additional_hosts_are_refused_where_they_can_not_be_served() {
-        for (host_id, endpoint_type, additional_hosts, expected) in [
-            ("8000", "http", &["www.example.com"][..], "needs a host"),
+    fn a_name_which_can_not_be_served_is_refused() {
+        for (host_id, endpoint_type, entry, expected) in [
+            ("8000", "http", "www.example.com", "needs a host"),
             (
                 "/var/run/proxy.sock",
                 "http",
-                &["www.example.com"],
+                "www.example.com",
                 "needs a host",
             ),
-            ("example.com:5432", "tcp", &["www.example.com"], "type: tcp"),
-            ("example.com:443", "http", &[""], "neither"),
-            ("example.com:443", "http", &[":443"], "neither"),
-            ("example.com:443", "http", &["8443"], "neither"),
+            ("example.com:5432", "tcp", "www.example.com", "type: tcp"),
             (
                 "example.com:443",
                 "http",
-                &["www.example.com:http"],
-                "neither",
+                "www.example.com:8443",
+                "on port 8443",
+            ),
+            ("example.com:443", "http", "", "not a domain name"),
+            ("example.com:443", "http", ":443", "not a domain name"),
+            ("example.com:443", "http", "8443", "not a domain name"),
+            (
+                "example.com:443",
+                "http",
+                "*.example.com",
+                "not a domain name",
             ),
             (
                 "example.com:443",
                 "http",
-                &["/var/run/other.sock"],
-                "neither",
+                "www.example.com:http",
+                "not a domain name",
             ),
-            ("example.com:443", "http", &["www example.com"], "neither"),
-            ("example.com:443", "http", &["a:b:443"], "neither"),
             (
                 "example.com:443",
                 "http",
-                &["www.example.com", "WWW.example.com"],
-                "twice",
+                "/var/run/other.sock",
+                "not a domain name",
             ),
-            ("example.com:443", "http", &["example.com"], "twice"),
-            ("example.com:443", "http", &["Example.com:443"], "twice"),
+            (
+                "example.com:443",
+                "http",
+                "www example.com",
+                "not a domain name",
+            ),
+            ("example.com:443", "http", "a:b:443", "not a domain name"),
         ] {
-            let err = expand_additional_hosts(
-                host_id.to_string(),
-                with_additional_hosts(endpoint_type, additional_hosts),
-            )
-            .unwrap_err();
+            let err = get_additional_host_id(host_id, &host(endpoint_type), entry).unwrap_err();
 
-            assert!(
-                err.contains(expected),
-                "{host_id} {additional_hosts:?}: {err}"
-            );
+            assert!(err.contains(expected), "{host_id} {entry:?}: {err}");
         }
     }
 }

@@ -1,19 +1,15 @@
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use flurl::FlUrl;
 
 use crate::{
     app::APP_CTX,
-    configurations::{
-        EndpointHttpHostString, EndpointPort, HttpListenPortConfiguration, ListenConfiguration,
-    },
+    configurations::{EndpointHttpHostString, EndpointPort, ListenConfiguration},
     settings::{DynamicHostsModel, DynamicHostsSettings, EndpointTypeSettings, HostSettings},
-    settings_compiled::SettingsCompiled,
+    settings_compiled::{AdditionalHost, SettingsCompiled},
 };
+
+use super::put_together_port::*;
 
 /// Reads `dynamic_hosts.url` and applies its hosts, if they are not the ones served already.
 ///
@@ -108,8 +104,13 @@ async fn apply_dynamic_hosts(url: &str, answer: DynamicHostsModel) {
     after.set_dynamic_hosts_answer(&answer);
 
     println!(
-        "Dynamic hosts: {} hosts are read from {}",
+        "Dynamic hosts: {} hosts and {} names are read from {}",
         after.dynamic_host_ids.len(),
+        after
+            .additional_hosts
+            .values()
+            .filter(|itm| itm.dynamic)
+            .count(),
         url
     );
 
@@ -127,13 +128,16 @@ async fn apply_dynamic_hosts(url: &str, answer: DynamicHostsModel) {
 }
 
 /// Puts the dynamic hosts of `after` into the live configuration in place of the ones of
-/// `before`.
+/// `before`, and the names of the url in place of its names before.
 ///
-/// Only the ports a dynamic host came to, left, or changed on are touched. Each of them is put
-/// together from what it serves now with the dynamic hosts taken away - the hosts of the
-/// settings files, as the last reload compiled them - and the dynamic hosts of `after` on it.
-/// The ports are replaced in one write: a connection sees either all of the change or none of
-/// it, and picks it up with the next request it reads (`AppConfiguration::pick_up_reload`).
+/// Only the ports a dynamic host or a name came to, left, or changed on are touched. Each of
+/// them keeps what it serves of the settings files - hosts and names, as the last reload put
+/// them there - and every dynamic host which did not change: its very endpoint, and with it its
+/// upstream connections. A dynamic host which changed is compiled anew; the names of the url are
+/// put next to the endpoints of their hosts anew - nothing is compiled for them. A read which
+/// changes only names changes only names. The ports are replaced in one write: a connection sees
+/// either all of the change or none of it, and picks it up with the next request it reads
+/// (`AppConfiguration::pick_up_reload`).
 ///
 /// A dynamic host never takes the place of a host of the settings files: one which would is
 /// refused, and so is one which does not compile; the others are served.
@@ -144,231 +148,147 @@ pub async fn apply_dynamic_hosts_change(
     before: &SettingsCompiled,
     after: &SettingsCompiled,
 ) -> bool {
-    let mut changed_ids: Vec<&String> = Vec::new();
+    // The dynamic hosts which are not what they were: come, gone, or with other settings.
+    let mut changed_hosts: HashSet<&str> = HashSet::new();
 
     for host_id in &before.dynamic_host_ids {
         let same = after.dynamic_host_ids.contains(host_id)
             && crate::app::same_host(&before.hosts[host_id], &after.hosts[host_id]);
 
         if !same {
-            changed_ids.push(host_id);
+            changed_hosts.insert(host_id);
         }
     }
 
     for host_id in &after.dynamic_host_ids {
         if !before.dynamic_host_ids.contains(host_id) {
-            changed_ids.push(host_id);
+            changed_hosts.insert(host_id);
         }
     }
 
-    let mut errors: BTreeMap<String, String> = BTreeMap::new();
+    // The names of the url which are not what they were - and the ones of a host which changed:
+    // they are put next to its new endpoint.
+    let mut changed_names: HashSet<&str> = HashSet::new();
+
+    for (settings, other) in [(before, after), (after, before)] {
+        for (name, itm) in settings
+            .additional_hosts
+            .iter()
+            .filter(|(_, itm)| itm.dynamic)
+        {
+            if other.additional_hosts.get(name) != Some(itm)
+                || changed_hosts.contains(itm.host_id.as_str())
+            {
+                changed_names.insert(name);
+            }
+        }
+    }
+
+    let mut errors = FoundErrors::default();
 
     let mut ports: Vec<EndpointPort> = Vec::new();
-    for host_id in &changed_ids {
-        match EndpointHttpHostString::new(host_id.to_string()) {
-            Ok(host_endpoint) => {
-                let port = host_endpoint.get_port();
-                if !ports.contains(&port) {
-                    ports.push(port);
-                }
-            }
-            Err(err) => {
-                if after.dynamic_host_ids.contains(*host_id) {
-                    errors.insert(host_id.to_string(), err);
-                }
+    for host_id in changed_hosts.iter().chain(changed_names.iter()) {
+        errors.look_at_dynamic(host_id);
+
+        // One whose id names no port is told about with the hosts of `after` below.
+        if let Some(port) = port_of(host_id) {
+            if !ports.contains(&port) {
+                ports.push(port);
             }
         }
     }
 
-    // Every dynamic host on the ports which are put together again is compiled again: its
-    // error, if it has one, is found anew.
-    let mut ids_looked_at: HashSet<String> = changed_ids.iter().map(|id| id.to_string()).collect();
-    ids_looked_at.extend(before.dynamic_host_errors.keys().cloned());
+    // The refusals of the read before are looked at anew: the ones of this read take their place.
+    for host_id in before.dynamic_host_errors.keys() {
+        errors.look_at_dynamic(host_id);
+    }
+
+    for (host_id, err) in &after.dynamic_host_errors {
+        errors.add_dynamic(host_id, err.clone());
+    }
+
+    let is_dynamic_name = |_: &str, itm: &AdditionalHost| itm.dynamic;
+
+    let hosts_by_port_after =
+        hosts_by_port(after, |host_id| after.is_dynamic_host(host_id), &mut errors);
+    let names_by_port_after = names_by_port(after, is_dynamic_name);
+
+    // What the ports had of the url, the errors of which are looked at anew.
+    let mut ignored = FoundErrors::default();
+    let hosts_by_port_before = hosts_by_port(
+        before,
+        |host_id| before.is_dynamic_host(host_id),
+        &mut ignored,
+    );
+    let names_by_port_before = names_by_port(before, is_dynamic_name);
 
     let mut new_ports: Vec<(EndpointPort, Option<ListenConfiguration>)> =
         Vec::with_capacity(ports.len());
 
-    let mut before_by_port = dynamic_hosts_by_port(before);
-    let mut after_by_port = dynamic_hosts_by_port(after);
-
     let mut listeners_changed = false;
 
     for port in ports {
+        for host_id in hosts_by_port_before.get(&port).into_iter().flatten() {
+            errors.look_at_dynamic(host_id);
+        }
+        for (name, _) in names_by_port_before.get(&port).into_iter().flatten() {
+            errors.look_at_dynamic(name);
+        }
+
         let live = get_live_configuration(&port).await;
         let was_served = live.is_some();
-        let mut configuration = without_dynamic_hosts(live);
 
-        ids_looked_at.extend(before_by_port.remove(&port).unwrap_or_default());
+        let is_kept = |host_id: &str| {
+            !changed_hosts.contains(host_id) && after.dynamic_host_ids.contains(host_id)
+        };
 
-        for host_id in after_by_port.remove(&port).unwrap_or_default() {
-            ids_looked_at.insert(host_id.clone());
+        // What stays: what the port serves of the settings files, and each dynamic host which did
+        // not change. The names of the url go: they are put anew below.
+        let configuration = without_endpoints(
+            live,
+            |endpoint| {
+                endpoint.dynamic_host
+                    && (endpoint.additional_host_of.is_some() || !is_kept(endpoint.as_str()))
+            },
+            |tcp| tcp.dynamic_host && !is_kept(tcp.host_endpoint.as_str()),
+        );
 
-            let host_settings = &after.hosts[&host_id];
-            let host_endpoint = match EndpointHttpHostString::new(host_id.clone()) {
-                Ok(host_endpoint) => host_endpoint,
+        let host_ids: Vec<&String> = hosts_by_port_after
+            .get(&port)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|host_id| {
+                errors.look_at_dynamic(host_id);
+                // One which did not change and is served is kept as it is; one which was
+                // refused is tried again.
+                !is_kept(host_id) || !serves_host(&configuration, host_id)
+            })
+            .collect();
+
+        let configuration =
+            match put_hosts(after, configuration, &host_ids, false, &mut errors).await {
+                Ok(configuration) => configuration,
+                // Not strict: a dynamic host is left out with its error, it fails nothing.
                 Err(err) => {
-                    errors.insert(host_id, err);
+                    println!("Dynamic hosts: port {port:?} can not be put together: {err}");
                     continue;
                 }
             };
 
-            if let Some(existing) = configuration.as_ref() {
-                if let Err(err) = check_dynamic_host_fits(existing, &host_endpoint, host_settings) {
-                    errors.insert(host_id, err);
-                    continue;
-                }
-            }
-
-            match crate::scripts::compile_host_configuration(
-                after,
-                host_endpoint,
-                host_settings,
-                configuration.clone(),
-            )
-            .await
-            {
-                Ok(compiled) => configuration = Some(compiled),
-                Err(err) => {
-                    errors.insert(host_id, err);
-                }
-            }
+        let names = names_by_port_after.get(&port).cloned().unwrap_or_default();
+        for (name, _) in &names {
+            errors.look_at_dynamic(name);
         }
+        let configuration = put_names(configuration, &names, &mut errors);
 
         listeners_changed |= was_served != configuration.is_some();
         new_ports.push((port, configuration));
     }
 
-    for (host_id, err) in after.dynamic_host_errors.iter() {
-        errors.insert(host_id.clone(), err.clone());
-    }
-
-    for (host_id, err) in errors.iter() {
-        println!("Dynamic host {host_id} is not served. Err is: {err}");
-    }
-
-    let static_host_ids = after.get_static_host_ids_lowercase();
-    let is_static_host =
-        move |host_id: &str| static_host_ids.contains(&host_id.to_ascii_lowercase());
-
-    APP_CTX
-        .current_configuration
-        .write(move |config| {
-            // An error under the id of a host of the settings files is that host's own: it is
-            // the reload of the files which finds it again.
-            for host_id in ids_looked_at {
-                if !is_static_host(&host_id) {
-                    config.error_configurations.remove(&host_id);
-                }
-            }
-
-            for (port, configuration) in new_ports {
-                match (port, configuration) {
-                    (EndpointPort::Tcp(port), Some(configuration)) => {
-                        config.listen_tcp_endpoints.insert(port, configuration);
-                    }
-                    (EndpointPort::Tcp(port), None) => {
-                        config.listen_tcp_endpoints.remove(&port);
-                    }
-                    (EndpointPort::UnixSocket(path), Some(configuration)) => {
-                        config
-                            .listen_unix_socket_endpoints
-                            .insert(path, configuration);
-                    }
-                    (EndpointPort::UnixSocket(path), None) => {
-                        config.listen_unix_socket_endpoints.remove(&path);
-                    }
-                }
-            }
-
-            for (host_id, err) in errors {
-                if !is_static_host(&host_id) {
-                    config.error_configurations.insert(host_id, err);
-                }
-            }
-        })
-        .await;
+    publish_ports(new_ports, errors, after.get_static_host_ids_lowercase()).await;
 
     listeners_changed
-}
-
-async fn get_live_configuration(port: &EndpointPort) -> Option<ListenConfiguration> {
-    APP_CTX
-        .current_configuration
-        .get(|config| match port {
-            EndpointPort::Tcp(port) => config.listen_tcp_endpoints.get(port).cloned(),
-            EndpointPort::UnixSocket(path) => {
-                config.listen_unix_socket_endpoints.get(path).cloned()
-            }
-        })
-        .await
-}
-
-/// The dynamic hosts of `settings` by the port they are on, each port's in the order of their
-/// ids: two hosts which can not both be served are decided the same way at every read.
-fn dynamic_hosts_by_port(settings: &SettingsCompiled) -> HashMap<EndpointPort, Vec<String>> {
-    let mut result: HashMap<EndpointPort, Vec<String>> = HashMap::new();
-
-    for host_id in &settings.dynamic_host_ids {
-        if let Ok(host_endpoint) = EndpointHttpHostString::new(host_id.to_string()) {
-            result
-                .entry(host_endpoint.get_port())
-                .or_default()
-                .push(host_id.clone());
-        }
-    }
-
-    for host_ids in result.values_mut() {
-        host_ids.sort();
-    }
-
-    result
-}
-
-/// What a port serves with its dynamic hosts taken away: `None` if it served nothing else.
-/// A port with no dynamic host keeps its very configuration.
-fn without_dynamic_hosts(
-    configuration: Option<ListenConfiguration>,
-) -> Option<ListenConfiguration> {
-    match configuration? {
-        ListenConfiguration::Http(config) => {
-            without_dynamic_http_hosts(config).map(ListenConfiguration::Http)
-        }
-        ListenConfiguration::Mcp(config) => {
-            without_dynamic_http_hosts(config).map(ListenConfiguration::Mcp)
-        }
-        ListenConfiguration::Tcp(config) => {
-            if config.dynamic_host {
-                None
-            } else {
-                Some(ListenConfiguration::Tcp(config))
-            }
-        }
-    }
-}
-
-fn without_dynamic_http_hosts(
-    config: Arc<HttpListenPortConfiguration>,
-) -> Option<Arc<HttpListenPortConfiguration>> {
-    if !config.endpoints.iter().any(|itm| itm.dynamic_host) {
-        return Some(config);
-    }
-
-    let endpoints: Vec<_> = config
-        .endpoints
-        .iter()
-        .filter(|itm| !itm.dynamic_host)
-        .cloned()
-        .collect();
-
-    // A port is of the type of its first endpoint: when it was a dynamic one, the port is of
-    // the type of the endpoint which is first now.
-    let listen_endpoint_type = endpoints.first()?.listen_endpoint_type;
-
-    Some(Arc::new(HttpListenPortConfiguration {
-        endpoints,
-        listen_endpoint_type,
-        listen_host: config.listen_host.clone(),
-    }))
 }
 
 /// Refuses a dynamic host which would take the place of what the port serves already, rather

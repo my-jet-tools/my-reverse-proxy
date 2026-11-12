@@ -230,46 +230,63 @@ pub fn build_settings_summary(
         show_error_description_on_error_page: settings.get_show_error_description_on_error_page(),
     };
 
+    let summarize = |host_id: &String,
+                     host: &crate::settings::HostSettings,
+                     dynamic: bool,
+                     additional_host_of: String| {
+        let locations = host
+            .locations
+            .iter()
+            .map(|loc| LocationSettingsSummary {
+                path: loc.path.clone().unwrap_or_default(),
+                proxy_pass_to: loc.proxy_pass_to.clone().unwrap_or_default(),
+                location_type: loc.location_type.clone().unwrap_or_default(),
+                whitelisted_ip: loc.whitelisted_ip.clone().unwrap_or_default(),
+                strip_path: loc.get_strip_path(),
+            })
+            .collect();
+
+        HostSettingsSummary {
+            host_id: host_id.clone(),
+            endpoint_type: host.endpoint.endpoint_type.clone(),
+            debug: host.endpoint.debug.unwrap_or(false),
+            ssl_certificate: host.endpoint.ssl_certificate.clone().unwrap_or_default(),
+            client_certificate_ca: host
+                .endpoint
+                .client_certificate_ca
+                .clone()
+                .unwrap_or_default(),
+            google_auth: host.endpoint.google_auth.clone().unwrap_or_default(),
+            template_id: host.endpoint.template_id.clone().unwrap_or_default(),
+            allowed_users: host.endpoint.allowed_users.clone().unwrap_or_default(),
+            whitelisted_ip: host.endpoint.whitelisted_ip.clone().unwrap_or_default(),
+            hsts: host.endpoint.hsts.unwrap_or(false),
+            dynamic,
+            additional_host_of,
+            locations,
+        }
+    };
+
     let mut hosts: Vec<HostSettingsSummary> = settings
         .hosts
         .iter()
         .map(|(host_id, host)| {
-            let locations = host
-                .locations
-                .iter()
-                .map(|loc| LocationSettingsSummary {
-                    path: loc.path.clone().unwrap_or_default(),
-                    proxy_pass_to: loc.proxy_pass_to.clone().unwrap_or_default(),
-                    location_type: loc.location_type.clone().unwrap_or_default(),
-                    whitelisted_ip: loc.whitelisted_ip.clone().unwrap_or_default(),
-                    strip_path: loc.get_strip_path(),
-                })
-                .collect();
-
-            HostSettingsSummary {
-                host_id: host_id.clone(),
-                endpoint_type: host.endpoint.endpoint_type.clone(),
-                debug: host.endpoint.debug.unwrap_or(false),
-                ssl_certificate: host.endpoint.ssl_certificate.clone().unwrap_or_default(),
-                client_certificate_ca: host
-                    .endpoint
-                    .client_certificate_ca
-                    .clone()
-                    .unwrap_or_default(),
-                google_auth: host.endpoint.google_auth.clone().unwrap_or_default(),
-                template_id: host.endpoint.template_id.clone().unwrap_or_default(),
-                allowed_users: host.endpoint.allowed_users.clone().unwrap_or_default(),
-                whitelisted_ip: host.endpoint.whitelisted_ip.clone().unwrap_or_default(),
-                hsts: host.endpoint.hsts.unwrap_or(false),
-                dynamic: settings.is_dynamic_host(host_id),
-                additional_host_of: settings
-                    .get_additional_host_of(host_id)
-                    .cloned()
-                    .unwrap_or_default(),
-                locations,
-            }
+            summarize(
+                host_id,
+                host,
+                settings.is_dynamic_host(host_id),
+                String::new(),
+            )
         })
         .collect();
+
+    // Each name of `additional_hosts` is listed as a host, with the configuration of the host it
+    // is a name of.
+    for (name, itm) in &settings.additional_hosts {
+        if let Some(host) = settings.hosts.get(&itm.host_id) {
+            hosts.push(summarize(name, host, itm.dynamic, itm.host_id.clone()));
+        }
+    }
 
     hosts.sort_by(|a, b| a.host_id.cmp(&b.host_id));
 

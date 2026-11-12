@@ -19,7 +19,9 @@ use tokio::{
 
 use crate::{
     app::APP_CTX,
-    configurations::{EndpointPort, HttpListenPortConfiguration, ListenConfiguration},
+    configurations::{
+        EndpointPort, HttpEndpointInfo, HttpListenPortConfiguration, ListenConfiguration,
+    },
     settings::{DynamicHostsModel, DynamicHostsSettings, HostSettings},
     settings_compiled::SettingsCompiled,
 };
@@ -671,9 +673,61 @@ fn the_hosts_of_the_files_are_put_on_their_ports_first() {
     );
 }
 
-/// One configuration is served under each host of its `additional_hosts` - of the files, and of
-/// the url. An additional host the files have already stays theirs; one the url does not give
-/// any more goes.
+/// A name of `additional_hosts`, of the files or of the url: an endpoint of its own on the port of
+/// its host, which is the host's endpoint under the name - the very same locations, and with them
+/// the same upstream connections.
+fn assert_is_name_of(
+    configuration: &HttpListenPortConfiguration,
+    name: &str,
+    host_id: &str,
+    dynamic: bool,
+) {
+    let name_endpoint = configuration
+        .endpoints
+        .iter()
+        .find(|itm| itm.as_str() == name)
+        .unwrap_or_else(|| panic!("{name} is not on the port"));
+    let host_endpoint = configuration
+        .endpoints
+        .iter()
+        .find(|itm| itm.as_str() == host_id)
+        .unwrap_or_else(|| panic!("{host_id} is not on the port"));
+
+    assert_eq!(
+        name_endpoint.additional_host_of.as_deref(),
+        Some(host_id),
+        "{name}"
+    );
+    assert_eq!(name_endpoint.dynamic_host, dynamic, "{name}");
+    assert!(host_endpoint.additional_host_of.is_none(), "{host_id}");
+    assert_eq!(name_endpoint.locations.len(), host_endpoint.locations.len());
+    for (name_location, host_location) in
+        name_endpoint.locations.iter().zip(&host_endpoint.locations)
+    {
+        assert!(Arc::ptr_eq(name_location, host_location), "{name}");
+    }
+}
+
+fn endpoint_of(
+    configuration: &HttpListenPortConfiguration,
+    host_id: &str,
+) -> Arc<HttpEndpointInfo> {
+    configuration
+        .endpoints
+        .iter()
+        .find(|itm| itm.as_str() == host_id)
+        .unwrap_or_else(|| panic!("{host_id} is not on the port"))
+        .clone()
+}
+
+fn with_names(mut host_settings: HostSettings, names: &[&String]) -> HostSettings {
+    host_settings.additional_hosts = Some(names.iter().map(|itm| itm.to_string()).collect());
+    host_settings
+}
+
+/// One configuration is served under each name of its `additional_hosts` - of the files, and of
+/// the url. A name the files have already stays theirs; one the url does not give any more goes -
+/// and the host itself is not compiled again for it.
 #[tokio::test]
 async fn a_configuration_is_served_under_each_of_its_additional_hosts() {
     let id = unique_id();
@@ -686,22 +740,20 @@ async fn a_configuration_is_served_under_each_of_its_additional_hosts() {
     let dynamic_name = format!("dynamic-{id}.localhost");
     let dynamic_additional = format!("dynamic-additional-{id}.localhost");
 
-    let with_additional_hosts = |upstream: u16, additional_hosts: &[&String]| {
-        let mut host_settings = host_settings("http", &format!("http://127.0.0.1:{upstream}"));
-        host_settings.additional_hosts =
-            Some(additional_hosts.iter().map(|itm| itm.to_string()).collect());
-        host_settings
-    };
+    let static_host = format!("{static_name}:{port}");
+    let dynamic_host = format!("{dynamic_name}:{port}");
 
-    let mut before = SettingsCompiled::default();
-    for expanded in crate::settings_compiled::expand_additional_hosts(
-        format!("{static_name}:{port}"),
-        with_additional_hosts(static_upstream, &[&static_additional]),
-    )
-    .unwrap()
-    {
-        before.insert_host_of_files(expanded).unwrap();
-    }
+    let mut before = SettingsCompiled {
+        hosts: HashMap::from([(
+            static_host.clone(),
+            with_names(
+                host_settings("http", &format!("http://127.0.0.1:{static_upstream}")),
+                &[&static_additional],
+            ),
+        )]),
+        ..Default::default()
+    };
+    before.resolve_additional_hosts_of_files();
     publish(&before).await;
     serve(port);
 
@@ -712,12 +764,28 @@ async fn a_configuration_is_served_under_each_of_its_additional_hosts() {
             "{name}"
         );
     }
+    assert_is_name_of(
+        &*http_port_configuration(port).await,
+        &format!("{static_additional}:{port}"),
+        &static_host,
+        false,
+    );
+
+    let dynamic_settings = |names: &[&String]| {
+        HashMap::from([(
+            dynamic_host.clone(),
+            with_names(
+                host_settings("http", &format!("http://127.0.0.1:{dynamic_upstream}")),
+                names,
+            ),
+        )])
+    };
 
     let mut after = before.clone();
-    after.set_dynamic_hosts(&HashMap::from([(
-        format!("{dynamic_name}:{port}"),
-        with_additional_hosts(dynamic_upstream, &[&dynamic_additional, &static_additional]),
-    )]));
+    after.set_dynamic_hosts(&dynamic_settings(&[
+        &dynamic_additional,
+        &static_additional,
+    ]));
     assert!(!apply_dynamic_hosts_change(&before, &after).await);
 
     for name in [&dynamic_name, &dynamic_additional] {
@@ -731,15 +799,21 @@ async fn a_configuration_is_served_under_each_of_its_additional_hosts() {
         request(&mut connect(port).await, &static_additional).await,
         served_by("static upstream")
     );
-    assert_eq!(http_port_configuration(port).await.endpoints.len(), 4);
 
-    // The url gives the host without its additional host.
-    let mut without_additional = after.clone();
-    without_additional.set_dynamic_hosts(&HashMap::from([(
-        format!("{dynamic_name}:{port}"),
-        with_additional_hosts(dynamic_upstream, &[]),
-    )]));
-    apply_dynamic_hosts_change(&after, &without_additional).await;
+    let configuration = http_port_configuration(port).await;
+    assert_eq!(configuration.endpoints.len(), 4);
+    assert_is_name_of(
+        &configuration,
+        &format!("{dynamic_additional}:{port}"),
+        &dynamic_host,
+        true,
+    );
+    let dynamic_endpoint = endpoint_of(&configuration, &dynamic_host);
+
+    // The url gives the host without its name: the name goes, the host is the very endpoint.
+    let mut without_name = after.clone();
+    without_name.set_dynamic_hosts(&dynamic_settings(&[]));
+    apply_dynamic_hosts_change(&after, &without_name).await;
 
     assert_not_served(port, &dynamic_additional).await;
     assert_eq!(
@@ -753,29 +827,40 @@ async fn a_configuration_is_served_under_each_of_its_additional_hosts() {
             "{name}"
         );
     }
+
+    let configuration = http_port_configuration(port).await;
+    assert_eq!(configuration.endpoints.len(), 3);
+    assert!(Arc::ptr_eq(
+        &endpoint_of(&configuration, &dynamic_host),
+        &dynamic_endpoint
+    ));
 }
 
-/// The configuration is written in the settings files, and the url gives only more hosts for
-/// it: they are served with that configuration, and go when the url does not give them any more.
+/// The configuration is written in the settings files, and the url gives only names for it:
+/// each is served by the endpoint of that host under its name - nothing is compiled for it - and
+/// goes when the url does not give it any more.
 #[tokio::test]
-async fn the_url_may_give_only_more_hosts_for_a_host_of_the_files() {
+async fn the_url_may_give_only_names_for_a_host_of_the_files() {
     let id = unique_id();
     let upstream = start_upstream("static upstream").await;
     let port = free_port().await;
 
     let static_name = format!("static-{id}.localhost");
+    let static_host = format!("{static_name}:{port}");
     let tenant1 = format!("tenant1-{id}.localhost");
     let tenant2 = format!("tenant2-{id}.localhost");
 
-    let before = settings_of_files(&[(format!("{static_name}:{port}"), upstream)]);
+    let before = settings_of_files(&[(static_host.clone(), upstream)]);
     publish(&before).await;
     serve(port);
+
+    let static_endpoint = endpoint_of(&*http_port_configuration(port).await, &static_host);
 
     let answer = |tenants: &[&String]| {
         let tenants: String = tenants.iter().map(|itm| format!("  - {itm}\n")).collect();
 
         DynamicHostsModel::parse(
-            format!("additional_hosts:\n  {static_name}:{port}:\n{tenants}").as_bytes(),
+            format!("additional_hosts:\n  {static_host}:\n{tenants}").as_bytes(),
         )
         .unwrap()
         .unwrap()
@@ -796,12 +881,16 @@ async fn the_url_may_give_only_more_hosts_for_a_host_of_the_files() {
 
     let configuration = http_port_configuration(port).await;
     assert_eq!(configuration.endpoints.len(), 3);
-    for endpoint in &configuration.endpoints {
-        assert_eq!(
-            endpoint.dynamic_host,
-            !endpoint.as_str().starts_with("static-"),
-            "{}",
-            endpoint.as_str()
+    assert!(Arc::ptr_eq(
+        &endpoint_of(&configuration, &static_host),
+        &static_endpoint
+    ));
+    for tenant in [&tenant1, &tenant2] {
+        assert_is_name_of(
+            &configuration,
+            &format!("{tenant}:{port}"),
+            &static_host,
+            true,
         );
     }
 
@@ -815,6 +904,167 @@ async fn the_url_may_give_only_more_hosts_for_a_host_of_the_files() {
             request(&mut accepted, name).await,
             served_by("static upstream"),
             "{name}"
+        );
+    }
+    assert!(Arc::ptr_eq(
+        &endpoint_of(&*http_port_configuration(port).await, &static_host),
+        &static_endpoint
+    ));
+}
+
+/// A name always follows the endpoint its host is served by now. A host of the files reloaded
+/// on its own - `ReloadEndpoint` - takes its names, of the files and of the url, to its new
+/// endpoint; and a read of the url which comes after that puts its names next to that endpoint
+/// too - even with settings which still have the host as the last full reload left it.
+#[tokio::test]
+async fn a_name_follows_the_endpoint_its_host_is_served_by_now() {
+    let id = unique_id();
+    let old_upstream = start_upstream("old upstream").await;
+    let new_upstream = start_upstream("new upstream").await;
+    let port = free_port().await;
+
+    let static_name = format!("static-{id}.localhost");
+    let static_host = format!("{static_name}:{port}");
+    let static_additional = format!("www-{id}.localhost");
+    let tenant1 = format!("tenant1-{id}.localhost");
+    let tenant2 = format!("tenant2-{id}.localhost");
+
+    let files = |upstream: u16| {
+        let mut result = SettingsCompiled {
+            hosts: HashMap::from([(
+                static_host.clone(),
+                with_names(
+                    host_settings("http", &format!("http://127.0.0.1:{upstream}")),
+                    &[&static_additional],
+                ),
+            )]),
+            ..Default::default()
+        };
+        result.resolve_additional_hosts_of_files();
+        result
+    };
+
+    let answer = |tenants: &[&String]| {
+        let tenants: String = tenants.iter().map(|itm| format!("  - {itm}\n")).collect();
+
+        DynamicHostsModel::parse(
+            format!("additional_hosts:\n  {static_host}:\n{tenants}").as_bytes(),
+        )
+        .unwrap()
+        .unwrap()
+    };
+
+    let before = files(old_upstream);
+    publish(&before).await;
+    serve(port);
+
+    let mut applied = before.clone();
+    applied.set_dynamic_hosts_answer(&answer(&[&tenant1]));
+    apply_dynamic_hosts_change(&before, &applied).await;
+
+    let mut accepted = connect(port).await;
+    for name in [&static_name, &static_additional, &tenant1] {
+        assert_eq!(
+            request(&mut accepted, name).await,
+            served_by("old upstream"),
+            "{name}"
+        );
+    }
+
+    // The files give the host another upstream, and it is reloaded on its own.
+    let mut reloaded = files(new_upstream);
+    reloaded.set_dynamic_hosts_answer(&answer(&[&tenant1]));
+    let not_served = super::apply_reloaded_hosts(
+        Some(&applied),
+        &reloaded,
+        &std::collections::BTreeSet::from([static_host.clone()]),
+    )
+    .await
+    .unwrap();
+    assert!(not_served.is_empty(), "{not_served:?}");
+
+    for name in [&static_name, &static_additional, &tenant1] {
+        assert_eq!(
+            request(&mut accepted, name).await,
+            served_by("new upstream"),
+            "{name}"
+        );
+    }
+
+    // The url gives one more name - read against settings which still have the old upstream.
+    let mut stale = applied.clone();
+    stale.set_dynamic_hosts_answer(&answer(&[&tenant1, &tenant2]));
+    apply_dynamic_hosts_change(&applied, &stale).await;
+
+    for name in [&static_name, &static_additional, &tenant1, &tenant2] {
+        assert_eq!(
+            request(&mut accepted, name).await,
+            served_by("new upstream"),
+            "{name}"
+        );
+    }
+
+    let configuration = http_port_configuration(port).await;
+    assert_is_name_of(
+        &configuration,
+        &format!("{static_additional}:{port}"),
+        &static_host,
+        false,
+    );
+    for tenant in [&tenant1, &tenant2] {
+        assert_is_name_of(
+            &configuration,
+            &format!("{tenant}:{port}"),
+            &static_host,
+            true,
+        );
+    }
+}
+
+/// The host with the very name serves a request; the host without a name serves the rest - on
+/// one connection too, which asks for one and then for the other.
+#[tokio::test]
+async fn the_host_without_a_name_serves_what_no_other_host_is_named_for() {
+    let id = unique_id();
+    let named_upstream = start_upstream("named upstream").await;
+    let nameless_upstream = start_upstream("nameless upstream").await;
+    let port = free_port().await;
+
+    let named = format!("named-{id}.localhost");
+    let additional = format!("www-{id}.localhost");
+
+    let mut settings = SettingsCompiled {
+        hosts: HashMap::from([
+            (
+                format!("{named}:{port}"),
+                with_names(
+                    host_settings("http", &format!("http://127.0.0.1:{named_upstream}")),
+                    &[&additional],
+                ),
+            ),
+            (
+                port.to_string(),
+                host_settings("http", &format!("http://127.0.0.1:{nameless_upstream}")),
+            ),
+        ]),
+        ..Default::default()
+    };
+    settings.resolve_additional_hosts_of_files();
+    publish(&settings).await;
+    serve(port);
+
+    let mut accepted = connect(port).await;
+    for (host, expected) in [
+        ("other.localhost", "nameless upstream"),
+        (named.as_str(), "named upstream"),
+        (additional.as_str(), "named upstream"),
+        ("another.localhost", "nameless upstream"),
+        (named.as_str(), "named upstream"),
+    ] {
+        assert_eq!(
+            request(&mut accepted, host).await,
+            served_by(expected),
+            "{host}"
         );
     }
 }
@@ -893,24 +1143,29 @@ fn settings_of_files(items: &[(String, u16)]) -> SettingsCompiled {
 }
 
 /// What a reload of the settings does with the hosts of the files: each is compiled next to
-/// what its port has already, and published into the live configuration.
+/// what its port has already, the names of their `additional_hosts` are put next to them, and
+/// the ports are published into the live configuration.
 async fn publish(settings: &SettingsCompiled) {
-    for (host_id, host_settings) in &settings.hosts {
-        let endpoint_host = settings.get_endpoint_host_string(host_id).unwrap();
-        let port = endpoint_host.get_port();
-        let existing = live_configuration(&port).await;
+    use super::put_together_port::*;
 
-        let configuration = crate::scripts::compile_host_configuration(
-            settings,
-            endpoint_host,
-            host_settings,
-            existing,
-        )
-        .await
-        .unwrap();
+    let mut errors = FoundErrors::default();
+    let hosts_by_port = hosts_by_port(
+        settings,
+        |host_id| !settings.is_dynamic_host(host_id),
+        &mut errors,
+    );
+    let names_by_port = names_by_port(settings, |_, itm| !itm.dynamic);
+
+    for (port, host_ids) in hosts_by_port {
+        let existing = live_configuration(&port).await;
+        let configuration = put_hosts(settings, existing, &host_ids, true, &mut errors)
+            .await
+            .unwrap();
+        let names = names_by_port.get(&port).cloned().unwrap_or_default();
+        let configuration = put_names(configuration, &names, &mut errors).unwrap();
 
         let EndpointPort::Tcp(port) = port else {
-            panic!("{host_id} is not a tcp port");
+            panic!("{port:?} is not a tcp port");
         };
 
         APP_CTX
@@ -920,6 +1175,8 @@ async fn publish(settings: &SettingsCompiled) {
             })
             .await;
     }
+
+    assert!(errors.describe().is_empty(), "{:?}", errors.describe());
 }
 
 async fn live_configuration(port: &EndpointPort) -> Option<ListenConfiguration> {

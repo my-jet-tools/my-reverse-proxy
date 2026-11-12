@@ -8,6 +8,8 @@ use crate::{
     settings_compiled::SettingsCompiled,
 };
 
+use super::put_together_port::*;
+
 pub async fn load_everything_from_settings() -> Result<(), String> {
     let apply_lock = crate::app::APP_CTX.settings_apply_lock.lock().await;
 
@@ -27,84 +29,63 @@ pub async fn load_everything_from_settings() -> Result<(), String> {
     let mut listen_tcp_endpoints: HashMap<u16, ListenConfiguration> = HashMap::new();
     let mut listen_unix_socket_endpoints: HashMap<Arc<String>, ListenConfiguration> =
         HashMap::new();
-    let mut error_configurations: BTreeMap<String, String> = BTreeMap::new();
 
-    // A dynamic host refused under the id of a host of the files is not that host's error.
-    let static_host_ids = settings_model.get_static_host_ids_lowercase();
+    let mut errors = FoundErrors::default();
+
     for (host_id, err) in &settings_model.dynamic_host_errors {
-        println!("Dynamic host {host_id} is not served. Err is: {err}");
-        if !static_host_ids.contains(&host_id.to_ascii_lowercase()) {
-            error_configurations.insert(host_id.clone(), err.clone());
+        errors.add_dynamic(host_id, err.clone());
+    }
+
+    for host_id in settings_model.additional_host_errors.keys() {
+        errors.add_ignored_entries(&settings_model, host_id);
+    }
+
+    let hosts_by_port = hosts_by_port(&settings_model, |_| true, &mut errors);
+    let mut names_by_port = names_by_port(&settings_model, |_, _| true);
+
+    let mut ports: Vec<(EndpointPort, Vec<&String>)> = hosts_by_port.into_iter().collect();
+    // A name whose port has no host: its host is not served there - it is told about.
+    for port in names_by_port.keys() {
+        if !ports.iter().any(|(itm, _)| itm == port) {
+            ports.push((port.clone(), Vec::new()));
         }
     }
 
-    for (host_id, host_settings) in settings_model.hosts_in_apply_order() {
-        println!("HostId: {}", host_id);
-        let endpoint_host = match settings_model.get_endpoint_host_string(host_id) {
-            Ok(host_id) => host_id,
-            Err(err) => {
-                println!(
-                    "Error applying variables to host {}. Err is: {}",
-                    host_id, err
-                );
-                continue;
-            }
+    for (port, host_ids) in ports {
+        // Not strict: a host which does not compile is left out with its error, and the rest
+        // are served.
+        let configuration = put_hosts(&settings_model, None, &host_ids, false, &mut errors).await?;
+        let names = names_by_port.remove(&port).unwrap_or_default();
+        let configuration = put_names(configuration, &names, &mut errors);
+
+        let Some(configuration) = configuration else {
+            continue;
         };
 
-        // What we've already accumulated for this port (multiple hosts can share one port).
-        let existing = match endpoint_host.get_port() {
-            EndpointPort::Tcp(port) => listen_tcp_endpoints.get(&port).cloned(),
+        match port {
+            EndpointPort::Tcp(port) => {
+                listen_tcp_endpoints.insert(port, configuration);
+            }
             EndpointPort::UnixSocket(unix_host) => {
-                listen_unix_socket_endpoints.get(&unix_host).cloned()
-            }
-        };
-
-        if settings_model.is_dynamic_host(host_id) {
-            if let Some(existing) = existing.as_ref() {
-                if let Err(err) =
-                    crate::flows::check_dynamic_host_fits(existing, &endpoint_host, host_settings)
-                {
-                    println!("Dynamic host {host_id} is not served. Err is: {err}");
-                    error_configurations.insert(endpoint_host.as_str().to_string(), err);
-                    continue;
-                }
-            }
-        }
-
-        match crate::scripts::compile_host_configuration(
-            &settings_model,
-            endpoint_host.clone(),
-            host_settings,
-            existing,
-        )
-        .await
-        {
-            Ok(configuration) => match endpoint_host.get_port() {
-                EndpointPort::Tcp(port) => {
-                    listen_tcp_endpoints.insert(port, configuration);
-                }
-                EndpointPort::UnixSocket(unix_host) => {
-                    listen_unix_socket_endpoints.insert(unix_host, configuration);
-                }
-            },
-            Err(err) => {
-                println!(
-                    "Error loading host configuration {}. Err is: {}",
-                    endpoint_host.as_str(),
-                    err
-                );
-                error_configurations.insert(endpoint_host.as_str().to_string(), err);
+                listen_unix_socket_endpoints.insert(unix_host, configuration);
             }
         }
     }
+
+    errors.print();
 
     println!("Applying new configuration (atomic swap)");
+
+    let static_host_ids = settings_model.get_static_host_ids_lowercase();
 
     crate::app::APP_CTX
         .current_configuration
         .write(move |config| {
             config.listen_tcp_endpoints = listen_tcp_endpoints;
             config.listen_unix_socket_endpoints = listen_unix_socket_endpoints;
+
+            let mut error_configurations = BTreeMap::new();
+            errors.apply(&mut error_configurations, &static_host_ids);
             config.error_configurations = error_configurations;
         })
         .await;
