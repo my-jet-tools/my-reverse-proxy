@@ -81,7 +81,8 @@ async fn the_hosts_are_read_from_the_url_in_yaml_and_in_json() {
         let hosts = read_dynamic_hosts(&url_settings(port))
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .hosts;
 
         assert_eq!(hosts.len(), 1, "{content_type}");
         assert!(hosts.contains_key("a.example.com:8000"), "{content_type}");
@@ -118,7 +119,8 @@ async fn hosts_with_nothing_in_them_are_no_hosts() {
         let hosts = read_dynamic_hosts(&url_settings(port))
             .await
             .unwrap()
-            .unwrap_or_else(|| panic!("{response:?} is taken for a blank answer"));
+            .unwrap_or_else(|| panic!("{response:?} is taken for a blank answer"))
+            .hosts;
 
         assert!(hosts.is_empty(), "{response:?}");
     }
@@ -525,8 +527,9 @@ async fn the_hosts_of_the_url_are_served_and_follow_what_it_answers() {
     assert!(APP_CTX.dynamic_hosts.get_last_error().is_none());
     assert!(APP_CTX
         .dynamic_hosts
-        .get_hosts(&url_settings(url_port).url)
+        .get_answer(&url_settings(url_port).url)
         .unwrap()
+        .hosts
         .contains_key(&dynamic_host));
     assert!(Arc::ptr_eq(
         &http_port_configuration(port).await,
@@ -561,7 +564,7 @@ async fn the_hosts_of_the_url_are_served_and_follow_what_it_answers() {
     assert_eq!(super::refresh_dynamic_hosts().await, None);
     assert!(APP_CTX
         .dynamic_hosts
-        .get_hosts(&url_settings(url_port).url)
+        .get_answer(&url_settings(url_port).url)
         .is_none());
 }
 
@@ -666,6 +669,154 @@ fn the_hosts_of_the_files_are_put_on_their_ports_first() {
         order[2..],
         ["a.localhost:7000", "b.localhost:7000", "c.localhost:7000"]
     );
+}
+
+/// One configuration is served under each host of its `additional_hosts` - of the files, and of
+/// the url. An additional host the files have already stays theirs; one the url does not give
+/// any more goes.
+#[tokio::test]
+async fn a_configuration_is_served_under_each_of_its_additional_hosts() {
+    let id = unique_id();
+    let static_upstream = start_upstream("static upstream").await;
+    let dynamic_upstream = start_upstream("dynamic upstream").await;
+    let port = free_port().await;
+
+    let static_name = format!("static-{id}.localhost");
+    let static_additional = format!("static-additional-{id}.localhost");
+    let dynamic_name = format!("dynamic-{id}.localhost");
+    let dynamic_additional = format!("dynamic-additional-{id}.localhost");
+
+    let with_additional_hosts = |upstream: u16, additional_hosts: &[&String]| {
+        let mut host_settings = host_settings("http", &format!("http://127.0.0.1:{upstream}"));
+        host_settings.additional_hosts =
+            Some(additional_hosts.iter().map(|itm| itm.to_string()).collect());
+        host_settings
+    };
+
+    let mut before = SettingsCompiled::default();
+    for expanded in crate::settings_compiled::expand_additional_hosts(
+        format!("{static_name}:{port}"),
+        with_additional_hosts(static_upstream, &[&static_additional]),
+    )
+    .unwrap()
+    {
+        before.insert_host_of_files(expanded).unwrap();
+    }
+    publish(&before).await;
+    serve(port);
+
+    for name in [&static_name, &static_additional] {
+        assert_eq!(
+            request(&mut connect(port).await, name).await,
+            served_by("static upstream"),
+            "{name}"
+        );
+    }
+
+    let mut after = before.clone();
+    after.set_dynamic_hosts(&HashMap::from([(
+        format!("{dynamic_name}:{port}"),
+        with_additional_hosts(dynamic_upstream, &[&dynamic_additional, &static_additional]),
+    )]));
+    assert!(!apply_dynamic_hosts_change(&before, &after).await);
+
+    for name in [&dynamic_name, &dynamic_additional] {
+        assert_eq!(
+            request(&mut connect(port).await, name).await,
+            served_by("dynamic upstream"),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        request(&mut connect(port).await, &static_additional).await,
+        served_by("static upstream")
+    );
+    assert_eq!(http_port_configuration(port).await.endpoints.len(), 4);
+
+    // The url gives the host without its additional host.
+    let mut without_additional = after.clone();
+    without_additional.set_dynamic_hosts(&HashMap::from([(
+        format!("{dynamic_name}:{port}"),
+        with_additional_hosts(dynamic_upstream, &[]),
+    )]));
+    apply_dynamic_hosts_change(&after, &without_additional).await;
+
+    assert_not_served(port, &dynamic_additional).await;
+    assert_eq!(
+        request(&mut connect(port).await, &dynamic_name).await,
+        served_by("dynamic upstream")
+    );
+    for name in [&static_name, &static_additional] {
+        assert_eq!(
+            request(&mut connect(port).await, name).await,
+            served_by("static upstream"),
+            "{name}"
+        );
+    }
+}
+
+/// The configuration is written in the settings files, and the url gives only more hosts for
+/// it: they are served with that configuration, and go when the url does not give them any more.
+#[tokio::test]
+async fn the_url_may_give_only_more_hosts_for_a_host_of_the_files() {
+    let id = unique_id();
+    let upstream = start_upstream("static upstream").await;
+    let port = free_port().await;
+
+    let static_name = format!("static-{id}.localhost");
+    let tenant1 = format!("tenant1-{id}.localhost");
+    let tenant2 = format!("tenant2-{id}.localhost");
+
+    let before = settings_of_files(&[(format!("{static_name}:{port}"), upstream)]);
+    publish(&before).await;
+    serve(port);
+
+    let answer = |tenants: &[&String]| {
+        let tenants: String = tenants.iter().map(|itm| format!("  - {itm}\n")).collect();
+
+        DynamicHostsModel::parse(
+            format!("additional_hosts:\n  {static_name}:{port}:\n{tenants}").as_bytes(),
+        )
+        .unwrap()
+        .unwrap()
+    };
+
+    let mut after = before.clone();
+    after.set_dynamic_hosts_answer(&answer(&[&tenant1, &tenant2]));
+    assert!(!apply_dynamic_hosts_change(&before, &after).await);
+
+    let mut accepted = connect(port).await;
+    for name in [&static_name, &tenant1, &tenant2] {
+        assert_eq!(
+            request(&mut accepted, name).await,
+            served_by("static upstream"),
+            "{name}"
+        );
+    }
+
+    let configuration = http_port_configuration(port).await;
+    assert_eq!(configuration.endpoints.len(), 3);
+    for endpoint in &configuration.endpoints {
+        assert_eq!(
+            endpoint.dynamic_host,
+            !endpoint.as_str().starts_with("static-"),
+            "{}",
+            endpoint.as_str()
+        );
+    }
+
+    let mut fewer = after.clone();
+    fewer.set_dynamic_hosts_answer(&answer(&[&tenant2]));
+    apply_dynamic_hosts_change(&after, &fewer).await;
+
+    assert_not_served(port, &tenant1).await;
+    for name in [&static_name, &tenant2] {
+        assert_eq!(
+            request(&mut accepted, name).await,
+            served_by("static upstream"),
+            "{name}"
+        );
+    }
 }
 
 /// A server which answers every connection with what `answer` holds at the time.

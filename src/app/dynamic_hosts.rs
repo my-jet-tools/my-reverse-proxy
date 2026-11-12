@@ -3,10 +3,10 @@ use std::{collections::HashMap, sync::Arc};
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use crate::settings::HostSettings;
+use crate::settings::{DynamicHostsModel, HostSettings};
 
-/// The hosts last read from `dynamic_hosts.url`, as they were read - before the variables are
-/// put into them. A settings reload compiles them next to the hosts of the files, so they are
+/// What `dynamic_hosts.url` answered with last, as it was read - before the variables are put
+/// into it. A settings reload compiles its hosts next to the hosts of the files, so they are
 /// served after it as they were before.
 pub struct DynamicHosts {
     inner: Mutex<DynamicHostsInner>,
@@ -15,9 +15,9 @@ pub struct DynamicHosts {
 
 #[derive(Default)]
 struct DynamicHostsInner {
-    /// The url `hosts` were read from.
+    /// The url `answer` was read from.
     url: Option<String>,
-    hosts: Arc<HashMap<String, HostSettings>>,
+    answer: Arc<DynamicHostsModel>,
     /// Why the last read of the url failed - `None` once a read succeeds.
     last_error: Option<String>,
 }
@@ -30,31 +30,32 @@ impl DynamicHosts {
         }
     }
 
-    /// The hosts read from `url` - `None` if they were read from another url, or not yet.
-    pub fn get_hosts(&self, url: &str) -> Option<Arc<HashMap<String, HostSettings>>> {
+    /// What `url` answered with - `None` if the answer was read from another url, or not yet.
+    pub fn get_answer(&self, url: &str) -> Option<Arc<DynamicHostsModel>> {
         let inner = self.inner.lock();
 
         if inner.url.as_deref() != Some(url) {
             return None;
         }
 
-        Some(inner.hosts.clone())
+        Some(inner.answer.clone())
     }
 
-    pub fn set_hosts(&self, url: String, hosts: Arc<HashMap<String, HostSettings>>) {
+    pub fn set_answer(&self, url: String, answer: Arc<DynamicHostsModel>) {
         let mut inner = self.inner.lock();
         inner.url = Some(url);
-        inner.hosts = hosts;
+        inner.answer = answer;
     }
 
-    /// Whether `hosts` are the ones read from `url` before - written the same way or not.
-    pub fn has_same_hosts(&self, url: &str, hosts: &HashMap<String, HostSettings>) -> bool {
-        let current = match self.get_hosts(url) {
+    /// Whether `answer` is what `url` answered with before - written the same way or not.
+    pub fn has_same_answer(&self, url: &str, answer: &DynamicHostsModel) -> bool {
+        let current = match self.get_answer(url) {
             Some(current) => current,
             None => return false,
         };
 
-        same_hosts(current.as_ref(), hosts)
+        same_hosts(&current.hosts, &answer.hosts)
+            && current.additional_hosts == answer.additional_hosts
     }
 
     /// The settings have no `dynamic_hosts` any more.
@@ -121,29 +122,57 @@ pub fn same_host(a: &HostSettings, b: &HostSettings) -> bool {
 mod tests {
     use super::*;
 
+    fn answer(yaml: &str) -> DynamicHostsModel {
+        DynamicHostsModel::parse(yaml.as_bytes()).unwrap().unwrap()
+    }
+
     fn hosts(yaml: &str) -> HashMap<String, HostSettings> {
-        crate::settings::DynamicHostsModel::parse(yaml.as_bytes())
-            .unwrap()
-            .unwrap()
-            .hosts
+        answer(yaml).hosts
     }
 
     const HOSTS: &str = "hosts:\n  a.example.com:8000:\n    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n      path: /\n";
 
     #[test]
-    fn the_hosts_are_of_the_url_they_were_read_from() {
+    fn the_answer_is_of_the_url_it_was_read_from() {
         let dynamic_hosts = DynamicHosts::new();
-        assert!(dynamic_hosts.get_hosts("http://a/hosts").is_none());
+        assert!(dynamic_hosts.get_answer("http://a/hosts").is_none());
 
-        dynamic_hosts.set_hosts("http://a/hosts".to_string(), Arc::new(hosts(HOSTS)));
+        dynamic_hosts.set_answer("http://a/hosts".to_string(), Arc::new(answer(HOSTS)));
 
-        assert_eq!(dynamic_hosts.get_hosts("http://a/hosts").unwrap().len(), 1);
-        assert!(dynamic_hosts.get_hosts("http://b/hosts").is_none());
-        assert!(dynamic_hosts.has_same_hosts("http://a/hosts", &hosts(HOSTS)));
-        assert!(!dynamic_hosts.has_same_hosts("http://b/hosts", &hosts(HOSTS)));
+        assert_eq!(
+            dynamic_hosts
+                .get_answer("http://a/hosts")
+                .unwrap()
+                .hosts
+                .len(),
+            1
+        );
+        assert!(dynamic_hosts.get_answer("http://b/hosts").is_none());
+        assert!(dynamic_hosts.has_same_answer("http://a/hosts", &answer(HOSTS)));
+        assert!(!dynamic_hosts.has_same_answer("http://b/hosts", &answer(HOSTS)));
 
         dynamic_hosts.clear();
-        assert!(dynamic_hosts.get_hosts("http://a/hosts").is_none());
+        assert!(dynamic_hosts.get_answer("http://a/hosts").is_none());
+    }
+
+    /// The additional hosts of the answer are a part of it: another list is another answer.
+    #[test]
+    fn other_additional_hosts_are_another_answer() {
+        let with_additional_hosts =
+            format!("{HOSTS}additional_hosts:\n  a.example.com:8000:\n  - b.example.com\n");
+
+        let dynamic_hosts = DynamicHosts::new();
+        dynamic_hosts.set_answer(
+            "http://a/hosts".to_string(),
+            Arc::new(answer(&with_additional_hosts)),
+        );
+
+        assert!(dynamic_hosts.has_same_answer("http://a/hosts", &answer(&with_additional_hosts)));
+        assert!(!dynamic_hosts.has_same_answer("http://a/hosts", &answer(HOSTS)));
+        assert!(!dynamic_hosts.has_same_answer(
+            "http://a/hosts",
+            &answer(&with_additional_hosts.replace("b.example.com", "c.example.com"))
+        ));
     }
 
     #[test]

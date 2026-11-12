@@ -36,15 +36,15 @@ pub async fn refresh_dynamic_hosts() -> Option<Duration> {
                 println!("Dynamic hosts: {} is read again", settings.url);
             }
 
-            let Some(hosts) = answer else {
+            let Some(answer) = answer else {
                 return Some(settings.get_refresh_interval());
             };
 
             if !APP_CTX
                 .dynamic_hosts
-                .has_same_hosts(settings.url.as_str(), &hosts)
+                .has_same_answer(settings.url.as_str(), &answer)
             {
-                apply_dynamic_hosts(settings.url.as_str(), hosts).await;
+                apply_dynamic_hosts(settings.url.as_str(), answer).await;
             }
         }
         Err(err) => {
@@ -60,12 +60,12 @@ pub async fn refresh_dynamic_hosts() -> Option<Duration> {
     Some(settings.get_refresh_interval())
 }
 
-/// The hosts `dynamic_hosts.url` answers with - `None` if it answers `2xx` with a blank body,
-/// which says nothing. Any answer but `2xx` is a failure. Neither is ever no hosts: a url which
-/// is restarted must not take every dynamic host away - no hosts are `hosts: {}`.
+/// What `dynamic_hosts.url` answers with - `None` if it answers `2xx` with a blank body, which
+/// says nothing. Any answer but `2xx` is a failure. Neither is ever no hosts: a url which is
+/// restarted must not take every dynamic host away - no hosts are `hosts: {}`.
 pub async fn read_dynamic_hosts(
     settings: &DynamicHostsSettings,
-) -> Result<Option<HashMap<String, HostSettings>>, String> {
+) -> Result<Option<DynamicHostsModel>, String> {
     let mut response = FlUrl::new(settings.url.as_str())
         .set_timeout(settings.get_request_timeout())
         .get()
@@ -85,12 +85,13 @@ pub async fn read_dynamic_hosts(
         .await
         .map_err(|err| format!("the answer can not be read: {err}"))?;
 
-    Ok(DynamicHostsModel::parse(&body)?.map(|model| model.hosts))
+    DynamicHostsModel::parse(&body)
 }
 
-/// Serves `hosts`, read from `url`, in place of the dynamic hosts served before. Nothing of the
-/// settings files is read again: the hosts of the files stay as the last reload left them.
-async fn apply_dynamic_hosts(url: &str, hosts: HashMap<String, HostSettings>) {
+/// Serves the hosts of `answer`, read from `url`, in place of the dynamic hosts served before.
+/// Nothing of the settings files is read again: the hosts of the files stay as the last reload
+/// left them - and so does the configuration the additional hosts of the answer are served with.
+async fn apply_dynamic_hosts(url: &str, answer: DynamicHostsModel) {
     let _apply_lock = APP_CTX.settings_apply_lock.lock().await;
 
     let Some(before) = APP_CTX.applied_settings.load_full() else {
@@ -104,7 +105,7 @@ async fn apply_dynamic_hosts(url: &str, hosts: HashMap<String, HostSettings>) {
     }
 
     let mut after = before.as_ref().clone();
-    after.set_dynamic_hosts(&hosts);
+    after.set_dynamic_hosts_answer(&answer);
 
     println!(
         "Dynamic hosts: {} hosts are read from {}",
@@ -114,7 +115,7 @@ async fn apply_dynamic_hosts(url: &str, hosts: HashMap<String, HostSettings>) {
 
     APP_CTX
         .dynamic_hosts
-        .set_hosts(url.to_string(), Arc::new(hosts));
+        .set_answer(url.to_string(), Arc::new(answer));
 
     let listeners_changed = apply_dynamic_hosts_change(&before, &after).await;
 

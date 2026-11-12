@@ -77,6 +77,11 @@ pub struct HostSettingsSummary {
     )]
     pub dynamic: bool,
 
+    #[property(
+        description = "The host whose additional_hosts this host is in, and whose configuration it is served with. Empty for a host written as a key of hosts"
+    )]
+    pub additional_host_of: String,
+
     #[property(description = "Locations under this host")]
     pub locations: Vec<LocationSettingsSummary>,
 }
@@ -257,6 +262,10 @@ pub fn build_settings_summary(
                 whitelisted_ip: host.endpoint.whitelisted_ip.clone().unwrap_or_default(),
                 hsts: host.endpoint.hsts.unwrap_or(false),
                 dynamic: settings.is_dynamic_host(host_id),
+                additional_host_of: settings
+                    .get_additional_host_of(host_id)
+                    .cloned()
+                    .unwrap_or_default(),
                 locations,
             }
         })

@@ -126,6 +126,7 @@ mod tests {
         hosts.insert(
             "localhost:9000".to_string(),
             HostSettings {
+                additional_hosts: None,
                 endpoint: EndpointSettings {
                     endpoint_type: "http1".to_owned(),
                     ssl_certificate: None,

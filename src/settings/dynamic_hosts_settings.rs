@@ -63,15 +63,19 @@ impl DynamicHostsSettings {
     }
 }
 
-/// What `dynamic_hosts.url` answers with: the `hosts:` of a settings file, in YAML - read by the
-/// same parser as the settings files.
-/// Nothing else of a settings file is read from there - another key is an error rather than
-/// quietly left out.
+/// What `dynamic_hosts.url` answers with, in YAML - read by the same parser as the settings
+/// files: the `hosts:` of a settings file, and `additional_hosts:` for hosts which have their
+/// configuration already. Either may be left out. Nothing else of a settings file is read from
+/// there - another key is an error rather than quietly left out.
 #[derive(Serialize, Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DynamicHostsModel {
     #[serde(default, deserialize_with = "super::null_as_default")]
     pub hosts: HashMap<String, HostSettings>,
+    /// A host of the settings files - or of `hosts` above - and more hosts which are served with
+    /// its configuration, as if they were in its `additional_hosts`.
+    #[serde(default, deserialize_with = "super::null_as_default")]
+    pub additional_hosts: HashMap<String, Vec<String>>,
 }
 
 impl DynamicHostsModel {
@@ -177,6 +181,27 @@ mod tests {
                 Some("http://127.0.0.1:9000")
             );
         }
+    }
+
+    /// More hosts for a configuration of the settings files, and nothing else: the url need
+    /// not give a configuration of its own.
+    #[test]
+    fn the_answer_may_be_additional_hosts_only() {
+        let yaml = "additional_hosts:\n  example.com:443:\n  - tenant1.example.com\n  - tenant2.example.com:8443\n  other.example.com:443: []\n";
+
+        let model = DynamicHostsModel::parse(yaml.as_bytes()).unwrap().unwrap();
+
+        assert!(model.hosts.is_empty());
+        assert_eq!(
+            model.additional_hosts["example.com:443"],
+            ["tenant1.example.com", "tenant2.example.com:8443"]
+        );
+        assert!(model.additional_hosts["other.example.com:443"].is_empty());
+
+        let model = DynamicHostsModel::parse(b"additional_hosts:\n")
+            .unwrap()
+            .unwrap();
+        assert!(model.additional_hosts.is_empty());
     }
 
     /// The url gives hosts and nothing else: a certificate or a variable there would be read by
