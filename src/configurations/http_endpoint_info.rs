@@ -41,6 +41,9 @@ pub struct HttpEndpointInfo {
     pub client_timeouts: crate::types::ClientTimeouts,
     /// `Some`: the endpoint was given an access setting it can not apply, and serves nobody.
     pub not_served_reason: Option<NotServedReason>,
+    /// The host came from `dynamic_hosts.url`, not from a settings file: a read of the url
+    /// replaces it, and never an endpoint of the settings files.
+    pub dynamic_host: bool,
 }
 
 /// Everything an endpoint is compiled from.
@@ -70,6 +73,7 @@ pub struct HttpEndpointInfoParams {
     pub timeouts: crate::types::HttpTimeouts,
     pub client_timeouts: crate::types::ClientTimeouts,
     pub not_served_reason: Option<NotServedReason>,
+    pub dynamic_host: bool,
 }
 
 impl HttpEndpointInfo {
@@ -95,6 +99,7 @@ impl HttpEndpointInfo {
             timeouts,
             client_timeouts,
             not_served_reason,
+            dynamic_host,
         } = params;
 
         if debug {
@@ -136,6 +141,7 @@ impl HttpEndpointInfo {
             timeouts,
             client_timeouts,
             not_served_reason,
+            dynamic_host,
         }
     }
 

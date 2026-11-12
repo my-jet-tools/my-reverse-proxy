@@ -157,6 +157,57 @@ name there is refused, not resolved. The part before `@` is the bare domain - th
 ip. A malformed url is reported the same way as an unreachable source. The form applies to the resources in the table above when they are fetched directly - not
 behind `ssh:...->`, and not to `proxy_pass_to`, whose upstreams are connected to by a different path.
 
+## Dynamic hosts
+
+More hosts can be read from a url, on a timer, next to the hosts of the settings files:
+
+```yaml
+dynamic_hosts:
+  url: https://config.internal/proxy/hosts?env=${env}   # variables are substituted, as in any source
+  refresh_interval: 10000   # ms, optional, default 10000, at least 1000
+  request_timeout: 10000    # ms, optional, default 10000 - the request and its whole answer
+```
+
+The url answers with the `hosts:` of a settings file - YAML, or the same in JSON - and with nothing else:
+
+```yaml
+hosts:
+  tenant1.example.com:443:
+    endpoint:
+      type: https2
+      ssl_certificate: wildcard_cert      # declared in the settings files, or uploaded at runtime
+    locations:
+    - proxy_pass_to: http://10.0.0.5:8080
+```
+
+- **Each read replaces the dynamic hosts of the read before.** A host the url does not give any more is no
+  longer served. `hosts: {}` (`{"hosts":{}}`) means there are no dynamic hosts.
+- **A blank answer changes nothing.** A `2xx` - `204` included - whose body is empty, or nothing but spaces and
+  line breaks, says nothing: the hosts read before stay served, and nothing is printed. It is not a failure.
+- **Only the ports whose dynamic hosts changed are touched.** Such a port gets the hosts of the settings files
+  it already had plus the new dynamic hosts. The settings files are not read again. A connection that is already
+  open picks up the change on its next request, and a new connection sees it right away. A dynamic host can be
+  on a port of its own: that port's listener is started, and stopped once it has no hosts left. A read
+  that gives the same hosts changes nothing.
+- **A failed read changes nothing.** If the url does not answer, answers with anything but `2xx`, or with
+  something that is not `hosts:`, the hosts read before stay served. The failure is printed once, and so is
+  the url coming back.
+- **A host of the settings files is never replaced.** A dynamic host with the same id (letter case aside) is
+  refused. So is a `type: tcp` dynamic host on a port that already has hosts, and an http host on a port of a
+  `type: tcp` endpoint. A dynamic host that can not be compiled (a `client_certificate_ca` that is not declared,
+  a missing variable, a wrong type) is refused on its own, and the rest are served. Every refusal is printed. The reason is also listed with
+  the configuration errors, under the host's id. A refusal for an id the settings files have is the exception:
+  it is listed in `dynamic_hosts.refused_hosts` instead, so it is not mistaken for that host's own error.
+- **An `ssl_certificate` id no settings file declares is not a refusal.** The host is served, and its TLS
+  handshakes are cut until a certificate is uploaded under that id - see "Certificates provided at runtime".
+  An uploaded certificate is held in memory only: after a restart it is to be uploaded again.
+- **A reload of the settings keeps the dynamic hosts** and reads the url right away, so a changed `url`
+  takes effect immediately. The hosts of the old url are not served after the change.
+- `dynamic_hosts` can be declared in one settings file only. `get_settings` / `get_applied_settings` (MCP)
+  mark each host `dynamic`, and list the refused hosts and the last read error.
+
+Use `https://`: whoever can answer for this url decides where traffic for the hosts it names goes.
+
 ## Certificates provided at runtime
 
 A TLS server certificate and a client-certificate CA can both be **delivered while the proxy is running**,

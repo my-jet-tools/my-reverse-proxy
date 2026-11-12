@@ -69,6 +69,10 @@ async fn main() {
         .await
         .expect("Failed to load initial settings");
 
+    // The hosts of `dynamic_hosts.url`: read right away - the load above asked for it - and
+    // then every `refresh_interval`.
+    crate::app::spawn_named("dynamic_hosts", crate::timers::dynamic_hosts_timer());
+
     let mut my_timer = MyTimer::new(Duration::from_secs(3600), my_logger::LOGGER.clone());
 
     my_timer.register_timer("CRL Refresh", Arc::new(CrlRefresherTimer));

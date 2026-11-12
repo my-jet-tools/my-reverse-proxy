@@ -1,6 +1,8 @@
 use crate::{configurations::EndpointHttpHostString, settings_compiled::SettingsCompiled};
 
 pub async fn reload_endpoint_configuration(host_id_to_refresh: &str) -> Result<String, String> {
+    let _apply_lock = crate::app::APP_CTX.settings_apply_lock.lock().await;
+
     let settings_model = SettingsCompiled::load_settings().await?;
 
     for (host_id, host_settings) in &settings_model.hosts {

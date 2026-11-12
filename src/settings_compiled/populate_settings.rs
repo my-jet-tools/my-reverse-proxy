@@ -3,12 +3,24 @@ use crate::settings::*;
 use super::{SettingsCompiled, VariablesCompiled};
 
 impl SettingsCompiled {
+    /// The settings files, and the hosts last read from `dynamic_hosts.url` next to their hosts.
     pub async fn load_settings() -> Result<Self, String> {
         let mut result = Self::default();
 
         let settings_model = crate::settings::SettingsModel::load_async(None).await?;
         let include_settings = load_includes(&settings_model).await?;
         result.populate(settings_model, include_settings)?;
+
+        // Only the hosts of the url the settings name now: after the url is changed, the hosts
+        // of the one before are not served until the new one is read.
+        if let Some(dynamic_hosts) = result.dynamic_hosts.as_ref() {
+            if let Some(hosts) = crate::app::APP_CTX
+                .dynamic_hosts
+                .get_hosts(dynamic_hosts.url.as_str())
+            {
+                result.set_dynamic_hosts(&hosts);
+            }
+        }
 
         Ok(result)
     }
@@ -47,6 +59,7 @@ impl SettingsCompiled {
         self.populate_ip_white_lists(&mut settings_model, &variables)?;
         self.populate_gateway_server(&mut settings_model, &variables)?;
         self.populate_gateway_client(&mut settings_model, &variables)?;
+        self.populate_dynamic_hosts(&mut settings_model, &variables)?;
 
         for sub_settings in include_settings.iter_mut() {
             self.populate_hosts(sub_settings, &variables)?;
@@ -61,7 +74,41 @@ impl SettingsCompiled {
             self.populate_ip_white_lists(sub_settings, &variables)?;
             self.populate_gateway_server(sub_settings, &variables)?;
             self.populate_gateway_client(sub_settings, &variables)?;
+            self.populate_dynamic_hosts(sub_settings, &variables)?;
         }
+
+        self.variables = variables;
+
+        Ok(())
+    }
+
+    fn populate_dynamic_hosts(
+        &mut self,
+        settings_model: &mut SettingsModel,
+        variables: &VariablesCompiled,
+    ) -> Result<(), String> {
+        let Some(itm) = settings_model.dynamic_hosts.take() else {
+            return Ok(());
+        };
+
+        // One url: a second one would quietly replace the first, depending on the order the
+        // files are read in.
+        if self.dynamic_hosts.is_some() {
+            return Err(
+                "dynamic_hosts is declared more than once. It can be declared in one settings file only."
+                    .to_string(),
+            );
+        }
+
+        let itm = DynamicHostsSettings {
+            url: variables.apply_variables(itm.url)?,
+            refresh_interval: itm.refresh_interval,
+            request_timeout: itm.request_timeout,
+        };
+
+        itm.check()?;
+
+        self.dynamic_hosts = Some(itm);
 
         Ok(())
     }
@@ -94,44 +141,7 @@ impl SettingsCompiled {
     ) -> Result<(), String> {
         let hosts = std::mem::take(&mut settings_model.hosts);
         for (host_id, host_settings) in hosts {
-            let host_id = variables.apply_variables(host_id)?;
-            let locations = compile_locations(host_settings.locations, variables)?;
-
-            let host_settings = HostSettings {
-                endpoint: EndpointSettings {
-                    endpoint_type: variables
-                        .apply_variables(host_settings.endpoint.endpoint_type)?,
-                    ssl_certificate: variables
-                        .apply_variables_opt(host_settings.endpoint.ssl_certificate)?,
-                    client_certificate_ca: variables
-                        .apply_variables_opt(host_settings.endpoint.client_certificate_ca)?,
-                    google_auth: variables
-                        .apply_variables_opt(host_settings.endpoint.google_auth)?,
-                    oauth: variables.apply_variables_opt(host_settings.endpoint.oauth)?,
-                    modify_http_headers: super::populate_modify_http_headers_settings(
-                        host_settings.endpoint.modify_http_headers,
-                        variables,
-                    )?,
-                    debug: host_settings.endpoint.debug,
-                    inject_country: host_settings.endpoint.inject_country,
-                    whitelisted_ip: variables
-                        .apply_variables_opt(host_settings.endpoint.whitelisted_ip)?,
-                    template_id: variables
-                        .apply_variables_opt(host_settings.endpoint.template_id)?,
-                    allowed_users: variables
-                        .apply_variables_opt(host_settings.endpoint.allowed_users)?,
-                    keep_alive: host_settings.endpoint.keep_alive,
-                    track_metrics_by_all_domains: host_settings
-                        .endpoint
-                        .track_metrics_by_all_domains,
-                    hsts: host_settings.endpoint.hsts,
-                    mcp_buffer_size: variables
-                        .apply_variables_opt(host_settings.endpoint.mcp_buffer_size)?,
-                    timeouts: host_settings.endpoint.timeouts,
-                },
-                locations,
-            };
-
+            let (host_id, host_settings) = compile_host(host_id, host_settings, variables)?;
             self.hosts.insert(host_id, host_settings);
         }
 
@@ -462,6 +472,46 @@ fn dynamic_configurations_file_exists(file_name: &str) -> Result<bool, String> {
     Ok(std::path::Path::new(path.as_str()).exists())
 }
 
+/// A host of the settings, with the variables put into its values.
+pub fn compile_host(
+    host_id: String,
+    host_settings: HostSettings,
+    variables: &VariablesCompiled,
+) -> Result<(String, HostSettings), String> {
+    let host_id = variables.apply_variables(host_id)?;
+    let locations = compile_locations(host_settings.locations, variables)?;
+
+    let host_settings = HostSettings {
+        endpoint: EndpointSettings {
+            endpoint_type: variables.apply_variables(host_settings.endpoint.endpoint_type)?,
+            ssl_certificate: variables
+                .apply_variables_opt(host_settings.endpoint.ssl_certificate)?,
+            client_certificate_ca: variables
+                .apply_variables_opt(host_settings.endpoint.client_certificate_ca)?,
+            google_auth: variables.apply_variables_opt(host_settings.endpoint.google_auth)?,
+            oauth: variables.apply_variables_opt(host_settings.endpoint.oauth)?,
+            modify_http_headers: super::populate_modify_http_headers_settings(
+                host_settings.endpoint.modify_http_headers,
+                variables,
+            )?,
+            debug: host_settings.endpoint.debug,
+            inject_country: host_settings.endpoint.inject_country,
+            whitelisted_ip: variables.apply_variables_opt(host_settings.endpoint.whitelisted_ip)?,
+            template_id: variables.apply_variables_opt(host_settings.endpoint.template_id)?,
+            allowed_users: variables.apply_variables_opt(host_settings.endpoint.allowed_users)?,
+            keep_alive: host_settings.endpoint.keep_alive,
+            track_metrics_by_all_domains: host_settings.endpoint.track_metrics_by_all_domains,
+            hsts: host_settings.endpoint.hsts,
+            mcp_buffer_size: variables
+                .apply_variables_opt(host_settings.endpoint.mcp_buffer_size)?,
+            timeouts: host_settings.endpoint.timeouts,
+        },
+        locations,
+    };
+
+    Ok((host_id, host_settings))
+}
+
 fn compile_locations(
     locations: Vec<LocationSettings>,
     variables: &VariablesCompiled,
@@ -551,6 +601,101 @@ mod tests {
             hosts,
             vec!["localhost:8001", "localhost:8002", "localhost:8003"]
         );
+    }
+
+    /// Settings files in a directory of their own: `main.yaml` with `main` in it, and each of
+    /// `others` - its name and its content - which `main` can include.
+    fn compile_files(
+        name: &str,
+        main: &str,
+        others: &[(&str, &str)],
+    ) -> Result<SettingsCompiled, String> {
+        let dir =
+            std::env::temp_dir().join(format!("my-reverse-proxy-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut main = main.to_string();
+        for (file_name, content) in others {
+            let path = dir.join(file_name);
+            std::fs::write(&path, content).unwrap();
+            main = main.replace(file_name, path.to_str().unwrap());
+        }
+
+        let main_path = dir.join("main.yaml");
+        std::fs::write(&main_path, main).unwrap();
+
+        let result = SettingsModel::load(Some(main_path.to_str().unwrap())).and_then(|model| {
+            let include_settings = load_includes_block(&model)?;
+            let mut compiled = SettingsCompiled::default();
+            compiled.populate(model, include_settings)?;
+            Ok(compiled)
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    /// The url is written with the variables of the settings - the ones of the files it
+    /// includes as well - and the variables are kept for the hosts the url gives.
+    #[test]
+    fn dynamic_hosts_is_read_with_the_variables_of_the_settings() {
+        let compiled = compile_files(
+            "dynamic-hosts",
+            "variables:\n  hosts_api: 10.0.0.7:5000\ninclude:\n- other.yaml\ndynamic_hosts:\n  url: http://${hosts_api}/hosts?env=${env}\n  refresh_interval: 30000\n",
+            &[("other.yaml", "variables:\n  env: dev\n")],
+        )
+        .unwrap();
+
+        let dynamic_hosts = compiled.dynamic_hosts.as_ref().unwrap();
+        assert_eq!(dynamic_hosts.url, "http://10.0.0.7:5000/hosts?env=dev");
+        assert_eq!(
+            dynamic_hosts.get_refresh_interval(),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            compiled
+                .variables
+                .apply_variables("${env}".to_string())
+                .unwrap(),
+            "dev"
+        );
+    }
+
+    #[test]
+    fn dynamic_hosts_is_not_required() {
+        let compiled = compile_files("no-dynamic-hosts", "hosts: {}\n", &[]).unwrap();
+        assert!(compiled.dynamic_hosts.is_none());
+    }
+
+    /// Two urls would be one of them, depending on the order the files are read in.
+    #[test]
+    fn dynamic_hosts_in_two_files_refuses_the_settings() {
+        let err = compile_files(
+            "dynamic-hosts-twice",
+            "include:\n- other.yaml\ndynamic_hosts:\n  url: http://10.0.0.7/hosts\n",
+            &[(
+                "other.yaml",
+                "dynamic_hosts:\n  url: http://10.0.0.8/hosts\n",
+            )],
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("dynamic_hosts is declared more than once"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn dynamic_hosts_which_can_not_work_refuses_the_settings() {
+        let err = compile_files(
+            "dynamic-hosts-interval",
+            "dynamic_hosts:\n  url: http://10.0.0.7/hosts\n  refresh_interval: 5\n",
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(err.contains("refresh_interval"), "{err}");
     }
 
     /// The control port would listen on every address if a typo were taken for no value: the

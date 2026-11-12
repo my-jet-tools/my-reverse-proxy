@@ -72,6 +72,11 @@ pub struct HostSettingsSummary {
     #[property(description = "True if HSTS is enabled on this endpoint")]
     pub hsts: bool,
 
+    #[property(
+        description = "True if the host was read from dynamic_hosts.url rather than from a settings file"
+    )]
+    pub dynamic: bool,
+
     #[property(description = "Locations under this host")]
     pub locations: Vec<LocationSettingsSummary>,
 }
@@ -106,6 +111,25 @@ pub struct GatewayServerSummary {
 }
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
+pub struct DynamicHostsSummary {
+    #[property(description = "dynamic_hosts.url - the url the dynamic hosts are read from")]
+    pub url: String,
+
+    #[property(description = "Milliseconds between two reads of the url")]
+    pub refresh_interval: i64,
+
+    #[property(
+        description = "Why the last read of the url failed, empty if it succeeded. The hosts of the last read which succeeded are served meanwhile"
+    )]
+    pub last_read_error: String,
+
+    #[property(
+        description = "Hosts of the url which are not among the hosts, and why: a variable which is not there, an id a settings file has a host of its own for. Errors of compiling a dynamic host are in current_configuration_errors"
+    )]
+    pub refused_hosts: Vec<ConfigurationErrorEntry>,
+}
+
+#[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct GetSettingsResponse {
     #[property(description = "Resolved path to the settings file that was read")]
     pub settings_file: String,
@@ -113,8 +137,13 @@ pub struct GetSettingsResponse {
     #[property(description = "Global settings block")]
     pub global: GlobalSettingsSummary,
 
-    #[property(description = "All hosts defined in the settings file (and any included files)")]
+    #[property(
+        description = "All hosts defined in the settings file (and any included files), and the ones read from dynamic_hosts.url (dynamic=true)"
+    )]
     pub hosts: Vec<HostSettingsSummary>,
+
+    #[property(description = "dynamic_hosts block, if configured")]
+    pub dynamic_hosts: Option<DynamicHostsSummary>,
 
     #[property(description = "SSH config ids defined in settings")]
     pub ssh_ids: Vec<String>,
@@ -227,6 +256,7 @@ pub fn build_settings_summary(
                 allowed_users: host.endpoint.allowed_users.clone().unwrap_or_default(),
                 whitelisted_ip: host.endpoint.whitelisted_ip.clone().unwrap_or_default(),
                 hsts: host.endpoint.hsts.unwrap_or(false),
+                dynamic: settings.is_dynamic_host(host_id),
                 locations,
             }
         })
@@ -243,10 +273,28 @@ pub fn build_settings_summary(
             authorized_keys_count: g.authorized_keys.len() as i64,
         });
 
+    let dynamic_hosts = settings
+        .dynamic_hosts
+        .as_ref()
+        .map(|dynamic_hosts| DynamicHostsSummary {
+            url: dynamic_hosts.url.clone(),
+            refresh_interval: dynamic_hosts.get_refresh_interval().as_millis() as i64,
+            last_read_error: APP_CTX.dynamic_hosts.get_last_error().unwrap_or_default(),
+            refused_hosts: settings
+                .dynamic_host_errors
+                .iter()
+                .map(|(host_id, error)| ConfigurationErrorEntry {
+                    host_id: host_id.clone(),
+                    error: error.clone(),
+                })
+                .collect(),
+        });
+
     GetSettingsResponse {
         settings_file,
         global,
         hosts,
+        dynamic_hosts,
         ssh_ids: sorted_keys(settings.ssh.keys()),
         ssl_certificate_ids: settings
             .ssl_certificates

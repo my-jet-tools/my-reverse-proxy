@@ -4,7 +4,7 @@ use rust_common::placeholders::*;
 
 use crate::settings::SettingsModel;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct VariablesCompiled {
     data: HashMap<String, String>,
 }

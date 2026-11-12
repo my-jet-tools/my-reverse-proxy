@@ -184,6 +184,8 @@ pub async fn compile_http_configuration(
         write_timeout: endpoint_resolved.write_timeout,
     };
 
+    let dynamic_host = settings_model.is_dynamic_host(host_endpoint.as_str());
+
     let http_endpoint_info = HttpEndpointInfo::new(HttpEndpointInfoParams {
         host_endpoint,
         listen_endpoint_type: http_type,
@@ -211,6 +213,7 @@ pub async fn compile_http_configuration(
         timeouts: http_timeouts,
         client_timeouts: endpoint_resolved.client,
         not_served_reason,
+        dynamic_host,
     });
 
     Ok(http_endpoint_info)

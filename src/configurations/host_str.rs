@@ -5,7 +5,7 @@ use std::{
 
 use crate::types::ListenHost;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EndpointPort {
     Tcp(u16),
     UnixSocket(Arc<String>),

@@ -79,6 +79,14 @@ pub struct AppContext {
     /// expose the applied configuration without recompiling the files from disk.
     pub applied_settings: arc_swap::ArcSwapOption<SettingsCompiled>,
 
+    /// Held while settings are put into the live configuration - by a reload of the settings
+    /// files, of one of their ports, or by a read of `dynamic_hosts.url`. Each of them reads
+    /// what the other one applied, so one is never in the middle of the other.
+    pub settings_apply_lock: Mutex<()>,
+
+    /// The hosts last read from `dynamic_hosts.url`.
+    pub dynamic_hosts: DynamicHosts,
+
     pub token_secret_key: AesKey,
     pub current_configuration: AppConfiguration,
     pub states: Arc<AppStates>,
@@ -195,6 +203,8 @@ impl AppContext {
             default_h2_livness_url,
             pool_supervisor_interval,
             applied_settings: arc_swap::ArcSwapOption::empty(),
+            settings_apply_lock: Mutex::new(()),
+            dynamic_hosts: DynamicHosts::new(),
             // saved_client_certs: SavedClientCert::new(),
             token_secret_key,
             current_configuration: AppConfiguration::new(),

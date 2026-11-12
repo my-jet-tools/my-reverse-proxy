@@ -16,6 +16,8 @@ pub struct TcpEndpointHostConfig {
     pub timeouts: crate::types::HttpTimeouts,
     /// `Some`: the endpoint was given an access setting it can not apply, and serves nobody.
     pub not_served_reason: Option<NotServedReason>,
+    /// The host came from `dynamic_hosts.url`: see `HttpEndpointInfo::dynamic_host`.
+    pub dynamic_host: bool,
 }
 
 impl TcpEndpointHostConfig {
@@ -98,6 +100,8 @@ impl TcpEndpointHostConfig {
             write_timeout: resolved.write_timeout,
         };
 
+        let dynamic_host = settings_model.is_dynamic_host(host_endpoint.as_str());
+
         let result = Self {
             host_endpoint,
             remote_host: remote_host.into(),
@@ -106,6 +110,7 @@ impl TcpEndpointHostConfig {
             location_ip_white_list_id,
             timeouts,
             not_served_reason,
+            dynamic_host,
         };
 
         Ok(result)

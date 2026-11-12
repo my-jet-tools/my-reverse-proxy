@@ -12,6 +12,8 @@ pub struct SettingsModel {
     pub hosts: HashMap<String, HostSettings>,
     pub include: Option<Vec<String>>,
     pub dynamic_configurations_file: Option<String>,
+    /// More hosts, read from a url on a timer: see [`DynamicHostsSettings`].
+    pub dynamic_hosts: Option<DynamicHostsSettings>,
     pub variables: Option<HashMap<String, String>>,
     pub ssl_certificates: Option<Vec<SslCertificatesSettingsModel>>,
     pub client_certificate_ca: Option<Vec<ClientCertificateCaSettings>>,
@@ -53,6 +55,11 @@ impl SettingsModel {
         Self::from_dynamic_yaml(file_name.as_str(), &file_content)
     }
 
+    #[cfg(test)]
+    pub fn parse_for_tests(content: &str) -> Self {
+        Self::from_yaml("test", content.as_bytes()).unwrap()
+    }
+
     /// True if the content is empty or consists only of whitespace (spaces, tabs, line breaks).
     pub fn is_blank_content(content: &[u8]) -> bool {
         content.iter().all(|b| b.is_ascii_whitespace())
@@ -78,7 +85,7 @@ impl SettingsModel {
 }
 
 /// A key which is there with nothing under it - `hosts:` - is read as if it were not there.
-fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+pub(crate) fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de> + Default,
@@ -198,6 +205,7 @@ mod tests {
             global_settings: None,
             include: None,
             dynamic_configurations_file: None,
+            dynamic_hosts: None,
             variables: None,
             ssl_certificates: None,
             client_certificate_ca: None,

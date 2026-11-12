@@ -33,6 +33,12 @@ pub async fn update_host_configuration(
         }
     };
 
+    if settings_model.is_dynamic_host(host_endpoint.as_str()) {
+        if let Some(existing) = existing.as_ref() {
+            crate::flows::check_dynamic_host_fits(existing, &host_endpoint, host_settings)?;
+        }
+    }
+
     let configuration = crate::scripts::compile_host_configuration(
         settings_model,
         host_endpoint.clone(),
