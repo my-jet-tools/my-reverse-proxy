@@ -168,7 +168,8 @@ dynamic_hosts:
   request_timeout: 10000    # ms, optional, default 10000 - the request and its whole answer
 ```
 
-The url answers with the `hosts:` of a settings file - YAML, or the same in JSON - and with nothing else:
+The url answers in YAML with the `hosts:` section of a settings file, written the same way, and with nothing else.
+It is read by the same parser as the settings files:
 
 ```yaml
 hosts:

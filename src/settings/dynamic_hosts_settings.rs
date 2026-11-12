@@ -63,7 +63,8 @@ impl DynamicHostsSettings {
     }
 }
 
-/// What `dynamic_hosts.url` answers with: the `hosts:` of a settings file, in YAML or JSON.
+/// What `dynamic_hosts.url` answers with: the `hosts:` of a settings file, in YAML - read by the
+/// same parser as the settings files.
 /// Nothing else of a settings file is read from there - another key is an error rather than
 /// quietly left out.
 #[derive(Serialize, Deserialize, Debug, Default)]
