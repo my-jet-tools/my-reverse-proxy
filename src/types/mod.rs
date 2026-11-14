@@ -4,6 +4,8 @@ mod whitelisted_ip_list;
 pub use whitelisted_ip_list::*;
 mod whitelisted_ip;
 pub use whitelisted_ip::*;
+mod country_white_list;
+pub use country_white_list::*;
 mod http_request_reader;
 pub use http_request_reader::*;
 mod http_timeouts;

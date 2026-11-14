@@ -1764,6 +1764,55 @@ hosts:
 ```
 
 
+## Country whitelisting
+
+An endpoint or a location can be served only to clients of some countries. The countries are
+declared as a list under an id, and `whitelisted_country` names the list - the same way as
+`whitelisted_ip` names a list of `ip_white_lists`.
+
+```yaml
+hosts:
+  domain.com:443:
+    endpoint:
+      type: https
+      whitelisted_country: id_of_country_list
+
+    locations:
+    - proxy_pass_to: http://10.0.0.4:7702
+    - path: /admin
+      proxy_pass_to: http://10.0.0.4:7703
+      whitelisted_country: only_ua
+
+country_white_lists:
+  id_of_country_list:
+    - UA
+    - DE
+    - POL
+  only_ua:
+    - UA
+```
+
+* A country is the ISO 3166 code of two letters (`UA`) or of three (`UKR`), in any letter case.
+  A code which is not a country, a list with no country, or a `whitelisted_country` naming a list
+  which is not declared - the host does not load, and says why.
+* The country of a client is looked up by the address of its connection, in the country
+  database the proxy carries (the same one `inject_country` uses: IPv4 built in, IPv6 from
+  `ip_v6/` next to the binary). An address it has no country for - a private one (`10.x`,
+  `172.16-31.x`, `192.168.x`), the loopback, one it does not know - is in no list: such a client
+  is refused by every country list. A client which comes through another proxy or a NAT has the
+  country of that proxy's address.
+* `whitelisted_country` can be set on the endpoint, on an endpoint template, and on a location.
+  A location's list applies on top of its endpoint's: a client has to be in both.
+* With `whitelisted_ip` and `whitelisted_country` both set, a client has to pass both: adding a
+  country list never lets in anybody an ip list keeps out.
+* A refused client gets what a client refused by `whitelisted_ip` gets: `401` on an http
+  endpoint, a closed connection on `tcp` and `mcp` endpoints (and on `https` / `https2` when the
+  endpoint's list refuses it at the TLS handshake). A connection from a unix socket has no address
+  and is not restricted.
+* The lists are checked for every request, by the host the request is routed to - not only when
+  the connection is opened.
+
+
 
 ## Endpoint templates 
 

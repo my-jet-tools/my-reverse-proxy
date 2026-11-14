@@ -33,6 +33,11 @@ pub struct LocationSettingsSummary {
     pub whitelisted_ip: String,
 
     #[property(
+        description = "whitelisted_country of this location: the id of a list of country_white_lists a client has to come from, on top of the endpoint's lists. Empty if not set"
+    )]
+    pub whitelisted_country: String,
+
+    #[property(
         description = "True if strip_path is set on this location: the location path is cut off the request path before it goes upstream"
     )]
     pub strip_path: bool,
@@ -73,6 +78,11 @@ pub struct HostSettingsSummary {
 
     #[property(description = "Whitelisted IP list id, if any")]
     pub whitelisted_ip: String,
+
+    #[property(
+        description = "whitelisted_country of the endpoint as written: the id of a list of country_white_lists a client has to come from (with whitelisted_ip, it has to pass both). Empty if not set; endpoint_templates may still give one"
+    )]
+    pub whitelisted_country: String,
 
     #[property(description = "True if HSTS is enabled on this endpoint")]
     pub hsts: bool,
@@ -182,6 +192,22 @@ pub struct ApiKeysSummary {
 }
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
+pub struct CountryWhiteListSummary {
+    #[property(description = "Id of a list of country_white_lists")]
+    pub id: String,
+
+    #[property(
+        description = "The countries of the list as ISO 3166 codes of two letters, sorted - what a client's country (by its IP) is compared with. Empty when the list does not compile"
+    )]
+    pub countries: Vec<String>,
+
+    #[property(
+        description = "Why the list does not compile (a code which is not a country, no country at all); empty if it does. A host naming such a list does not load"
+    )]
+    pub error: String,
+}
+
+#[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct GetSettingsResponse {
     #[property(description = "Resolved path to the settings file that was read")]
     pub settings_file: String,
@@ -222,6 +248,9 @@ pub struct GetSettingsResponse {
 
     #[property(description = "IP white list ids defined in settings")]
     pub ip_white_list_ids: Vec<String>,
+
+    #[property(description = "Country white lists defined in settings, sorted by id")]
+    pub country_white_lists: Vec<CountryWhiteListSummary>,
 
     #[property(description = "Gateway server block, if configured")]
     pub gateway_server: Option<GatewayServerSummary>,
@@ -289,6 +318,7 @@ pub fn build_settings_summary(
                 proxy_pass_to: loc.proxy_pass_to.clone().unwrap_or_default(),
                 location_type: loc.location_type.clone().unwrap_or_default(),
                 whitelisted_ip: loc.whitelisted_ip.clone().unwrap_or_default(),
+                whitelisted_country: loc.whitelisted_country.clone().unwrap_or_default(),
                 strip_path: loc.get_strip_path(),
                 api_keys_auth: loc.api_keys_auth.clone().unwrap_or_default(),
             })
@@ -308,6 +338,11 @@ pub fn build_settings_summary(
             template_id: host.endpoint.template_id.clone().unwrap_or_default(),
             allowed_users: host.endpoint.allowed_users.clone().unwrap_or_default(),
             whitelisted_ip: host.endpoint.whitelisted_ip.clone().unwrap_or_default(),
+            whitelisted_country: host
+                .endpoint
+                .whitelisted_country
+                .clone()
+                .unwrap_or_default(),
             hsts: host.endpoint.hsts.unwrap_or(false),
             api_keys_auth: host.endpoint.api_keys_auth.clone().unwrap_or_default(),
             dynamic,
@@ -402,6 +437,7 @@ pub fn build_settings_summary(
         endpoint_template_ids: sorted_keys(settings.endpoint_templates.keys()),
         allowed_users_list_ids: sorted_keys(settings.allowed_users.keys()),
         ip_white_list_ids: sorted_keys(settings.ip_white_lists.keys()),
+        country_white_lists: summarize_country_white_lists(settings),
         gateway_server,
         gateway_client_ids: sorted_keys(settings.gateway_clients.keys()),
         current_configuration_errors,
@@ -467,6 +503,30 @@ pub async fn load_current_configuration_errors() -> Vec<ConfigurationErrorEntry>
         .await
 }
 
+/// Every list of `country_white_lists`, as it compiles - or why it does not.
+fn summarize_country_white_lists(settings: &SettingsCompiled) -> Vec<CountryWhiteListSummary> {
+    sorted_keys(settings.country_white_lists.keys())
+        .into_iter()
+        .map(|id| {
+            let compiled =
+                crate::types::CountryWhiteList::new(&id, &settings.country_white_lists[&id]);
+
+            match compiled {
+                Ok(list) => CountryWhiteListSummary {
+                    countries: list.countries().map(|code| code.to_string()).collect(),
+                    error: String::new(),
+                    id,
+                },
+                Err(error) => CountryWhiteListSummary {
+                    countries: Vec::new(),
+                    error,
+                    id,
+                },
+            }
+        })
+        .collect()
+}
+
 fn sorted_keys<'a, I: IntoIterator<Item = &'a String>>(keys: I) -> Vec<String> {
     let mut out: Vec<String> = keys.into_iter().cloned().collect();
     out.sort();
@@ -521,6 +581,75 @@ mod tests {
             [("/stripped/", true), ("/kept/", false), ("/", false)]
         );
     }
+    /// The lists show the countries as they are compared - codes of two letters - and a list
+    /// which does not compile says why, before a host naming it fails to load.
+    #[test]
+    fn the_summary_shows_the_country_lists_and_who_names_them() {
+        let hosts: HashMap<String, HostSettings> = serde_yaml::from_str(
+            [
+                "'localhost:8000':",
+                "  endpoint:",
+                "    type: http",
+                "    whitelisted_country: europe",
+                "  locations:",
+                "  - path: /admin",
+                "    proxy_pass_to: http://127.0.0.1:9000",
+                "    whitelisted_country: only_ua",
+            ]
+            .join("\n")
+            .as_str(),
+        )
+        .unwrap();
+
+        let country_white_lists = HashMap::from([
+            (
+                "europe".to_string(),
+                vec!["pol".to_string(), "DE".to_string()],
+            ),
+            ("only_ua".to_string(), vec!["UA".to_string()]),
+            ("typo".to_string(), vec!["XX".to_string()]),
+        ]);
+
+        let settings = SettingsCompiled {
+            hosts,
+            country_white_lists,
+            ..Default::default()
+        };
+
+        let summary = build_settings_summary(&settings, String::new(), vec![]);
+
+        assert_eq!(summary.hosts[0].whitelisted_country, "europe");
+        assert_eq!(summary.hosts[0].locations[0].whitelisted_country, "only_ua");
+
+        let lists: Vec<_> = summary
+            .country_white_lists
+            .iter()
+            .map(|list| {
+                (
+                    list.id.as_str(),
+                    list.countries.join(","),
+                    list.error.is_empty(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            lists,
+            [
+                ("europe", "DE,PL".to_string(), true),
+                ("only_ua", "UA".to_string(), true),
+                ("typo", String::new(), false),
+            ]
+        );
+        assert!(
+            summary.country_white_lists[2]
+                .error
+                .contains("'XX' is not a country code"),
+            "{}",
+            summary.country_white_lists[2].error
+        );
+    }
+
     /// A set named by an `api_keys_auth` and declared nowhere is listed with no keys: every
     /// request to what it guards is refused. No key is ever in the summary.
     #[test]

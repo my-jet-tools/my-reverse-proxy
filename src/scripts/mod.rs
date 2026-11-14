@@ -16,6 +16,8 @@ pub use compile_http_configuration::*;
 
 mod get_endpoint_white_listed_ip;
 pub use get_endpoint_white_listed_ip::*;
+mod get_country_white_list;
+pub use get_country_white_list::*;
 mod compile_host_configuration;
 pub use compile_host_configuration::*;
 mod merge_http_configuration_with_existing_port;

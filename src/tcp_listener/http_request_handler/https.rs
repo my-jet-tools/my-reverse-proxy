@@ -130,36 +130,24 @@ impl HttpsRequestsHandler {
             ));
         }
 
-        // Enforce the *request-host* endpoint's IP allow-list per request. The
-        // connection-level check in handle_connection only sees the SNI
-        // endpoint; a coalesced / cross-`Host` request (RFC 7540 §9.1.1) must
-        // still satisfy the allow-list of the vhost it actually targets. Skip
+        // Enforce the *request-host* endpoint's IP and country allow-lists per
+        // request. The connection-level check in handle_connection only sees the
+        // SNI endpoint; a coalesced / cross-`Host` request (RFC 7540 §9.1.1) must
+        // still satisfy the allow-lists of the vhost it actually targets. Skipped
         // when the client IP is unknown (unix socket), matching the
         // location-level check in HttpProxyPass::send_payload.
-        if let Some(ip_list_id) = http_endpoint_info.whitelisted_ip_list_id.as_ref() {
-            if let Some(client_ip) = self.connection_ip.get_ip_addr() {
-                let is_whitelisted = crate::app::APP_CTX
-                    .current_configuration
-                    .get(|config| {
-                        config
-                            .white_list_ip_list
-                            .is_white_listed(ip_list_id, &client_ip)
-                    })
-                    .await;
-                if !is_whitelisted {
-                    crate::app::APP_CTX.proxy_logs.write_port(
-                        listen_port_config.listen_host.get_log_key().as_str(),
-                        self.connection_ip.get_ip_log(),
-                        format!(
-                            "Rejected request for host [{}]: client IP is not in the endpoint allow-list",
-                            host
-                        ),
-                    );
-                    let content =
-                        crate::error_templates::generate_layout_body(401, "Restricted by IP", None);
-                    return Err(create_err_response(StatusCode::UNAUTHORIZED, content));
-                }
-            }
+        if let Some(refusal) = http_endpoint_info
+            .address_refusal(&self.connection_ip)
+            .await
+        {
+            crate::app::APP_CTX.proxy_logs.write_port(
+                listen_port_config.listen_host.get_log_key().as_str(),
+                self.connection_ip.get_ip_log(),
+                format!("Rejected request for host [{host}]: {refusal}"),
+            );
+            let content =
+                crate::error_templates::generate_layout_body(401, "Restricted by IP", None);
+            return Err(create_err_response(StatusCode::UNAUTHORIZED, content));
         }
 
         if crate::app::APP_CTX

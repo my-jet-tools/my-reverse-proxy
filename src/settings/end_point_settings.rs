@@ -27,6 +27,9 @@ pub struct EndpointSettings {
     pub debug: Option<bool>,
     pub inject_country: Option<bool>,
     pub whitelisted_ip: Option<String>,
+    /// The id of a list of `country_white_lists`: a client is served only from a country of it.
+    /// Together with `whitelisted_ip` a client has to pass both.
+    pub whitelisted_country: Option<String>,
     pub template_id: Option<String>,
     pub allowed_users: Option<String>,
     /// The id of a set of `api_keys:`: each location of the endpoint takes a request with a key

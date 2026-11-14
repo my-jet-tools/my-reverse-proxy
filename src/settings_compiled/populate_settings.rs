@@ -59,6 +59,7 @@ impl SettingsCompiled {
         self.populate_endpoint_templates(&mut settings_model, &variables)?;
         self.populate_allowed_users(&mut settings_model, &variables)?;
         self.populate_ip_white_lists(&mut settings_model, &variables)?;
+        self.populate_country_white_lists(&mut settings_model, &variables)?;
         self.populate_gateway_server(&mut settings_model, &variables)?;
         self.populate_gateway_client(&mut settings_model, &variables)?;
         self.populate_real_time_configurations(&mut settings_model, &variables)?;
@@ -75,6 +76,7 @@ impl SettingsCompiled {
             self.populate_endpoint_templates(sub_settings, &variables)?;
             self.populate_allowed_users(sub_settings, &variables)?;
             self.populate_ip_white_lists(sub_settings, &variables)?;
+            self.populate_country_white_lists(sub_settings, &variables)?;
             self.populate_gateway_server(sub_settings, &variables)?;
             self.populate_gateway_client(sub_settings, &variables)?;
             self.populate_real_time_configurations(sub_settings, &variables)?;
@@ -373,6 +375,8 @@ impl SettingsCompiled {
                             variables,
                         )?,
                         whitelisted_ip: variables.apply_variables_opt(itm.whitelisted_ip)?,
+                        whitelisted_country: variables
+                            .apply_variables_opt(itm.whitelisted_country)?,
                         api_keys_auth: variables.apply_variables_opt(itm.api_keys_auth)?,
                     },
                 );
@@ -409,6 +413,23 @@ impl SettingsCompiled {
                 self.ip_white_lists.insert(
                     variables.apply_variables(key)?,
                     super::populate_vec_of_string(ip_list, variables)?,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn populate_country_white_lists(
+        &mut self,
+        settings_model: &mut SettingsModel,
+        variables: &VariablesCompiled,
+    ) -> Result<(), String> {
+        if let Some(country_white_lists) = settings_model.country_white_lists.take() {
+            for (key, countries) in country_white_lists {
+                self.country_white_lists.insert(
+                    variables.apply_variables(key)?,
+                    super::populate_vec_of_string(countries, variables)?,
                 );
             }
         }
@@ -551,6 +572,8 @@ pub fn compile_host(
             debug: host_settings.endpoint.debug,
             inject_country: host_settings.endpoint.inject_country,
             whitelisted_ip: variables.apply_variables_opt(host_settings.endpoint.whitelisted_ip)?,
+            whitelisted_country: variables
+                .apply_variables_opt(host_settings.endpoint.whitelisted_country)?,
             template_id: variables.apply_variables_opt(host_settings.endpoint.template_id)?,
             allowed_users: variables.apply_variables_opt(host_settings.endpoint.allowed_users)?,
             api_keys_auth: variables.apply_variables_opt(host_settings.endpoint.api_keys_auth)?,
@@ -595,6 +618,7 @@ fn compile_locations(
             content_type: variables.apply_variables_opt(location.content_type)?,
             body: variables.apply_variables_opt(location.body)?,
             whitelisted_ip: variables.apply_variables_opt(location.whitelisted_ip)?,
+            whitelisted_country: variables.apply_variables_opt(location.whitelisted_country)?,
             compress: location.compress,
             trace_payload: location.trace_payload,
             api_keys_auth: variables.apply_variables_opt(location.api_keys_auth)?,

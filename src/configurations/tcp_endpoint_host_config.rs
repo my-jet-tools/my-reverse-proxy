@@ -12,6 +12,11 @@ pub struct TcpEndpointHostConfig {
     /// `whitelisted_ip` of the location - a tcp endpoint has one. A connection has to be in
     /// this list as well as in the list of the endpoint.
     pub location_ip_white_list_id: Option<String>,
+    /// `whitelisted_country` of the endpoint, or of its template.
+    pub country_white_list: Option<Arc<crate::types::CountryWhiteList>>,
+    /// `whitelisted_country` of the location: a connection has to come from a country of this
+    /// list as well as of the list of the endpoint.
+    pub location_country_white_list: Option<Arc<crate::types::CountryWhiteList>>,
     /// Transport read/write idle timeouts (resolved cascade: global → endpoint).
     pub timeouts: crate::types::HttpTimeouts,
     /// `Some`: the endpoint was given an access setting it can not apply, and serves nobody.
@@ -66,6 +71,12 @@ impl TcpEndpointHostConfig {
             None => None,
         };
 
+        let country_white_list =
+            crate::scripts::get_endpoint_whitelisted_country(settings_model, host_settings)?;
+
+        let location_country_white_list =
+            crate::scripts::get_location_whitelisted_country(settings_model, location_settings)?;
+
         let not_served_reason = access_settings_a_tcp_endpoint_can_not_apply(
             settings_model,
             &host_endpoint,
@@ -108,6 +119,8 @@ impl TcpEndpointHostConfig {
             debug: host_settings.endpoint.get_debug(),
             ip_white_list_id,
             location_ip_white_list_id,
+            country_white_list,
+            location_country_white_list,
             timeouts,
             not_served_reason,
             dynamic_host,
@@ -119,8 +132,8 @@ impl TcpEndpointHostConfig {
 
 /// A tcp endpoint forwards bytes: there is no request in which it could look for a header or
 /// a session. `api_keys_auth`, `google_auth` and `allowed_users` load, and the endpoint serves
-/// nobody: see [`NotServedReason`]. Its `whitelisted_ip` - of the endpoint and of the location
-/// - it checks by the address of the connection.
+/// nobody: see [`NotServedReason`]. Its `whitelisted_ip` and `whitelisted_country` - of the
+/// endpoint and of the location - it checks by the address of the connection.
 fn access_settings_a_tcp_endpoint_can_not_apply(
     settings_model: &SettingsCompiled,
     host_endpoint: &EndpointHttpHostString,

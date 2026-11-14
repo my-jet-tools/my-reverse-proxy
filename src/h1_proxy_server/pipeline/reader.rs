@@ -308,30 +308,22 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         .await;
     }
 
-    // Enforce the *request-host* endpoint's IP allow-list per request: the
-    // accept-time check only saw the SNI endpoint, and a keep-alive connection
-    // can carry requests for other vhosts (mirrors the h2 handler). Skip when
-    // the client IP is unknown (unix socket).
-    if let Some(ip_list_id) = end_point_info.whitelisted_ip_list_id.as_ref() {
-        if let Some(client_ip) = http_connection_info.connection_ip.get_ip_addr() {
-            let is_whitelisted = crate::app::APP_CTX
-                .current_configuration
-                .get(|config| {
-                    config
-                        .white_list_ip_list
-                        .is_white_listed(ip_list_id, &client_ip)
-                })
-                .await;
-            if !is_whitelisted {
-                return respond_error(
-                    queue_tx,
-                    http_connection_info,
-                    Some(&endpoint_for_error),
-                    ProxyServerError::NotAuthorized,
-                )
-                .await;
-            }
-        }
+    // Enforce the *request-host* endpoint's IP and country allow-lists per
+    // request: the accept-time check only saw the SNI endpoint, and a keep-alive
+    // connection can carry requests for other vhosts (mirrors the h2 handler).
+    // Skipped when the client IP is unknown (unix socket).
+    if end_point_info
+        .address_refusal(&http_connection_info.connection_ip)
+        .await
+        .is_some()
+    {
+        return respond_error(
+            queue_tx,
+            http_connection_info,
+            Some(&endpoint_for_error),
+            ProxyServerError::NotAuthorized,
+        )
+        .await;
     }
 
     // An endpoint which was given an access setting it can not apply serves

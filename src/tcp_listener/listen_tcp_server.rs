@@ -122,7 +122,8 @@ async fn handle_accepted_connection(
 
             listen_config
         })
-        .await;
+        .await
+        .filter(|listen_config| listen_config.country_allows(socket_addr.ip()));
 
     if endpoint_type.is_none() {
         crate::app::APP_CTX.proxy_logs.write_port(
@@ -276,6 +277,13 @@ async fn tcp_endpoint_takes(
             .await;
 
         if !is_whitelisted {
+            let _ = connection.shutdown().await;
+            return false;
+        }
+    }
+
+    if let Some(country_list) = configuration.location_country_white_list.as_ref() {
+        if !country_list.allows(socket_addr.ip()) {
             let _ = connection.shutdown().await;
             return false;
         }

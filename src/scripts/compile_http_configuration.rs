@@ -20,6 +20,9 @@ pub async fn compile_http_configuration(
     let endpoint_whitelisted_ip =
         super::get_endpoint_white_listed_ip(settings_model, host_settings).await?;
 
+    let endpoint_whitelisted_country =
+        super::get_endpoint_whitelisted_country(settings_model, host_settings)?;
+
     let allowed_user_list =
         crate::scripts::get_endpoint_users_list(settings_model, host_settings).await?;
 
@@ -204,6 +207,7 @@ pub async fn compile_http_configuration(
             .unwrap_or(false),
         client_certificate_id: client_cert_ca.map(|itm| itm.id),
         whitelisted_ip_list_id: endpoint_whitelisted_ip,
+        whitelisted_country: endpoint_whitelisted_country,
         locations,
         allowed_user_list_id: allowed_user_list,
         modify_headers_settings: modify_endpoints_headers,

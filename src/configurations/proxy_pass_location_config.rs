@@ -21,6 +21,8 @@ pub struct ProxyPassLocationConfig {
     pub modify_request_headers: ModifyHeadersConfig,
     pub modify_response_headers: ModifyHeadersConfig,
     pub ip_white_list_id: Option<String>,
+    /// The location's own `whitelisted_country`: see [`Self::ip_is_allowed`].
+    pub whitelisted_country: Option<std::sync::Arc<crate::types::CountryWhiteList>>,
     pub domain_name: Option<String>,
     pub proxy_pass_to: ProxyPassToConfig,
     pub compress: bool,
@@ -38,13 +40,14 @@ pub struct ProxyPassLocationConfig {
 
 impl ProxyPassLocationConfig {
     /// `endpoint_api_keys_auth`: `api_keys_auth` of the endpoint the location is of - or of its
-    /// template.
+    /// template. `whitelisted_country`: the list the location's `whitelisted_country` names.
     pub fn new(
         path: String,
         location_settings: &LocationSettings,
         proxy_pass_to: ProxyPassToConfig,
         listen_host: &str,
         endpoint_api_keys_auth: Option<&str>,
+        whitelisted_country: Option<std::sync::Arc<crate::types::CountryWhiteList>>,
     ) -> Self {
         let mut modify_request_headers = ModifyHeadersConfig::default();
         let mut modify_response_headers = ModifyHeadersConfig::default();
@@ -65,6 +68,7 @@ impl ProxyPassLocationConfig {
             modify_request_headers,
             modify_response_headers,
             ip_white_list_id: location_settings.whitelisted_ip.clone(),
+            whitelisted_country,
             proxy_pass_to,
             domain_name: location_settings.domain_name.clone(),
             compress: location_settings.get_compress(),
@@ -108,26 +112,18 @@ impl ProxyPassLocationConfig {
         }
     }
 
-    /// The location's own `whitelisted_ip`. Shared by the h1 byte pipeline and the hyper path so
-    /// both enforce the same rule. A connection without an address (a unix socket) is not
-    /// restricted - the same exemption the endpoint's list has.
+    /// The location's own `whitelisted_ip` and `whitelisted_country` - on top of the endpoint's.
+    /// Shared by the h1 byte pipeline and the hyper path so both enforce the same rule. A
+    /// connection without an address (a unix socket) is not restricted - the same exemption the
+    /// endpoint's lists have. See [`client_address_refusal`].
     pub async fn ip_is_allowed(&self, connection_ip: &crate::types::ConnectionIp) -> bool {
-        let Some(ip_list_id) = self.ip_white_list_id.as_ref() else {
-            return true;
-        };
-
-        let Some(client_ip) = connection_ip.get_ip_addr() else {
-            return true;
-        };
-
-        APP_CTX
-            .current_configuration
-            .get(|config| {
-                config
-                    .white_list_ip_list
-                    .is_white_listed(ip_list_id, &client_ip)
-            })
-            .await
+        client_address_refusal(
+            self.ip_white_list_id.as_deref(),
+            self.whitelisted_country.as_deref(),
+            connection_ip,
+        )
+        .await
+        .is_none()
     }
 
     pub async fn create_data_source(

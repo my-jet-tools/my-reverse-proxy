@@ -452,6 +452,7 @@ async fn the_template_guards_the_endpoint_and_none_takes_it_away() {
                 oauth: None,
                 modify_http_headers: None,
                 whitelisted_ip: None,
+                whitelisted_country: None,
                 api_keys_auth: Some(keys.clone()),
             },
         )]),

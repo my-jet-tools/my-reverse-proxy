@@ -81,6 +81,9 @@ pub struct LocationSettings {
     pub content_type: Option<String>,
     pub body: Option<String>,
     pub whitelisted_ip: Option<String>,
+    /// The id of a list of `country_white_lists`: this location serves a client only from a
+    /// country of it - on top of what the endpoint asks.
+    pub whitelisted_country: Option<String>,
     pub compress: Option<bool>,
     pub trace_payload: Option<bool>,
     /// The id of a set of `api_keys:` this location takes requests with a key of in `X-Api-Key`

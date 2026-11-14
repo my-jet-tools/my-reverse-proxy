@@ -20,6 +20,19 @@ impl ListenConfiguration {
             ListenConfiguration::Mcp(_) => None,
         }
     }
+
+    /// `whitelisted_country` of a tcp endpoint, checked when a connection is accepted - as its
+    /// `whitelisted_ip` is ([`Self::get_white_list_id`]). An http port is shared by its hosts,
+    /// and each of them checks its own lists by the request.
+    pub fn country_allows(&self, ip: std::net::IpAddr) -> bool {
+        match self {
+            ListenConfiguration::Tcp(config) => config
+                .country_white_list
+                .as_ref()
+                .is_none_or(|list| list.allows(ip)),
+            ListenConfiguration::Http(_) | ListenConfiguration::Mcp(_) => true,
+        }
+    }
 }
 
 pub struct AppConfigurationInner {

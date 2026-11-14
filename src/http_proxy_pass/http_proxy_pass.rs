@@ -66,26 +66,18 @@ impl HttpProxyPass {
             );
         }
 
-        // The endpoint's IP allow-list, for every request. An `https2` connection
-        // is checked when it is accepted and when its request handler resolves
-        // the vhost; an `http2` one is checked nowhere else.
-        if let Some(ip_list_id) = self.endpoint_info.whitelisted_ip_list_id.as_ref() {
-            if let Some(client_ip) = connection_ip.get_ip_addr() {
-                let is_whitelisted = crate::app::APP_CTX
-                    .current_configuration
-                    .get(|config| {
-                        config
-                            .white_list_ip_list
-                            .is_white_listed(ip_list_id, &client_ip)
-                    })
-                    .await;
-
-                if !is_whitelisted {
-                    return Err(ProxyPassError::IpRestricted(
-                        self.listening_port_info.listen_host.to_string(),
-                    ));
-                }
-            }
+        // The endpoint's IP and country allow-lists, for every request. An
+        // `https2` connection is checked when it is accepted and when its request
+        // handler resolves the vhost; an `http2` one is checked nowhere else.
+        if self
+            .endpoint_info
+            .address_refusal(&connection_ip)
+            .await
+            .is_some()
+        {
+            return Err(ProxyPassError::IpRestricted(
+                self.listening_port_info.listen_host.to_string(),
+            ));
         }
 
         // An endpoint which was given an access setting it can not apply serves

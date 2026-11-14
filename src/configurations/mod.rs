@@ -37,6 +37,8 @@ mod oauth_credentials;
 pub use oauth_credentials::*;
 mod white_list_ip_list_config;
 pub use white_list_ip_list_config::*;
+mod address_access;
+pub use address_access::*;
 
 mod ssh_configs;
 pub use ssh_configs::*;

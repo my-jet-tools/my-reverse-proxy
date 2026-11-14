@@ -31,6 +31,9 @@ pub struct SettingsModel {
     pub endpoint_templates: Option<HashMap<String, EndpointTemplateSettings>>,
     pub allowed_users: Option<HashMap<String, Vec<String>>>,
     pub ip_white_lists: Option<HashMap<String, Vec<String>>>,
+    /// Lists of countries by their ids - what `whitelisted_country` of an endpoint or a location
+    /// names. See [`crate::types::CountryWhiteList`].
+    pub country_white_lists: Option<HashMap<String, Vec<String>>>,
     pub gateway_server: Option<GatewayServerSettings>,
     pub gateway_clients: Option<HashMap<String, GatewayClientSettings>>,
 }
@@ -144,6 +147,7 @@ mod tests {
                     google_auth: None,
                     oauth: None,
                     whitelisted_ip: None,
+                    whitelisted_country: None,
                     template_id: None,
                     allowed_users: None,
                     api_keys_auth: None,
@@ -163,6 +167,7 @@ mod tests {
                     body: None,
                     content_type: None,
                     whitelisted_ip: None,
+                    whitelisted_country: None,
                     domain_name: None,
                     compress: None,
                     trace_payload: None,
@@ -227,6 +232,7 @@ mod tests {
             endpoint_templates: None,
             allowed_users: None,
             ip_white_lists: None,
+            country_white_lists: None,
             gateway_server: None,
             gateway_clients: Some(gateway_clients),
         };

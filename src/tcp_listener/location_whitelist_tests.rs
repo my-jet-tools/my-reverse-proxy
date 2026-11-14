@@ -58,6 +58,13 @@ const CLIENT_IS_NOT_LISTED: &[&str] = &["10.0.0.5", "10.0.0.1-10.0.0.5"];
 /// A list the client (127.0.0.1) is in.
 const CLIENT_IS_LISTED: &[&str] = &["127.0.0.1"];
 
+/// Countries without the one the loopback is of in the tests
+/// ([`crate::types::LOOPBACK_COUNTRY_IN_TESTS`], UA).
+const CLIENT_COUNTRY_IS_NOT_LISTED: &[&str] = &["DE", "USA"];
+
+/// The loopback's country of the tests, among others - written as a code of three letters too.
+const CLIENT_COUNTRY_IS_LISTED: &[&str] = &["DE", "ukr"];
+
 /// The key the location of `location_api_keys_auth` takes in `X-Api-Key`.
 const LOCATION_TOKEN: &str = "location-secret-key";
 
@@ -166,6 +173,10 @@ struct Setup {
     another_endpoint_uses_the_list: bool,
     /// `whitelisted_ip` of the ENDPOINT: what the list it names holds.
     endpoint_list: Option<&'static [&'static str]>,
+    /// `whitelisted_country` of the LOCATION: the countries of the list it names.
+    location_countries: Option<&'static [&'static str]>,
+    /// `whitelisted_country` of the ENDPOINT: the countries of the list it names.
+    endpoint_countries: Option<&'static [&'static str]>,
     /// `api_keys_auth` of the location, with a set of `api_keys:` it names.
     location_api_keys_auth: bool,
     /// `google_auth` of the endpoint.
@@ -239,6 +250,35 @@ const TABLE: &[(Setup, [Option<Expected>; 7])] = &[
              endpoint_list: Some(CLIENT_IS_LISTED), ..NO_SETUP },
         [SERVED, SERVED, SERVED, SERVED, SERVED, SERVED, SERVED]),
 
+    // --- whitelisted_country: the country of the client's address ----------------------------
+    (Setup { name: "LOCATION whitelisted_country, client's country NOT listed",
+             location_countries: Some(CLIENT_COUNTRY_IS_NOT_LISTED), ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "LOCATION whitelisted_country, client's country listed",
+             location_countries: Some(CLIENT_COUNTRY_IS_LISTED), ..NO_SETUP },
+        [SERVED, SERVED, SERVED, SERVED, SERVED, SERVED, SERVED]),
+    (Setup { name: "ENDPOINT whitelisted_country, client's country NOT listed",
+             endpoint_countries: Some(CLIENT_COUNTRY_IS_NOT_LISTED), ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "ENDPOINT whitelisted_country, client's country listed",
+             endpoint_countries: Some(CLIENT_COUNTRY_IS_LISTED), ..NO_SETUP },
+        [SERVED, SERVED, SERVED, SERVED, SERVED, SERVED, SERVED]),
+
+    // Both lists named: a client has to pass both - a country list never opens what an ip list
+    // keeps closed, nor the other way round.
+    (Setup { name: "ENDPOINT whitelisted_ip listed, whitelisted_country NOT listed",
+             endpoint_list: Some(CLIENT_IS_LISTED),
+             endpoint_countries: Some(CLIENT_COUNTRY_IS_NOT_LISTED), ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "ENDPOINT whitelisted_ip NOT listed, whitelisted_country listed",
+             endpoint_list: Some(CLIENT_IS_NOT_LISTED),
+             endpoint_countries: Some(CLIENT_COUNTRY_IS_LISTED), ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "ENDPOINT whitelisted_country listed, LOCATION whitelisted_country NOT listed",
+             endpoint_countries: Some(CLIENT_COUNTRY_IS_LISTED),
+             location_countries: Some(CLIENT_COUNTRY_IS_NOT_LISTED), ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+
     // --- the other access settings -----------------------------------------------------------
     //
     // `mcp` and `tcp` forward bytes: they read no request, so they can check neither a header
@@ -264,6 +304,8 @@ const NO_SETUP: Setup = Setup {
     location_list_is_not_declared: false,
     another_endpoint_uses_the_list: false,
     endpoint_list: None,
+    location_countries: None,
+    endpoint_countries: None,
     location_api_keys_auth: false,
     endpoint_google_auth: false,
     endpoint_allowed_users: false,
@@ -295,6 +337,43 @@ async fn a_location_whitelist_which_is_not_declared_does_not_compile() {
             err.contains("Ip list with id") && err.contains("not found"),
             "{err}"
         );
+    }
+}
+
+/// A country list an endpoint or a location names has to be declared, and has to name
+/// countries: such a host does not load, rather than serve everybody or nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_country_list_which_is_not_declared_or_not_of_countries_does_not_compile() {
+    for endpoint in [Endpoint::Http, Endpoint::Https2OverH2, Endpoint::Tcp] {
+        let port = free_port().await;
+        let proxy_pass_to = endpoint.proxy_pass_to(free_port().await);
+        let endpoint_type = endpoint.type_name();
+        let host = format!(
+            "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {endpoint_type}\n"
+        );
+
+        let cases = [
+            (
+                format!("{host}      whitelisted_country: nowhere\n    locations:\n    - proxy_pass_to: {proxy_pass_to}\n"),
+                "whitelisted_country: 'nowhere' is not in country_white_lists",
+            ),
+            (
+                format!("{host}    locations:\n    - proxy_pass_to: {proxy_pass_to}\n      whitelisted_country: nowhere\n"),
+                "whitelisted_country: 'nowhere' is not in country_white_lists",
+            ),
+            (
+                format!("{host}      whitelisted_country: typo\n    locations:\n    - proxy_pass_to: {proxy_pass_to}\ncountry_white_lists:\n  typo:\n  - UA\n  - XX\n"),
+                "country_white_lists.typo: 'XX' is not a country code",
+            ),
+        ];
+
+        for (yaml, expected) in cases {
+            let err = try_apply_settings(&yaml)
+                .await
+                .expect_err(&format!("the settings compile:\n{yaml}"));
+
+            assert!(err.contains(expected), "{endpoint_type}: {err}\n{yaml}");
+        }
     }
 }
 
@@ -1079,6 +1158,7 @@ fn settings_yaml(
     let mut location_lines = String::new();
     let mut other_hosts = String::new();
     let mut ip_white_lists = String::new();
+    let mut country_white_lists = String::new();
     let mut sections = String::new();
 
     if let Some(list) = setup.location_list {
@@ -1099,6 +1179,18 @@ fn settings_yaml(
     if let Some(list) = setup.endpoint_list {
         endpoint_lines.push_str(&format!("      whitelisted_ip: {endpoint_list_id}\n"));
         ip_white_lists.push_str(&format!("  {endpoint_list_id}:\n{}", yaml_list(list)));
+    }
+
+    if let Some(countries) = setup.location_countries {
+        let list_id = format!("{id}_location_countries");
+        location_lines.push_str(&format!("      whitelisted_country: {list_id}\n"));
+        country_white_lists.push_str(&format!("  {list_id}:\n{}", yaml_list(countries)));
+    }
+
+    if let Some(countries) = setup.endpoint_countries {
+        let list_id = format!("{id}_endpoint_countries");
+        endpoint_lines.push_str(&format!("      whitelisted_country: {list_id}\n"));
+        country_white_lists.push_str(&format!("  {list_id}:\n{}", yaml_list(countries)));
     }
 
     if setup.location_api_keys_auth {
@@ -1124,6 +1216,10 @@ fn settings_yaml(
 
     if !ip_white_lists.is_empty() {
         sections.push_str(&format!("ip_white_lists:\n{ip_white_lists}"));
+    }
+
+    if !country_white_lists.is_empty() {
+        sections.push_str(&format!("country_white_lists:\n{country_white_lists}"));
     }
 
     format!(
@@ -1176,6 +1272,7 @@ async fn try_apply_settings(yaml: &str) -> Result<(), String> {
     let settings = SettingsCompiled {
         hosts: model.hosts,
         ip_white_lists: model.ip_white_lists.unwrap_or_default(),
+        country_white_lists: model.country_white_lists.unwrap_or_default(),
         allowed_users: model.allowed_users.unwrap_or_default(),
         g_auth: model.g_auth.unwrap_or_default(),
         ..Default::default()

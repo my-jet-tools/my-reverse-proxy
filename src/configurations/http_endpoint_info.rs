@@ -32,6 +32,8 @@ pub struct HttpEndpointInfo {
     pub modify_request_headers: ModifyHeadersConfig,
     pub modify_response_headers: ModifyHeadersConfig,
     pub whitelisted_ip_list_id: Option<String>,
+    /// `whitelisted_country` of the endpoint, or of its template: see [`Self::address_refusal`].
+    pub whitelisted_country: Option<Arc<crate::types::CountryWhiteList>>,
     pub keep_alive: bool,
     pub track_metrics_by_all_domains: bool,
     pub hsts: bool,
@@ -70,6 +72,7 @@ pub struct HttpEndpointInfoParams {
     pub client_certificate_id: Option<SslCertificateId>,
     pub client_certificate_unlimited_expiration: bool,
     pub whitelisted_ip_list_id: Option<String>,
+    pub whitelisted_country: Option<Arc<crate::types::CountryWhiteList>>,
     pub locations: Vec<Arc<ProxyPassLocationConfig>>,
     pub allowed_user_list_id: Option<String>,
     pub modify_headers_settings: HttpEndpointModifyHeadersSettings,
@@ -96,6 +99,7 @@ impl HttpEndpointInfo {
             client_certificate_id,
             client_certificate_unlimited_expiration,
             whitelisted_ip_list_id,
+            whitelisted_country,
             locations,
             allowed_user_list_id,
             mut modify_headers_settings,
@@ -141,6 +145,7 @@ impl HttpEndpointInfo {
             ),
             ssl_certificate_id,
             whitelisted_ip_list_id,
+            whitelisted_country,
             keep_alive,
             track_metrics_by_all_domains,
             hsts,
@@ -151,6 +156,22 @@ impl HttpEndpointInfo {
             dynamic_host,
             additional_host_of: None,
         }
+    }
+
+    /// `whitelisted_ip` and `whitelisted_country` of the endpoint, for the client at
+    /// `connection_ip`: why it is refused - `None`: it is not. Every pipeline asks this for every
+    /// request, by the endpoint the request is routed to: a connection may carry requests for
+    /// other hosts than the one it was opened for.
+    pub async fn address_refusal(
+        &self,
+        connection_ip: &crate::types::ConnectionIp,
+    ) -> Option<String> {
+        client_address_refusal(
+            self.whitelisted_ip_list_id.as_deref(),
+            self.whitelisted_country.as_deref(),
+            connection_ip,
+        )
+        .await
     }
 
     /// The endpoint of `host_endpoint`, a name of `additional_hosts` of this endpoint's host: the

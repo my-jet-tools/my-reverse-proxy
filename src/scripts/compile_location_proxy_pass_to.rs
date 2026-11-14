@@ -126,12 +126,16 @@ pub async fn compile_location_proxy_pass_to(
         }
     }
 
+    let whitelisted_country =
+        super::get_location_whitelisted_country(settings_model, location_settings)?;
+
     let result = ProxyPassLocationConfig::new(
         path,
         location_settings,
         proxy_pass_to,
         listen_host,
         endpoint_api_keys_auth,
+        whitelisted_country,
     );
 
     Ok(result)

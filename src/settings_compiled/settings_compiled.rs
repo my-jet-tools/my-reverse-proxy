@@ -49,6 +49,8 @@ pub struct SettingsCompiled {
     pub endpoint_templates: HashMap<String, EndpointTemplateSettings>,
     pub allowed_users: HashMap<String, Vec<String>>,
     pub ip_white_lists: HashMap<String, Vec<String>>,
+    /// `country_white_lists` of the settings files: the countries of each list as written.
+    pub country_white_lists: HashMap<String, Vec<String>>,
     pub gateway_server: Option<GatewayServerSettings>,
     pub gateway_clients: HashMap<String, GatewayClientSettings>,
 }

@@ -74,41 +74,25 @@ pub fn handle_connection(
 
         let (mut tls_stream, endpoint_info, cn_user_name) = result;
 
-        if let Some(ip_list_id) = endpoint_info.whitelisted_ip_list_id.as_ref() {
-            // Match against the CLIENT's IP, not the proxy's own listening
-            // address. Skip when the client IP is unknown (unix socket), matching
-            // the location-level allow-list check in HttpProxyPass::send_payload.
-            if let Some(client_ip) = connection_ip.get_ip_addr() {
-                let is_whitelisted = crate::app::APP_CTX
-                    .current_configuration
-                    .get(|config| {
-                        config
-                            .white_list_ip_list
-                            .is_white_listed(ip_list_id, &client_ip)
-                    })
-                    .await;
-
-                if !is_whitelisted {
-                    // Endpoint-level rejection (endpoint resolved, client IP not allowed) — surface
-                    // it in the endpoint's debug log when the endpoint is being debugged.
-                    if crate::app::APP_CTX
-                        .debug_flags
-                        .is_endpoint_debug(endpoint_info.as_str())
-                    {
-                        crate::app::APP_CTX.proxy_logs.write(
-                            endpoint_info.as_str(),
-                            None,
-                            connection_ip.get_ip_log(),
-                            format!(
-                                "Rejected connection: client IP not in allow-list '{}'",
-                                ip_list_id
-                            ),
-                        );
-                    }
-                    let _ = tls_stream.shutdown().await;
-                    return;
-                }
+        // The endpoint's IP and country allow-lists, by the CLIENT's IP, not the proxy's own
+        // listening address. Skipped when the client IP is unknown (unix socket), matching the
+        // location-level allow-list check in HttpProxyPass::send_payload.
+        if let Some(refusal) = endpoint_info.address_refusal(&connection_ip).await {
+            // Endpoint-level rejection (endpoint resolved, client not allowed) — surface it in
+            // the endpoint's debug log when the endpoint is being debugged.
+            if crate::app::APP_CTX
+                .debug_flags
+                .is_endpoint_debug(endpoint_info.as_str())
+            {
+                crate::app::APP_CTX.proxy_logs.write(
+                    endpoint_info.as_str(),
+                    None,
+                    connection_ip.get_ip_log(),
+                    format!("Rejected connection: {refusal}"),
+                );
             }
+            let _ = tls_stream.shutdown().await;
+            return;
         }
 
         match endpoint_info.listen_endpoint_type {
