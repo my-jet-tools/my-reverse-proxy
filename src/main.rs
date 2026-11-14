@@ -52,8 +52,11 @@ mod upstream_h2_pool;
 mod upstream_status;
 mod utils;
 
+/// The error of a body that can not fail (`Full`, `Empty`), turned into the `String` error the
+/// boxed bodies carry. There is no value to convert: matching it on nothing is what says so,
+/// and it compiles whether `Infallible` is an empty enum or `!`.
 pub fn to_hyper_error(e: std::convert::Infallible) -> String {
-    e.to_string()
+    match e {}
 }
 
 #[tokio::main]

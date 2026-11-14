@@ -38,12 +38,12 @@ pub type HyperRequest = hyper::Request<HyperRequestBody>;
 /// Erases a buffered request body into the trait object the connections speak in.
 pub fn to_hyper_request(req: hyper::Request<Full<Bytes>>) -> HyperRequest {
     let (head, body) = req.into_parts();
-    hyper::Request::from_parts(head, body.map_err(|err| err.to_string()).boxed())
+    hyper::Request::from_parts(head, body.map_err(crate::to_hyper_error).boxed())
 }
 
 /// The body of a request that has none (an extended CONNECT, a probe).
 pub fn empty_request_body() -> HyperRequestBody {
     Full::new(Bytes::new())
-        .map_err(|err| err.to_string())
+        .map_err(crate::to_hyper_error)
         .boxed()
 }
