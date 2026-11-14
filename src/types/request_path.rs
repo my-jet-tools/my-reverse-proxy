@@ -4,7 +4,7 @@ use std::borrow::Cow;
 /// `.` or an empty one - written as it is or percent-encoded.
 ///
 /// A location is picked by what the request path starts with, and the rules of the location -
-/// its `auth_header`, its `whitelisted_ip` - are the rules of the request. The path goes on to
+/// its `api_keys_auth`, its `whitelisted_ip` - are the rules of the request. The path goes on to
 /// the upstream as it was received (without the location path, when the location has
 /// `strip_path`), and an upstream resolves such segments: `/open/../secure/x` is picked by the
 /// location `/open` and is `/secure/x` to the upstream - served past the rules of the location

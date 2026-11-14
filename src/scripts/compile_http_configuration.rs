@@ -95,6 +95,9 @@ pub async fn compile_http_configuration(
     // first location allowed to override (an mcp endpoint carries one location).
     let mut mcp_resolved = endpoint_timeouts.resolve();
 
+    // Each location is guarded by it, unless the location names a set of its own, or `none`.
+    let endpoint_api_keys_auth = super::get_endpoint_api_keys_auth(settings_model, host_settings)?;
+
     let listen_host = host_endpoint.as_str().to_string();
     for (location_index, location_settings) in host_settings.locations.iter().enumerate() {
         let resolved = endpoint_timeouts
@@ -116,6 +119,7 @@ pub async fn compile_http_configuration(
             location_settings,
             &listen_host,
             &resolved,
+            endpoint_api_keys_auth,
         )
         .await?;
 
@@ -261,9 +265,9 @@ fn strip_path_has_no_meaning(
 /// with them, and the endpoint serves nobody: see [`NotServedReason`].
 ///
 /// - `type: mcp` is a TLS termination and a byte bridge to the first location. It parses no
-///   HTTP, so it can check neither a header nor a session: `auth_header` of a location,
-///   `google_auth` and `allowed_users`. (`whitelisted_ip` it can check, and does - by the
-///   address of the connection.)
+///   HTTP, so it can check neither a header nor a session: `api_keys_auth` (of the endpoint or of
+///   a location), `google_auth` and `allowed_users`. (`whitelisted_ip` it can check, and does -
+///   by the address of the connection.)
 /// - `google_auth` is resolved for `https` and `https2` endpoints only: on `http` and `http2`
 ///   it is not there, and the endpoint would serve everybody.
 fn access_settings_the_endpoint_can_not_apply(
@@ -278,12 +282,8 @@ fn access_settings_the_endpoint_can_not_apply(
         ListenHttpEndpointType::Mcp => {
             let mut settings = Vec::new();
 
-            if host_settings
-                .locations
-                .iter()
-                .any(|location| location.auth_header.is_some())
-            {
-                settings.push("auth_header");
+            if super::endpoint_has_api_keys_auth(settings_model, host_settings)? {
+                settings.push("api_keys_auth");
             }
 
             if has_google_auth {

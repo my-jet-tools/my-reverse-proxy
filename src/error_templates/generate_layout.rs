@@ -95,8 +95,6 @@ fn build_layout_with_explicit_status(
     text: &str,
     second_line: Option<StrOrString>,
 ) -> Vec<u8> {
-    use crate::app::APP_VERSION;
-
     let second_line = if let Some(second_line) = second_line {
         format!("<h4>{}</h4>", second_line.as_str())
     } else {
@@ -109,8 +107,6 @@ fn build_layout_with_explicit_status(
         <h2>{text}</h2>
       {second_line}
         <p>{status_code}</p>
-        <hr/>
-        <div>MyReverseProxy {APP_VERSION}</div>
         </div>
         "#
     )
@@ -127,8 +123,6 @@ fn build_layout_with_explicit_status(
 }
 
 fn layout_body(status_code: u16, text: &str, second_line: Option<StrOrString>) -> Vec<u8> {
-    use crate::app::APP_VERSION;
-
     let second_line = if let Some(second_line) = second_line {
         format!("<h4>{}</h4>", second_line.as_str())
     } else {
@@ -141,8 +135,6 @@ fn layout_body(status_code: u16, text: &str, second_line: Option<StrOrString>) -
         <h2>{text}</h2>
       {second_line}
         <p>{status_code}</p>
-        <hr/>
-        <div>MyReverseProxy {APP_VERSION}</div>
         </div>
         "#
     )
@@ -187,5 +179,32 @@ mod tests {
         assert!(!page.contains("HTTP/1.1"), "{page}");
         assert!(!page.contains("content-length"), "{page}");
         assert!(page.contains("<h2>Not found</h2>"), "{page}");
+    }
+
+    /// Everybody gets these pages: they do not name the proxy, nor the version of it - a
+    /// scanner would look that version up among the known vulnerabilities.
+    #[test]
+    fn a_page_does_not_tell_what_serves_it() {
+        let pages = [
+            NOT_FOUND.as_slice(),
+            BAD_REQUEST.as_slice(),
+            REMOTE_RESOURCE_IS_NOT_AVAILABLE.as_slice(),
+            LOCATION_IS_NOT_FOUND.as_slice(),
+            ERROR_TIMEOUT.as_slice(),
+            ERROR_GETTING_CONTENT_FROM_REMOTE_RESOURCE.as_slice(),
+            UPSTREAM_IS_NOT_HTTP.as_slice(),
+            NOT_AUTHORIZED_PAGE.as_slice(),
+            PROXY_TO_HEADER_MISSING.as_slice(),
+            PROXY_TO_HOST_NOT_ALLOWED.as_slice(),
+            MTLS_REQUIRED_MISDIRECTED.as_slice(),
+        ];
+
+        let body = generate_layout_body(502, "Bad gateway", Some("details".into()));
+
+        for page in pages.into_iter().chain([body.as_slice()]) {
+            let page = String::from_utf8_lossy(page);
+            assert!(!page.contains("MyReverseProxy"), "{page}");
+            assert!(!page.contains(crate::app::APP_VERSION), "{page}");
+        }
     }
 }

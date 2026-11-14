@@ -226,7 +226,7 @@ pub struct AdditionalHostName<'s> {
     pub host_id: &'s str,
     /// The id of the host it is a name of.
     pub additional_host_of: &'s str,
-    /// The name came from `dynamic_hosts.url`.
+    /// The name came from a url of `real_time_configurations`.
     pub dynamic_host: bool,
 }
 

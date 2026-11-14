@@ -173,14 +173,15 @@ gzipped JSON-RPC message. Do not enable it on MCP locations.
 `google_auth` redirects to a browser login — a programmatic MCP client just
 fails on the 302. Use the endpoint's `oauth` block (the proxy's own OAuth 2.1
 server; it strips the `authorization` header before the upstream, as the MCP
-authorization spec requires), per-location `auth_header`, or no proxy-level auth
-at all. See [mcp-oauth.md](mcp-oauth.md).
+authorization spec requires), `api_keys_auth` - a key in `X-Api-Key` - or no
+proxy-level auth at all. See [mcp-oauth.md](mcp-oauth.md).
 
-`auth_header` works on `mcp` and `mcp-h2` alike — the h1 pipeline and the hyper
-path enforce the same check. It can be written into the dynamic settings file
-and applied with `reload_settings`, and a client holding an h2 connection open
-picks the new value up on its next request rather than on its next connection.
-See [header-auth.md](header-auth.md).
+`api_keys_auth` works on `mcp` and `mcp-h2` alike — the h1 pipeline and the hyper
+path enforce the same check. The keys can be written into the dynamic settings
+file and applied with `reload_settings`, or handed out by a url of
+`real_time_configurations`, and a client holding a connection open is checked
+against the new keys on its next request rather than on its next connection.
+See [api-keys.md](api-keys.md).
 
 ## Files involved
 

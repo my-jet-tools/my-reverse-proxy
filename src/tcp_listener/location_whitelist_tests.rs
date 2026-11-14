@@ -43,6 +43,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
+use crate::test_ports::free_port;
 use crate::{
     configurations::EndpointPort, settings::SettingsModel, settings_compiled::SettingsCompiled,
 };
@@ -57,7 +58,8 @@ const CLIENT_IS_NOT_LISTED: &[&str] = &["10.0.0.5", "10.0.0.1-10.0.0.5"];
 /// A list the client (127.0.0.1) is in.
 const CLIENT_IS_LISTED: &[&str] = &["127.0.0.1"];
 
-const LOCATION_TOKEN: &str = "Bearer location-secret";
+/// The key the location of `location_api_keys_auth` takes in `X-Api-Key`.
+const LOCATION_TOKEN: &str = "location-secret-key";
 
 /// The README, to take its own example from - with `\n` line ends, which a checkout on Windows
 /// may have turned into `\r\n`.
@@ -164,13 +166,13 @@ struct Setup {
     another_endpoint_uses_the_list: bool,
     /// `whitelisted_ip` of the ENDPOINT: what the list it names holds.
     endpoint_list: Option<&'static [&'static str]>,
-    /// `auth_header` of the location.
-    location_auth_header: bool,
+    /// `api_keys_auth` of the location, with a set of `api_keys:` it names.
+    location_api_keys_auth: bool,
     /// `google_auth` of the endpoint.
     endpoint_google_auth: bool,
     /// `allowed_users` of the endpoint.
     endpoint_allowed_users: bool,
-    /// The request carries the `Authorization` the location asks for.
+    /// The request carries the `X-Api-Key` the location asks for.
     request_is_authorized: bool,
 }
 
@@ -240,13 +242,13 @@ const TABLE: &[(Setup, [Option<Expected>; 7])] = &[
     // --- the other access settings -----------------------------------------------------------
     //
     // `mcp` and `tcp` forward bytes: they read no request, so they can check neither a header
-    // nor a session. An endpoint which was told to serves nobody - the right `Authorization`
-    // does not open it. So does an `http` / `http2` endpoint with `google_auth`, which needs TLS.
-    (Setup { name: "LOCATION auth_header, request without Authorization",
-             location_auth_header: true, ..NO_SETUP },
+    // nor a session. An endpoint which was told to serves nobody - the right `X-Api-Key` does
+    // not open it. So does an `http` / `http2` endpoint with `google_auth`, which needs TLS.
+    (Setup { name: "LOCATION api_keys_auth, request without X-Api-Key",
+             location_api_keys_auth: true, ..NO_SETUP },
         [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
-    (Setup { name: "LOCATION auth_header, request with the right Authorization",
-             location_auth_header: true, request_is_authorized: true, ..NO_SETUP },
+    (Setup { name: "LOCATION api_keys_auth, request with the right X-Api-Key",
+             location_api_keys_auth: true, request_is_authorized: true, ..NO_SETUP },
         [SERVED, SERVED, SERVED, SERVED, SERVED, REFUSED, REFUSED]),
     (Setup { name: "ENDPOINT google_auth, request without a session",
              endpoint_google_auth: true, ..NO_SETUP },
@@ -262,7 +264,7 @@ const NO_SETUP: Setup = Setup {
     location_list_is_not_declared: false,
     another_endpoint_uses_the_list: false,
     endpoint_list: None,
-    location_auth_header: false,
+    location_api_keys_auth: false,
     endpoint_google_auth: false,
     endpoint_allowed_users: false,
     request_is_authorized: false,
@@ -503,7 +505,7 @@ enum LocationKind {
     /// A folder of local files.
     Files,
     /// `proxy_pass_to: dynamic`: the client names the upstream in `proxy-to` - the README tells to
-    /// guard such a location with `auth_header` / `google_auth` / `whitelisted_ip`.
+    /// guard such a location with `api_keys_auth` / `google_auth` / `whitelisted_ip`.
     Dynamic,
     /// An http upstream, asked for a websocket upgrade: the h1 pipeline hands that to a tunnel of
     /// its own (`run_ws_tunnel`).
@@ -1040,7 +1042,7 @@ async fn probe(endpoint: Endpoint, setup: &Setup) -> Outcome {
     apply_settings(&yaml).await;
     serve(port);
 
-    let authorization = [("authorization", LOCATION_TOKEN)];
+    let authorization = [("x-api-key", LOCATION_TOKEN)];
     let headers: &[(&str, &str)] = if setup.request_is_authorized {
         &authorization
     } else {
@@ -1099,8 +1101,11 @@ fn settings_yaml(
         ip_white_lists.push_str(&format!("  {endpoint_list_id}:\n{}", yaml_list(list)));
     }
 
-    if setup.location_auth_header {
-        location_lines.push_str(&format!("      auth_header: \"{LOCATION_TOKEN}\"\n"));
+    if setup.location_api_keys_auth {
+        location_lines.push_str(&format!("      api_keys_auth: {id}_keys\n"));
+        sections.push_str(&format!(
+            "api_keys:\n  {id}_keys:\n  - \"{LOCATION_TOKEN}\"\n"
+        ));
     }
 
     if setup.endpoint_google_auth {
@@ -1143,8 +1148,9 @@ fn unique_id(prefix: &str) -> String {
 
 /// What `flows::load_everything_from_settings` does with a settings file, for the settings in
 /// `yaml`: every host goes through `scripts::compile_host_configuration` - `existing` being what
-/// the same port got from the hosts before it - and the port configurations are published into
-/// the live configuration, where the accept loop looks its port up.
+/// the same port got from the hosts of these settings before it - and the port configurations
+/// are published into the live configuration, where the accept loop looks its port up. A port
+/// is replaced as a whole, as the flow does.
 ///
 /// Two things are left out, and neither takes part in what is tested: the file is not read from
 /// `~/.my-reverse-proxy`, and `${variables}` are not substituted (the settings here have none, so
@@ -1160,6 +1166,13 @@ async fn try_apply_settings(yaml: &str) -> Result<(), String> {
     let model: SettingsModel = my_settings_reader::serde_yaml::from_str(yaml)
         .map_err(|err| format!("the settings do not parse: {err}"))?;
 
+    // The flow publishes the keys of the settings; here they are added next to the ones of the
+    // other tests, under ids of their own.
+    for (keys_id, keys) in model.api_keys.iter().flatten() {
+        let keys: Vec<&str> = keys.iter().map(|key| key.as_str()).collect();
+        crate::app::APP_CTX.api_keys.add_for_tests(keys_id, &keys);
+    }
+
     let settings = SettingsCompiled {
         hosts: model.hosts,
         ip_white_lists: model.ip_white_lists.unwrap_or_default(),
@@ -1168,6 +1181,12 @@ async fn try_apply_settings(yaml: &str) -> Result<(), String> {
         ..Default::default()
     };
 
+    // Each port as these settings make it - not merged into what the live configuration has on
+    // it: the tests share that configuration, and what another test put there for a port it was
+    // handed stays there after that test.
+    let mut ports: std::collections::HashMap<u16, crate::configurations::ListenConfiguration> =
+        std::collections::HashMap::new();
+
     for (host_id, host_settings) in &settings.hosts {
         let endpoint_host = settings.get_endpoint_host_string(host_id).unwrap();
 
@@ -1175,27 +1194,26 @@ async fn try_apply_settings(yaml: &str) -> Result<(), String> {
             panic!("{host_id} is not a tcp port");
         };
 
-        let existing = crate::app::APP_CTX
-            .current_configuration
-            .get(|config| config.listen_tcp_endpoints.get(&port).cloned())
-            .await;
-
         let configuration = crate::scripts::compile_host_configuration(
             &settings,
             endpoint_host,
             host_settings,
-            existing,
+            ports.remove(&port),
         )
         .await
         .map_err(|err| format!("host {host_id} does not compile: {err}"))?;
 
-        crate::app::APP_CTX
-            .current_configuration
-            .write(move |config| {
-                config.listen_tcp_endpoints.insert(port, configuration);
-            })
-            .await;
+        ports.insert(port, configuration);
     }
+
+    crate::app::APP_CTX
+        .current_configuration
+        .write(move |config| {
+            for (port, configuration) in ports {
+                config.listen_tcp_endpoints.insert(port, configuration);
+            }
+        })
+        .await;
 
     Ok(())
 }
@@ -1204,15 +1222,6 @@ async fn try_apply_settings(yaml: &str) -> Result<(), String> {
 /// is on the loopback.
 fn serve(port: u16) {
     super::start_listen_tcp_server(SocketAddr::from(([127, 0, 0, 1], port)));
-}
-
-async fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -24,7 +24,10 @@ pub struct ProxyPassLocationConfig {
     pub domain_name: Option<String>,
     pub proxy_pass_to: ProxyPassToConfig,
     pub compress: bool,
-    pub auth_header: Option<String>,
+    /// The id of the set of `api_keys:` a request to this location has to carry a key of in
+    /// `X-Api-Key`: the location's own `api_keys_auth`, or else the one of its endpoint (or of the
+    /// endpoint's template). `None`: the location is open - `none` was written, or nothing.
+    pub api_keys_auth: Option<String>,
     /// `strip_path` of the settings: the upstream gets the request target without the part of
     /// the path which picked this location (`crate::types::strip_location_path`).
     pub strip_path: bool,
@@ -33,35 +36,15 @@ pub struct ProxyPassLocationConfig {
     h2_upstream: tokio::sync::OnceCell<std::sync::Arc<HttpProxyPassContentSource>>,
 }
 
-/// Byte-for-byte comparison of the configured `auth_header` value against the
-/// request's `Authorization` value after stripping surrounding SP / HTAB. No
-/// scheme parsing on purpose: `Bearer x` and `bearer x` are different values.
-/// An absent header and a wrong value are indistinguishable to the caller.
-pub fn auth_header_matches(expected: &str, actual: Option<&[u8]>) -> bool {
-    match actual {
-        Some(actual) => trim_ascii_blanks(actual) == expected.as_bytes(),
-        None => false,
-    }
-}
-
-fn trim_ascii_blanks(input: &[u8]) -> &[u8] {
-    let mut start = 0;
-    let mut end = input.len();
-    while start < end && (input[start] == b' ' || input[start] == b'\t') {
-        start += 1;
-    }
-    while end > start && (input[end - 1] == b' ' || input[end - 1] == b'\t') {
-        end -= 1;
-    }
-    &input[start..end]
-}
-
 impl ProxyPassLocationConfig {
+    /// `endpoint_api_keys_auth`: `api_keys_auth` of the endpoint the location is of - or of its
+    /// template.
     pub fn new(
         path: String,
         location_settings: &LocationSettings,
         proxy_pass_to: ProxyPassToConfig,
         listen_host: &str,
+        endpoint_api_keys_auth: Option<&str>,
     ) -> Self {
         let mut modify_request_headers = ModifyHeadersConfig::default();
         let mut modify_response_headers = ModifyHeadersConfig::default();
@@ -85,7 +68,10 @@ impl ProxyPassLocationConfig {
             proxy_pass_to,
             domain_name: location_settings.domain_name.clone(),
             compress: location_settings.get_compress(),
-            auth_header: location_settings.auth_header.clone(),
+            api_keys_auth: crate::api_keys::resolve_api_keys_auth(
+                location_settings.api_keys_auth.as_deref(),
+                endpoint_api_keys_auth,
+            ),
             strip_path: location_settings.get_strip_path(),
             h2_upstream: tokio::sync::OnceCell::new(),
         }
@@ -111,13 +97,13 @@ impl ProxyPassLocationConfig {
         self.proxy_pass_to.to_string()
     }
 
-    /// The per-location `auth_header` gate. `actual` is the request's raw
-    /// `Authorization` value (`None` when the header is absent). Shared by the
-    /// h1 byte pipeline and the hyper (h2 endpoint) path so both enforce the
-    /// same rule.
-    pub fn auth_header_accepts(&self, actual: Option<&[u8]>) -> bool {
-        match self.auth_header.as_deref() {
-            Some(expected) => auth_header_matches(expected, actual),
+    /// The `api_keys_auth` gate of the location. `values`: every `X-Api-Key` header of the
+    /// request. Shared by the h1 byte pipeline and the hyper path, so both apply the same rule.
+    /// A request it refuses is counted against its source by the IP block-list - the caller
+    /// does that, it has the address.
+    pub fn api_keys_auth_accepts<'a>(&self, values: impl Iterator<Item = &'a [u8]>) -> bool {
+        match self.api_keys_auth.as_deref() {
+            Some(id) => crate::api_keys::request_has_api_key(&APP_CTX.api_keys, id, values),
             None => true,
         }
     }
@@ -869,39 +855,4 @@ fn unix_socket_not_supported() -> HttpProxyPassContentSource {
             },
         )),
     )
-}
-
-#[cfg(test)]
-mod auth_header_tests {
-    use super::auth_header_matches;
-
-    #[test]
-    fn exact_value_matches() {
-        assert!(auth_header_matches("Bearer abc", Some(b"Bearer abc")));
-    }
-
-    #[test]
-    fn surrounding_blanks_are_ignored() {
-        assert!(auth_header_matches("Bearer abc", Some(b"  Bearer abc\t")));
-    }
-
-    #[test]
-    fn absent_header_is_refused() {
-        assert!(!auth_header_matches("Bearer abc", None));
-    }
-
-    #[test]
-    fn wrong_value_is_refused() {
-        assert!(!auth_header_matches("Bearer abc", Some(b"Bearer abd")));
-        assert!(!auth_header_matches(
-            "Bearer abc",
-            Some(b"Bearer abc extra")
-        ));
-        assert!(!auth_header_matches("Bearer abc", Some(b"")));
-    }
-
-    #[test]
-    fn scheme_is_case_sensitive() {
-        assert!(!auth_header_matches("Bearer abc", Some(b"bearer abc")));
-    }
 }

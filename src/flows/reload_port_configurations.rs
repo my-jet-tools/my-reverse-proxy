@@ -24,8 +24,9 @@ pub async fn reload_unix_configurations(host_to_refresh: &String) -> Result<Stri
 
 /// Puts one port together anew from the settings files: the hosts of the files on it - the ones
 /// it had and the ones it has now - are reloaded, with their names; the dynamic hosts and names
-/// on it are put next to them. The settings applied are updated with what is reloaded, and the
-/// hosts of `dynamic_hosts.url` are put next to them anew.
+/// on it are put next to them. The settings applied are updated with what is reloaded, and what
+/// the urls of `real_time_configurations` gave is put next to them anew. The keys of `api_keys:`
+/// are taken from the files as they are now.
 ///
 /// A host of the files which does not compile fails the reload, as it always has; a dynamic one
 /// is left out with its error - what the url gives can not keep the hosts of the files from
@@ -54,6 +55,8 @@ async fn reload_port(port: EndpointPort) -> Result<bool, String> {
 
     let (after, host_ids) =
         super::settings_with_reloaded_hosts(applied.as_deref(), &fresh, host_ids);
+
+    crate::api_keys::publish_api_keys(&after);
 
     let mut errors = FoundErrors::default();
 
@@ -129,7 +132,7 @@ mod tests {
     use super::*;
 
     fn hosts(yaml: &str) -> std::collections::HashMap<String, crate::settings::HostSettings> {
-        crate::settings::DynamicHostsModel::parse(yaml.as_bytes())
+        crate::settings::RealTimeConfigurationModel::parse(yaml.as_bytes())
             .unwrap()
             .unwrap()
             .hosts

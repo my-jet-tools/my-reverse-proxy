@@ -12,8 +12,8 @@ An MCP server behind the proxy typically does no authentication at all: it
 listens on loopback and trusts whatever reaches it. Exposing it publicly means
 the proxy has to be the gate.
 
-`auth_header` (see [header-auth.md](header-auth.md)) already does that with a
-static bearer token, and it is the simpler option whenever the client can be
+`api_keys_auth` (see [api-keys.md](api-keys.md)) already does that with a
+static key in `X-Api-Key`, and it is the simpler option whenever the client can be
 configured with one. The connector dialog on claude.ai cannot: it offers an
 **OAuth Client ID** and **Client Secret** and nothing else. There is no field for
 a bearer token, and putting a token in the URL is forbidden by the MCP
@@ -260,7 +260,7 @@ consent screen.
 - **One client per block.** Configure a second `oauth:` block for a second
   client; blocks have independent signing keys.
 - **No per-user identity.** The consent password is a single shared secret, like
-  `auth_header`. Tokens carry no user, so `allowed_users` is not driven by OAuth.
+  a key of `api_keys`. Tokens carry no user, so `allowed_users` is not driven by OAuth.
   For user identity use `google_auth` or client certificates.
 - **No revocation endpoint.** Stateless tokens cannot be revoked individually;
   rotating `signing_key` (or deleting `signing_key_file`) invalidates all of

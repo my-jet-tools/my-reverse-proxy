@@ -9,7 +9,7 @@ use crate::{
 pub struct AdditionalHost {
     /// The host whose configuration the name is served with: a key of `hosts`.
     pub host_id: String,
-    /// The name came from `dynamic_hosts.url`. Its host may be one of the settings files.
+    /// The name came from a url of `real_time_configurations`. Its host may be one of the settings files.
     pub dynamic: bool,
 }
 
@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     fn host(endpoint_type: &str) -> HostSettings {
-        crate::settings::DynamicHostsModel::parse(
+        crate::settings::RealTimeConfigurationModel::parse(
             format!(
                 "hosts:\n  'host':\n    endpoint:\n      type: {endpoint_type}\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n"
             )
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn additional_hosts_are_read_from_the_settings() {
-        let host_settings = crate::settings::DynamicHostsModel::parse(
+        let host_settings = crate::settings::RealTimeConfigurationModel::parse(
             b"hosts:\n  'host':\n    additional_hosts:\n    - www.example.com\n    - api.example.com:443\n    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n",
         )
         .unwrap()

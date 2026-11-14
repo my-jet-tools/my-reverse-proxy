@@ -1,234 +1,202 @@
-# Per-location header authentication
+# API keys
 
-This document describes the `auth_header` option on a location: how it
-works, what it guarantees, and the configuration patterns for the typical
-use cases.
+This document describes `api_keys:` and `api_keys_auth:`: how a request is let through to a
+location by a key it carries in `X-Api-Key`, where the keys come from, and the configuration
+patterns for the typical cases. It took the place of `auth_header`, which compared the
+`Authorization` header with one value per location.
 
 ## Purpose
 
-Some upstreams (notably MCP servers, internal admin panels, and webhook
-receivers) need to be reachable only by callers that present a known
-secret. Implementing this on the proxy keeps the upstream code unchanged
-and stops unauthenticated traffic before any TCP connection to the
-upstream is opened.
+Some upstreams - MCP servers above all, internal admin panels, webhook receivers - are to be
+reachable only by callers which present a known secret. Checking it on the proxy keeps the upstream
+unchanged, and stops a request without one before any connection to the upstream is opened.
 
-`auth_header` is an opt-in, per-location gate. The proxy validates one
-header on every request to that location; on mismatch or absence the
-request is refused with HTTP 401 and the upstream is never contacted.
+A key is checked against a **set** - an id and its keys - so several clients get keys of their
+own, a key is handed out or taken back without touching the others, and a key is rotated with an
+overlap: the new one is added, the clients move to it, the old one is removed.
 
 ## Configuration
 
-Add `auth_header` to a location. The value is the **complete expected
-`Authorization` header value**, scheme included:
-
-```yaml
-hosts:
-  mcp.domain.com:443:
-    endpoint:
-      type: https
-      ssl_certificate: my_ssl_cert
-    locations:
-    - path: /mcp
-      type: mcp
-      proxy_pass_to: http://internal_mcp:8100/mcp
-      auth_header: "Bearer secret-token-123"
-```
-
-Any location type accepts `auth_header`: `http`, `http2`, `https`,
-`mcp`, `mcp-h2`, `unix+http`, files, static. The check is applied on
-both request paths — the h1 byte pipeline (`http` / `https`
-endpoints) and the hyper path (`http2` / `https2` endpoints) — before
-the request is dispatched to the upstream or content source, and both
-compare the value the same way.
-
-### With a variable
-
-To keep secrets out of YAML, drive the value from a variable —
-environment variable, custom variable, or a value loaded from another
-file:
-
 ```yaml
 variables:
-  mcp_token: "Bearer ${env:MCP_TOKEN}"
+  ci_mcp_key: ...                   # or an environment variable of the same name
+
+api_keys:
+  mcp_clients:                      # the id of a set, and its keys
+  - 6f1c2a9e-claude-desktop
+  - ${ci_mcp_key}
+  admins:
+  - very-secret-admin-key
 
 hosts:
   mcp.domain.com:443:
     endpoint:
       type: https
       ssl_certificate: my_ssl_cert
+      api_keys_auth: mcp_clients    # every location of the endpoint
     locations:
     - path: /mcp
       type: mcp
       proxy_pass_to: http://internal_mcp:8100/mcp
-      auth_header: ${mcp_token}
+    - path: /admin
+      proxy_pass_to: http://internal_mcp:8100/admin
+      api_keys_auth: admins         # in place of mcp_clients
+    - path: /health
+      proxy_pass_to: http://internal_mcp:8100/health
+      api_keys_auth: none           # open, although the endpoint is guarded
 ```
 
-`auth_header` is resolved through the same variable engine as other
-string fields (see "System Variables", "Yaml variables", "Environment
-variables" in the main README).
+The client sends `X-Api-Key: 6f1c2a9e-claude-desktop`.
 
-### Multiple services on one domain
+### Which set guards a location
 
-Each location has its own `auth_header`, so different upstream services
-can sit behind different secrets on the same hostname:
+1. `api_keys_auth` of the location, if it has one: a set, or `none` - the location is open.
+2. Otherwise `api_keys_auth` of the endpoint: a set, or `none`.
+3. Otherwise `api_keys_auth` of the endpoint's template (`endpoint_templates`).
+4. Otherwise the location is open.
+
+`none` is matched in any letter case, and can not be the id of a set.
+
+### Where the keys of a set come from
+
+A set is put together from every place which declares keys under its id - a key is in the set if
+any of them has it:
+
+- `api_keys:` of `~/.my-reverse-proxy`, of the files it includes, and of the dynamic settings file
+  (written over MCP with `set_dynamic_settings`, applied with `reload_settings`);
+- `api_keys:` of the answers of the urls of `real_time_configurations`, read every
+  `refresh_interval`:
 
 ```yaml
-hosts:
-  api.domain.com:443:
-    endpoint:
-      type: https
-      ssl_certificate: my_ssl_cert
-    locations:
-    - path: /service-a
-      type: http
-      proxy_pass_to: http://service-a-host:8000
-      auth_header: "Bearer token-for-service-a"
-    - path: /service-b
-      type: http
-      proxy_pass_to: http://service-b-host:8000
-      auth_header: "Bearer token-for-service-b"
-    - path: /public
-      type: http
-      proxy_pass_to: http://service-c-host:8000
-      # no auth_header — anyone may hit /public
+real_time_configurations:
+  urls:
+  - https://keys.internal/proxy/api-keys
 ```
 
-## Setting and rotating the value at runtime
+```yaml
+# what https://keys.internal/proxy/api-keys answers
+api_keys:
+  mcp_clients:
+  - tenant7-issued-key
+```
 
-`auth_header` can be written into the dynamic settings file and applied
-without restarting the proxy:
+A url's keys replace what it gave the read before; a url which fails to answer keeps what it gave.
+They are taken as the url writes them: no variable is put into them.
 
-1. `get_dynamic_settings` — read the current YAML.
-2. Edit it (the file is merged like an `include:`, so a host declared
-   there carries its locations and their `auth_header`) and write it
-   back with `set_dynamic_settings`. It is a full-file replace, so send
-   everything you want to keep.
-3. `reload_settings` — compile and apply.
+### A set with no keys
 
-**Connections already open pick the new value up on their next
-request.** This matters for MCP: a Streamable-HTTP client keeps one
-connection open for hours, and a reload does not restart listeners or
-drop sockets. Each connection notices that the port's configuration was
-replaced and re-resolves its endpoint and locations before serving the
-next request, so the window in which the old token still works is one
-in-flight request, not the lifetime of the connection.
+A set nothing declares a key under - mistyped in `api_keys_auth`, or given by a url which has not
+answered yet - lets **nobody** through. The endpoint is served and loads with the others; what the
+set guards answers every request with 401 until the set has a key. `get_settings` and
+`get_applied_settings` (MCP) list every set - declared, or named by an `api_keys_auth` - with how
+many keys it has, from the files and from the urls, and whether it is used.
 
-The same mechanism applies to everything else a location or endpoint
-declares — upstream, header rules, `client_certificate_ca`. Adding an
-mTLS requirement to an endpoint makes an already-open connection that
-presented no certificate get 421 on its next request, so the client
-re-opens one and performs mTLS: the fail-closed direction.
+## The check
 
-Only one expected value per location is supported, so a rotation is a
-cut-over rather than an overlap: clients that still send the old token
-are refused from the reload onwards. Roll the clients first, or publish
-the new token on a second location.
+- The header name is matched case-insensitively (`X-Api-Key`, `x-api-key`, `X-API-KEY`).
+- The value is compared byte for byte, letter case included, without the spaces and tabs around it.
+  A key of the settings is taken without the spaces around it as well.
+- A request has to carry **exactly one** `X-Api-Key`. Two are refused whatever they are - the header
+  goes on to the upstream, and an upstream which reads the second one would tell the caller by a key
+  nobody checked.
+- Every key of the set is compared, each in a time which depends on the lengths only, so the time of
+  an answer does not tell which key, or which part of one, is right.
+- A missing key and a wrong one get the same answer.
+- The check is the same on the h1 pipeline (`http` / `https` endpoints) and on the hyper path
+  (`http2` / `https2`), for every location type: `http`, `http2`, `mcp`, `mcp-h2`, `unix+http`,
+  `unix+http2`, files, static, `dynamic`.
 
-## Validation rules
+## A refused request
 
-- **Header name**: `Authorization`, matched case-insensitively
-  (`Authorization`, `AUTHORIZATION`, `authorization` all work).
-- **Header value**: matched byte-for-byte after stripping surrounding
-  ASCII whitespace from the request value. There is no scheme parsing
-  — `"Bearer abc"` and `"bearer abc"` are different values, and only
-  the first matches an `auth_header: "Bearer abc"` config.
-- **No header at all** and **wrong value** produce the same outcome —
-  HTTP 401 — so the proxy does not leak which condition failed.
-
-## Failure response
-
-On mismatch the proxy returns HTTP 401 with the body produced by the
-existing `NOT_AUTHORIZED_PAGE` template (the same page the proxy uses
-for any other authorization failure). The upstream is not contacted.
-No `WWW-Authenticate` response header is added in this iteration.
+- **401** with the `NOT_AUTHORIZED_PAGE` body. No `WWW-Authenticate` header. On an `http` / `https`
+  endpoint the connection is closed after it.
+- The upstream is not contacted.
+- It is a **hard failure** of the client's address for the IP block-list: five within 15 seconds block
+  the address for 5 minutes. An address of `global_settings.ip_blocklist_white_list` is never counted.
+  `POST /api/IpBlocklist/Unblock` (control port) lifts a block.
+- A connection which gets through to an endpoint - a TLS handshake and a `Host` are all it takes -
+  forgives the soft failures of its address, never the hard ones. Before, every new connection took
+  the count back, and a client which tried one wrong key after another, each on a connection of its
+  own, was never blocked.
 
 ## Header forwarding
 
-If the request passes the check, the `Authorization` header is forwarded
-to the upstream **unchanged**. The upstream may revalidate (defense in
-depth) or ignore it. To strip it before forwarding, use the existing
-`modify_http_headers.remove.request` block on the location:
+A request which passes goes to the upstream with its `X-Api-Key`: the upstream may tell its callers
+apart by it, or check it again. To keep it from the upstream, take it off with `modify_http_headers`
+of the location or of the endpoint - the key is checked before those are applied:
 
 ```yaml
 locations:
 - path: /mcp
   type: mcp
   proxy_pass_to: http://internal_mcp:8100/mcp
-  auth_header: "Bearer secret-token-123"
+  api_keys_auth: mcp_clients
   modify_http_headers:
     remove:
       request:
-        - authorization
+      - x-api-key
 ```
 
-## Combining with other auth mechanisms
+`modify_http_headers` of `endpoint_templates` is not applied - not there.
 
-`auth_header` is a per-location gate; the existing per-endpoint
-`google_auth` and `client_certificate_ca` are per-endpoint identity
-mechanisms. They layer cleanly:
+## Changing the keys at runtime
 
-1. The location-level header check runs **first** on the h1 pipeline.
-   Failure → 401, the request stops here.
-2. If the header check passes (or is not configured), the endpoint-level
-   auth runs. Google OAuth may issue a redirect; client-certificate
-   verification attaches a `HttpProxyPassIdentity::ClientCert` value.
+- In a settings file or in the dynamic settings file: then `reload_settings` - or a reload of a port
+  or of an endpoint, which take the keys of the files as they are then, too.
+- By a url of `real_time_configurations`: on its next read.
 
-On the hyper path the order is reversed — the endpoint's `oauth` gate,
-`google_auth` and `allowed_users` run before the location is resolved,
-so the `auth_header` check happens after them. The outcome only differs
-for a location that combines `auth_header` with an endpoint-level
-mechanism, which is not what either is used for: `auth_header` gates
-machine endpoints, and the endpoint mechanisms identify humans. Both
-paths contact the upstream only after every check has passed.
+Either way the connections already open check their next request against the new keys - an MCP
+client which keeps one connection for hours included. A change of `api_keys_auth` itself (which set
+guards what) is a change of the endpoint: it is picked up by an open connection on its next request
+as well.
 
-Use this layering when, for example, a public-facing UI uses Google
-OAuth to identify the human user, but the same domain also exposes a
-machine-to-machine endpoint that needs a static API key — set
-`auth_header` only on the machine endpoint's location.
+## What refuses the settings
 
-## When to use
+- An id `none` in `api_keys:` - in a file the settings do not load; in the answer of a url that
+  answer is refused, and what the url gave before stays.
+- A key which is empty, has a control character, or still has `${` once the variables are put in.
+  A key takes `${lower_case}` variables (from `variables:`, or an environment variable of that name).
+  A `${UPPER_CASE}` name is one of the system variables, which are put into headers per request: it
+  would stay in the key as the very text of the placeholder, which anyone reading the settings knows.
+- `auth_header` on a location: it is removed, and a location with it left in would be open to
+  everybody without a word. The error says what to use instead.
 
-- **MCP upstream protected by a static token.** The MCP client is
-  configured with one URL plus a Bearer header; the proxy validates the
-  header and forwards.
-- **Internal admin endpoints not exposed to humans.** A static token
-  shared between automation and the proxy is simpler than running an
-  OAuth flow.
-- **Webhook receivers** where the sender supports a custom
-  `Authorization` value.
+No error and no log line contains a key.
+
+## Combining with other mechanisms
+
+- `whitelisted_ip` of a location is checked before the key: an address which is not listed can not
+  even try one.
+- `google_auth` and `client_certificate_ca` of the endpoint identify a person; a key gates a machine.
+  On the h1 pipeline the key is checked first, on the hyper path after the endpoint's checks; a
+  request has to pass all of them either way.
+- `oauth`: the proxy's own OAuth server checks the token in `Authorization`; a location which is
+  also guarded by a set takes a request which carries both. The OAuth endpoints themselves
+  (`/.well-known/...`, `/oauth/...`) are not guarded by `api_keys_auth`: a browser has to reach them.
+- `type: mcp` and `type: tcp` endpoints read no request, so they can not check a key: an endpoint of
+  either type which is given an `api_keys_auth` - of its own, of its template or of a location -
+  serves nobody (see "An endpoint which can not apply an access setting" in the README). Guard an MCP
+  server with `type: https` on the endpoint and a location of `type: mcp`.
 
 ## When not to use
 
-- **Per-user identity is needed.** `auth_header` does not authenticate
-  individual users; it gates everyone with the same secret. Use Google
-  OAuth or client certificates for user identity.
-- **Multiple valid tokens are required.** Only one expected value per
-  location is supported. If you need to rotate or revoke individual
-  tokens, terminate auth on the upstream.
-- **Browser-initiated requests.** Browsers cannot attach an
-  `Authorization` header to navigations; cookie-based or OAuth flows
-  fit better.
+- **Per-user identity is needed.** A key names a client, not a person. Use `google_auth` or client
+  certificates.
+- **Browser-initiated requests.** A browser does not add `X-Api-Key` to a navigation.
 
 ## Files involved
 
-- `src/settings/location_settings.rs` — YAML field `auth_header`.
-- `src/settings_compiled/populate_settings.rs` — variable substitution
-  for `auth_header`.
-- `src/scripts/compile_location_proxy_pass_to.rs` — passes the value
-  from settings into the runtime config.
-- `src/configurations/proxy_pass_location_config.rs` — runtime field
-  carried on `ProxyPassLocationConfig`, plus `auth_header_matches` /
-  `auth_header_accepts`: the one comparison both request paths use.
-- `src/h1_proxy_server/authorize.rs` — the h1 check; finds the
-  request's `Authorization` header in the raw byte buffer and hands it
-  to `auth_header_accepts`.
-- `src/h1_proxy_server/pipeline/reader.rs` — passes the resolved
-  location into `authorize`.
-- `src/http_proxy_pass/http_proxy_pass.rs` — the hyper check, right
-  after the location is resolved and before any header processing;
-  refusal is `ProxyPassError::Unauthorized` (the 401 tech page).
-- `src/configurations/app_configuration.rs` — `generation` +
-  `pick_up_reload`: how an open connection notices a reload.
-- `src/tcp_listener/http_request_handler/live_endpoint_cache.rs` — the
-  hyper connection's live port configuration and per-`Host` proxy-pass
-  cache, invalidated together on a reload.
+- `src/api_keys/` - checking a set, putting sets together, `request_has_api_key`, the block-list
+  failure, and `ApiKeysStore`: the sets requests are checked against, swapped whole on a change.
+- `src/settings/settings.rs`, `end_point_settings.rs`, `location_settings.rs`,
+  `endpoint_template_settings.rs` - `api_keys:` and `api_keys_auth:`.
+- `src/settings/real_time_configurations_settings.rs` - `api_keys:` of the answer of a url.
+- `src/settings_compiled/populate_settings.rs` - the keys of the files, variables put in, checked,
+  put together; `auth_header` refused.
+- `src/settings_compiled/settings_compiled.rs` - `api_keys`, `dynamic_api_keys`, `get_api_keys`.
+- `src/scripts/get_endpoint_api_keys_auth.rs` - the endpoint's set, from the endpoint or its template.
+- `src/configurations/proxy_pass_location_config.rs` - the set which guards a location, and
+  `api_keys_auth_accepts`.
+- `src/h1_proxy_server/authorize.rs` - the h1 check.
+- `src/http_proxy_pass/http_proxy_pass.rs` - the hyper check.
+- `src/app/ip_blocklist.rs` - hard failures are not forgiven by a connection which gets through.

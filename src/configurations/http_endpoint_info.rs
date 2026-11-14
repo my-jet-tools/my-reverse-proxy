@@ -44,7 +44,7 @@ pub struct HttpEndpointInfo {
     pub client_timeouts: crate::types::ClientTimeouts,
     /// `Some`: the endpoint was given an access setting it can not apply, and serves nobody.
     pub not_served_reason: Option<NotServedReason>,
-    /// The host came from `dynamic_hosts.url`, not from a settings file: a read of the url
+    /// The host came from a url of `real_time_configurations`, not from a settings file: a read of the urls
     /// replaces it, and never an endpoint of the settings files.
     pub dynamic_host: bool,
     /// `Some`: the endpoint of a name of `additional_hosts` of the host with this id. It is that
@@ -156,7 +156,7 @@ impl HttpEndpointInfo {
     /// The endpoint of `host_endpoint`, a name of `additional_hosts` of this endpoint's host: the
     /// same as this one in everything but the name. Nothing is compiled: the locations are the
     /// same `Arc`s, so the name is served by the very upstream connections of the host.
-    /// `dynamic_host`: the name came from `dynamic_hosts.url` - the host may be of the files.
+    /// `dynamic_host`: the name came from a url of `real_time_configurations` - the host may be of the files.
     pub fn new_additional_host(
         &self,
         host_endpoint: EndpointHttpHostString,

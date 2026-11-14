@@ -57,7 +57,7 @@ mod tests {
         let reason = NotServedReason::new(
             "localhost:443",
             "mcp",
-            &["auth_header", "google_auth"],
+            &["api_keys_auth", "google_auth"],
             "a raw bridge with no HTTP layer",
             "remove the setting",
         )
@@ -66,7 +66,7 @@ mod tests {
         assert_eq!(
             reason.as_str(),
             "Endpoint 'localhost:443' is 'type: mcp', a raw bridge with no HTTP layer, so \
-             'auth_header', 'google_auth' can not be applied to it. The endpoint serves nobody \
+             'api_keys_auth', 'google_auth' can not be applied to it. The endpoint serves nobody \
              until this is fixed: remove the setting"
         );
     }

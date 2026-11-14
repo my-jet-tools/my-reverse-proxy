@@ -47,8 +47,8 @@ mod gateway_server_settings;
 pub use gateway_server_settings::*;
 mod gateway_client_settings;
 pub use gateway_client_settings::*;
-mod dynamic_hosts_settings;
-pub use dynamic_hosts_settings::*;
+mod real_time_configurations_settings;
+pub use real_time_configurations_settings::*;
 
 mod home_dir;
 pub use home_dir::*;

@@ -20,5 +20,5 @@ mod traffic_timer;
 pub use traffic_timer::*;
 mod resolve_domains_ip_timer;
 pub use resolve_domains_ip_timer::*;
-mod dynamic_hosts_timer;
-pub use dynamic_hosts_timer::*;
+mod real_time_configurations_timer;
+pub use real_time_configurations_timer::*;

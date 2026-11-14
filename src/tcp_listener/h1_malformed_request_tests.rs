@@ -3,7 +3,7 @@
 //! panic of the connection task, or in bytes read as text without a check.
 //!
 //! The endpoint and the upstream are the ones of `ambiguous_path_tests`: `/open`, `/secure`
-//! with an `auth_header`, and `/`. The upstream records every request line it gets.
+//! with an `api_keys_auth`, and `/`. The upstream records every request line it gets.
 
 use std::time::Duration;
 

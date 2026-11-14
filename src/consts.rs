@@ -45,11 +45,11 @@ pub const DEFAULT_POOL_HOT_WINDOW: Duration = Duration::from_secs(3);
 pub const DEFAULT_POOL_PING_TIMEOUT: Duration = Duration::from_secs(1);
 // How often the (single, global) supervisor sweeps every pool.
 pub const DEFAULT_POOL_SUPERVISOR_INTERVAL: Duration = Duration::from_secs(10);
-// How often `dynamic_hosts.url` is read, and how long a read of it may take.
-pub const DEFAULT_DYNAMIC_HOSTS_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
-pub const DEFAULT_DYNAMIC_HOSTS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-// The biggest answer of `dynamic_hosts.url` read.
-pub const MAX_DYNAMIC_HOSTS_RESPONSE_SIZE: usize = 16 * 1024 * 1024;
+// How often the urls of `real_time_configurations` are read, and how long a read of one may take.
+pub const DEFAULT_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+pub const DEFAULT_REAL_TIME_CONFIGURATIONS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+// The biggest answer of a url of `real_time_configurations` read.
+pub const MAX_REAL_TIME_CONFIGURATION_RESPONSE_SIZE: usize = 16 * 1024 * 1024;
 // Minimum spacing between REVIVE dials to a dead pool entry. Repeat revive
 // attempts inside the window fail fast instead of re-dialing, so a down
 // upstream costs at most one revive dial per window per entry. (Does not

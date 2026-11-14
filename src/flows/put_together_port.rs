@@ -1,7 +1,7 @@
 //! Putting a port together: the hosts compiled onto it one next to the other, then the names of
 //! their `additional_hosts` next to their endpoints. Every way the live configuration is changed
 //! goes through here - a reload of the settings, of one endpoint, of one port, and a read of
-//! `dynamic_hosts.url` - so a name is served the same way whichever of them put it there.
+//! the urls of `real_time_configurations` - so a name is served the same way whichever of them put it there.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -18,9 +18,9 @@ pub struct FoundErrors {
     /// Of the hosts of the settings files - and of the entries of their `additional_hosts`,
     /// which are told about under the host whose list has them.
     of_files: BTreeMap<String, String>,
-    /// Of the hosts and the names of `dynamic_hosts.url`. One under the id of a host or a name of
+    /// Of the hosts and the names of the urls of `real_time_configurations`. One under the id of a host or a name of
     /// the settings files is not put into the configuration errors: it is not that host's error
-    /// - `dynamic_hosts.refused_hosts` lists it.
+    /// - `real_time_configurations.refused_hosts` lists it.
     dynamic: BTreeMap<String, String>,
     ids_of_files: BTreeSet<String>,
     dynamic_ids: BTreeSet<String>,

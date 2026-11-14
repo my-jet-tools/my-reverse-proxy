@@ -3,7 +3,7 @@
 //! `http2` one (hyper).
 //!
 //! The endpoint has open locations next to a guarded one, all to the same upstream: `/open`,
-//! `/secure` with an `auth_header`, and `/` for everything else. A location is picked by what
+//! `/secure` with an `api_keys_auth`, and `/` for everything else. A location is picked by what
 //! the path starts with and the path goes to the upstream as it was received, so
 //! `/open/../secure/x` would be let in by `/open` and served by the upstream as `/secure/x`.
 //! The upstream here records every request line it gets: a refused request is one it never saw.
@@ -35,7 +35,9 @@ use crate::{
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-const SECRET: &str = "Bearer secret";
+/// The key `/secure` takes, in the set [`KEYS_ID`].
+const SECRET: &str = "secret-key-of-ambiguous-path-tests";
+const KEYS_ID: &str = "ambiguous_path_tests_keys";
 
 /// Each of these starts with `/open` and is `/secure/x` to an upstream which resolves the
 /// segment, decodes the path, takes `\` for a separator or takes path parameters off.
@@ -333,11 +335,15 @@ pub(super) async fn start_endpoint(
     endpoint_type: ListenHttpEndpointType,
     upstream_port: u16,
 ) -> u16 {
+    crate::app::APP_CTX
+        .api_keys
+        .add_for_tests(KEYS_ID, &[SECRET]);
+
     start_endpoint_with_locations(
         endpoint_type,
         &format!(
             "- path: /open\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n\
-             - path: /secure\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n  auth_header: '{SECRET}'\n\
+             - path: /secure\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n  api_keys_auth: '{KEYS_ID}'\n\
              - path: /\n  type: http\n  proxy_pass_to: 'http://127.0.0.1:{upstream_port}'\n"
         ),
     )
@@ -426,9 +432,10 @@ impl H1Client {
         }
     }
 
-    pub(super) async fn get(&mut self, target: &str, authorization: Option<&str>) -> Response {
-        let headers = match authorization {
-            Some(authorization) => format!("Authorization: {authorization}\r\n"),
+    /// `api_key`: what the request carries in `X-Api-Key`.
+    pub(super) async fn get(&mut self, target: &str, api_key: Option<&str>) -> Response {
+        let headers = match api_key {
+            Some(api_key) => format!("X-Api-Key: {api_key}\r\n"),
             None => String::new(),
         };
 
@@ -530,7 +537,8 @@ impl H2Client {
         Self { sender, port }
     }
 
-    pub(super) async fn get(&mut self, target: &str, authorization: Option<&str>) -> Response {
+    /// `api_key`: what the request carries in `X-Api-Key`.
+    pub(super) async fn get(&mut self, target: &str, api_key: Option<&str>) -> Response {
         let uri: hyper::Uri = format!("http://localhost:{}{target}", self.port)
             .parse()
             .unwrap_or_else(|err| panic!("{target}: {err}"));
@@ -539,8 +547,8 @@ impl H2Client {
         assert_eq!(uri.path_and_query().unwrap().as_str(), target);
 
         let mut request = hyper::Request::builder().method("GET").uri(uri);
-        if let Some(authorization) = authorization {
-            request = request.header("authorization", authorization);
+        if let Some(api_key) = api_key {
+            request = request.header("x-api-key", api_key);
         }
 
         let response = tokio::time::timeout(

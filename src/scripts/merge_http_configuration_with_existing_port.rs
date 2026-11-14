@@ -50,11 +50,18 @@ fn check_endpoint_type(
         return Ok(());
     }
 
+    // The endpoint the port is of the type of is named: it is the one in the way.
+    let served_by = config
+        .endpoints
+        .first()
+        .map(|itm| itm.as_str())
+        .unwrap_or_default();
+
     Err(format!(
-            "Can not apply endpoint {} which has {:?} type to the endpoint {} already configured as {:?}.",
-            http_endpoint.host_endpoint.as_str(),
-            http_endpoint.listen_endpoint_type,
-            http_endpoint.host_endpoint.as_str(),
-            config.listen_endpoint_type
-        ))
+        "Can not apply endpoint {} which has {:?} type to the port already configured as {:?} by the endpoint {}.",
+        http_endpoint.host_endpoint.as_str(),
+        http_endpoint.listen_endpoint_type,
+        config.listen_endpoint_type,
+        served_by,
+    ))
 }

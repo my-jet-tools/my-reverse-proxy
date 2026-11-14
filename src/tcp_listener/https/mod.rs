@@ -19,3 +19,6 @@ mod websocket_tests;
 
 #[cfg(test)]
 mod tls_resumption_tests;
+
+#[cfg(test)]
+mod body_framing_tests;

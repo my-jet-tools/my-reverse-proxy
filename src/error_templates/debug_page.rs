@@ -72,7 +72,8 @@ td {{ font-family: monospace; word-break: break-all; }}
     )
 }
 
-pub(super) fn html_escape(src: &str) -> String {
+/// The text as it reads in a page: `&`, `<`, `>`, `"` and `'` escaped.
+pub fn html_escape(src: &str) -> String {
     let mut result = String::with_capacity(src.len());
     for c in src.chars() {
         match c {

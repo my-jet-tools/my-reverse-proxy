@@ -19,8 +19,8 @@ mod refresh_ca_from_settings;
 pub use refresh_ca_from_settings::*;
 mod refresh_ip_list_from_settings;
 pub use refresh_ip_list_from_settings::*;
-mod refresh_dynamic_hosts;
-pub use refresh_dynamic_hosts::*;
+mod refresh_real_time_configurations;
+pub use refresh_real_time_configurations::*;
 #[cfg(test)]
 mod dynamic_hosts_tests;
 mod put_together_port;

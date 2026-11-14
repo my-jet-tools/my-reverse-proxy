@@ -184,8 +184,9 @@ pub fn generate_tech_page(
     err: ProxyPassError,
     show_error_description: bool,
 ) -> hyper::Response<BoxBody<Bytes, String>> {
+    // Goes into a page: what is in an error - a path, a header, a host - is escaped.
     let second_line_error = if show_error_description {
-        Some(format!("{err:?}").into())
+        Some(crate::error_templates::html_escape(&format!("{err:?}")).into())
     } else {
         None
     };
@@ -448,5 +449,36 @@ mod tests {
         assert_eq!(status, hyper::StatusCode::BAD_REQUEST);
         assert!(body.contains("<h2>Can not detect host</h2>"));
         assert!(body.contains("<tr><th>Host header</th><td>(none)</td></tr>"));
+    }
+
+    fn an_error_with_markup() -> ProxyPassError {
+        ProxyPassError::HttpClientError(crate::http_client_connectors::HttpClientError::Other(
+            "<script>alert(1)</script> at 10.0.0.5:8000".to_string(),
+        ))
+    }
+
+    async fn body_of(response: hyper::Response<BoxBody<Bytes, String>>) -> String {
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_tech_page_without_the_description_tells_nothing_of_the_error() {
+        let response = generate_tech_page(an_error_with_markup(), false);
+        assert_eq!(response.status(), hyper::StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = body_of(response).await;
+        assert!(body.contains("Internal Server Error"), "{body}");
+        assert!(!body.contains("10.0.0.5"), "{body}");
+        assert!(!body.contains("script"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_description_on_a_tech_page_is_escaped() {
+        let body = body_of(generate_tech_page(an_error_with_markup(), true)).await;
+
+        assert!(body.contains("10.0.0.5:8000"), "{body}");
+        assert!(body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{body}");
+        assert!(!body.contains("<script>"), "{body}");
     }
 }

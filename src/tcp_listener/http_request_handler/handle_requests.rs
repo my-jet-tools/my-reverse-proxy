@@ -130,12 +130,14 @@ pub async fn handle_requests(
                 return Ok(response);
             }
             let err_desc = format!("{:?}", err);
-            let response = super::utils::generate_tech_page(
-                err,
-                crate::app::APP_CTX
-                    .show_error_description
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            );
+            // The description tells of upstreams, files and errors inside: it is for a source of
+            // `global_settings.debug_ip`, and only while `show_error_description_on_error_page`
+            // is on. Everybody else gets the title alone.
+            let show_error_description = crate::app::APP_CTX
+                .show_error_description
+                .load(std::sync::atomic::Ordering::Relaxed)
+                && crate::app::APP_CTX.debug_ip.is_debug_ip(&connection_ip);
+            let response = super::utils::generate_tech_page(err, show_error_description);
             // Every proxy-generated 5xx (upstream unreachable / timeout /
             // internal) is always recorded — visible in /api/logs + MCP
             // without enabling debug mode. 4xx tech pages stay debug-only.

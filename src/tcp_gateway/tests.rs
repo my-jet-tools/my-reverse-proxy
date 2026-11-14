@@ -27,6 +27,7 @@ use super::{
     session::CompressionLevel,
     *,
 };
+use crate::test_ports::free_port;
 use crate::{
     network_stream::{NetworkStreamReadPart, NetworkStreamWritePart},
     tcp_utils::{copy_streams, ConnectionPumps, LoopBuffer},
@@ -4329,11 +4330,6 @@ fn signing_key() -> SigningKey {
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     SigningKey::from_bytes(&seed)
-}
-
-async fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap().port()
 }
 
 fn endpoint(port: u16) -> Arc<RemoteEndpointOwned> {

@@ -36,6 +36,11 @@ pub struct LocationSettingsSummary {
         description = "True if strip_path is set on this location: the location path is cut off the request path before it goes upstream"
     )]
     pub strip_path: bool,
+
+    #[property(
+        description = "api_keys_auth of the location as written: the id of the set of api_keys a request has to carry a key of in X-Api-Key, in place of the endpoint's; 'none' opens the location although its endpoint is guarded; empty if not set (the endpoint's applies)"
+    )]
+    pub api_keys_auth: String,
 }
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
@@ -73,7 +78,12 @@ pub struct HostSettingsSummary {
     pub hsts: bool,
 
     #[property(
-        description = "True if the host was read from dynamic_hosts.url rather than from a settings file"
+        description = "api_keys_auth of the endpoint as written: the id of the set of api_keys every location of it takes requests with a key of in X-Api-Key (a location may name its own set, or 'none'). Empty if not set; endpoint_templates may still give one"
+    )]
+    pub api_keys_auth: String,
+
+    #[property(
+        description = "True if the host was read from a url of real_time_configurations rather than from a settings file"
     )]
     pub dynamic: bool,
 
@@ -88,18 +98,17 @@ pub struct HostSettingsSummary {
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct GlobalSettingsSummary {
-    #[property(description = "HTTP control port from global_settings, if configured")]
-    pub http_control_port: i64,
-
     #[property(
-        description = "global_settings.http_control_ip of these settings, empty if not configured (0.0.0.0). The control port binds it at startup: a change takes effect after a restart"
+        description = "The address the control port listens on as these settings give it (ip:port): global_settings.http_control_port - a port, or the whole address like 0.0.0.0:8000 - and http_control_ip; 127.0.0.1:8000 if they say nothing. The control port binds it at startup: a change takes effect after a restart. Empty if these settings give no valid address"
     )]
-    pub http_control_ip: String,
+    pub http_control_addr: String,
 
     #[property(description = "default_h2_livness_url from global_settings, if configured")]
     pub default_h2_livness_url: String,
 
-    #[property(description = "show_error_description_on_error_page flag")]
+    #[property(
+        description = "show_error_description_on_error_page flag: when on, a 4xx/5xx page of the proxy shows the error behind it - to the global_settings.debug_ip sources only, everybody else gets the title alone"
+    )]
     pub show_error_description_on_error_page: bool,
 }
 
@@ -116,22 +125,60 @@ pub struct GatewayServerSummary {
 }
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
-pub struct DynamicHostsSummary {
-    #[property(description = "dynamic_hosts.url - the url the dynamic hosts are read from")]
+pub struct RealTimeUrlSummary {
+    #[property(description = "A url of real_time_configurations.urls, the variables put in")]
     pub url: String,
 
-    #[property(description = "Milliseconds between two reads of the url")]
-    pub refresh_interval: i64,
+    #[property(
+        description = "True once the url has answered: what it gave is served. False until its first successful read"
+    )]
+    pub answered: bool,
 
     #[property(
-        description = "Why the last read of the url failed, empty if it succeeded. The hosts of the last read which succeeded are served meanwhile"
+        description = "Why the last read of the url failed, empty if it succeeded. What the last read which succeeded gave is served meanwhile"
     )]
     pub last_read_error: String,
+}
+
+#[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
+pub struct RealTimeConfigurationsSummary {
+    #[property(
+        description = "real_time_configurations.urls in their order: a host two urls give is served as the one lower in the list gives it"
+    )]
+    pub urls: Vec<RealTimeUrlSummary>,
+
+    #[property(description = "Milliseconds between two reads of the urls")]
+    pub refresh_interval: i64,
+
+    #[property(description = "Milliseconds a read of a url may take")]
+    pub request_timeout: i64,
 
     #[property(
-        description = "Hosts of the url which are not among the hosts, and why: a variable which is not there, an id a settings file has a host of its own for. Errors of compiling a dynamic host are in current_configuration_errors"
+        description = "Hosts and names of the urls which are not among the hosts, and why: a variable which is not there, an id a settings file has a host of its own for. Errors of compiling a dynamic host are in current_configuration_errors"
     )]
     pub refused_hosts: Vec<ConfigurationErrorEntry>,
+}
+
+#[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
+pub struct ApiKeysSummary {
+    #[property(description = "Id of a set of api_keys")]
+    pub id: String,
+
+    #[property(
+        description = "How many keys a request is checked against under this id: the keys of the settings files and the ones the urls of real_time_configurations gave, each counted once. The keys themselves are never shown"
+    )]
+    pub keys: i64,
+
+    #[property(description = "How many of them the settings files declare")]
+    pub keys_in_files: i64,
+
+    #[property(description = "How many keys the urls of real_time_configurations gave")]
+    pub keys_from_urls: i64,
+
+    #[property(
+        description = "True if an api_keys_auth of an endpoint, a location or an endpoint template names the id. Used with keys=0: every request to what it guards is refused with 401"
+    )]
+    pub used: bool,
 }
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
@@ -143,12 +190,17 @@ pub struct GetSettingsResponse {
     pub global: GlobalSettingsSummary,
 
     #[property(
-        description = "All hosts defined in the settings file (and any included files), and the ones read from dynamic_hosts.url (dynamic=true)"
+        description = "All hosts defined in the settings file (and any included files), and the ones read from the urls of real_time_configurations (dynamic=true)"
     )]
     pub hosts: Vec<HostSettingsSummary>,
 
-    #[property(description = "dynamic_hosts block, if configured")]
-    pub dynamic_hosts: Option<DynamicHostsSummary>,
+    #[property(description = "real_time_configurations block, if configured")]
+    pub real_time_configurations: Option<RealTimeConfigurationsSummary>,
+
+    #[property(
+        description = "The sets of api_keys: every id the settings files or the urls declare keys under, and every id an api_keys_auth names - with how many keys it has. The keys themselves are never shown"
+    )]
+    pub api_keys: Vec<ApiKeysSummary>,
 
     #[property(description = "SSH config ids defined in settings")]
     pub ssh_ids: Vec<String>,
@@ -217,14 +269,9 @@ pub fn build_settings_summary(
     current_configuration_errors: Vec<ConfigurationErrorEntry>,
 ) -> GetSettingsResponse {
     let global = GlobalSettingsSummary {
-        http_control_port: settings
-            .get_http_control_port()
-            .map(|p| p as i64)
-            .unwrap_or(-1),
-        http_control_ip: settings
-            .global_settings
-            .as_ref()
-            .and_then(|global_settings| global_settings.http_control_ip.clone())
+        http_control_addr: settings
+            .get_http_control_addr()
+            .map(|addr| addr.to_string())
             .unwrap_or_default(),
         default_h2_livness_url: settings.get_default_h2_livness_url().unwrap_or_default(),
         show_error_description_on_error_page: settings.get_show_error_description_on_error_page(),
@@ -243,6 +290,7 @@ pub fn build_settings_summary(
                 location_type: loc.location_type.clone().unwrap_or_default(),
                 whitelisted_ip: loc.whitelisted_ip.clone().unwrap_or_default(),
                 strip_path: loc.get_strip_path(),
+                api_keys_auth: loc.api_keys_auth.clone().unwrap_or_default(),
             })
             .collect();
 
@@ -261,6 +309,7 @@ pub fn build_settings_summary(
             allowed_users: host.endpoint.allowed_users.clone().unwrap_or_default(),
             whitelisted_ip: host.endpoint.whitelisted_ip.clone().unwrap_or_default(),
             hsts: host.endpoint.hsts.unwrap_or(false),
+            api_keys_auth: host.endpoint.api_keys_auth.clone().unwrap_or_default(),
             dynamic,
             additional_host_of,
             locations,
@@ -299,28 +348,45 @@ pub fn build_settings_summary(
             authorized_keys_count: g.authorized_keys.len() as i64,
         });
 
-    let dynamic_hosts = settings
-        .dynamic_hosts
-        .as_ref()
-        .map(|dynamic_hosts| DynamicHostsSummary {
-            url: dynamic_hosts.url.clone(),
-            refresh_interval: dynamic_hosts.get_refresh_interval().as_millis() as i64,
-            last_read_error: APP_CTX.dynamic_hosts.get_last_error().unwrap_or_default(),
-            refused_hosts: settings
-                .dynamic_host_errors
-                .iter()
-                .map(|(host_id, error)| ConfigurationErrorEntry {
-                    host_id: host_id.clone(),
-                    error: error.clone(),
-                })
-                .collect(),
-        });
+    let real_time_configurations =
+        settings
+            .real_time_configurations
+            .as_ref()
+            .map(|real_time_configurations| RealTimeConfigurationsSummary {
+                urls: real_time_configurations
+                    .urls
+                    .iter()
+                    .map(|url| RealTimeUrlSummary {
+                        url: url.clone(),
+                        answered: !APP_CTX
+                            .real_time_configurations
+                            .get_answers(std::slice::from_ref(url))
+                            .is_empty(),
+                        last_read_error: APP_CTX
+                            .real_time_configurations
+                            .get_last_error(url)
+                            .unwrap_or_default(),
+                    })
+                    .collect(),
+                refresh_interval: real_time_configurations.get_refresh_interval().as_millis()
+                    as i64,
+                request_timeout: real_time_configurations.get_request_timeout().as_millis() as i64,
+                refused_hosts: settings
+                    .dynamic_host_errors
+                    .iter()
+                    .map(|(host_id, error)| ConfigurationErrorEntry {
+                        host_id: host_id.clone(),
+                        error: error.clone(),
+                    })
+                    .collect(),
+            });
 
     GetSettingsResponse {
         settings_file,
         global,
         hosts,
-        dynamic_hosts,
+        real_time_configurations,
+        api_keys: summarize_api_keys(settings),
         ssh_ids: sorted_keys(settings.ssh.keys()),
         ssl_certificate_ids: settings
             .ssl_certificates
@@ -340,6 +406,49 @@ pub fn build_settings_summary(
         gateway_client_ids: sorted_keys(settings.gateway_clients.keys()),
         current_configuration_errors,
     }
+}
+
+/// Every set of keys - declared, or named by an `api_keys_auth` - with how many keys it has. The
+/// keys are secrets: they are counted, never shown.
+fn summarize_api_keys(settings: &SettingsCompiled) -> Vec<ApiKeysSummary> {
+    let mut used: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+
+    for host in settings.hosts.values() {
+        used.extend(host.endpoint.api_keys_auth.as_deref());
+
+        for location in &host.locations {
+            used.extend(location.api_keys_auth.as_deref());
+        }
+    }
+
+    for template in settings.endpoint_templates.values() {
+        used.extend(template.api_keys_auth.as_deref());
+    }
+
+    used.retain(|id| !crate::api_keys::is_no_api_keys(id));
+
+    let all = settings.get_api_keys();
+
+    let mut ids: std::collections::BTreeSet<&str> = used.clone();
+    ids.extend(all.keys().map(|id| id.as_str()));
+
+    ids.into_iter()
+        .map(|id| ApiKeysSummary {
+            id: id.to_string(),
+            keys: all.get(id).map(|keys| keys.len()).unwrap_or(0) as i64,
+            keys_in_files: settings
+                .api_keys
+                .get(id)
+                .map(|keys| keys.len())
+                .unwrap_or(0) as i64,
+            keys_from_urls: settings
+                .dynamic_api_keys
+                .get(id)
+                .map(|keys| keys.len())
+                .unwrap_or(0) as i64,
+            used: used.contains(id),
+        })
+        .collect()
 }
 
 /// Snapshot of the running configuration's per-host error map.
@@ -411,5 +520,77 @@ mod tests {
             locations,
             [("/stripped/", true), ("/kept/", false), ("/", false)]
         );
+    }
+    /// A set named by an `api_keys_auth` and declared nowhere is listed with no keys: every
+    /// request to what it guards is refused. No key is ever in the summary.
+    #[test]
+    fn the_summary_counts_the_keys_and_never_shows_one() {
+        let hosts: HashMap<String, HostSettings> = serde_yaml::from_str(
+            [
+                "'localhost:8000':",
+                "  endpoint:",
+                "    type: http",
+                "    api_keys_auth: mcp_clients",
+                "  locations:",
+                "  - path: /admin",
+                "    proxy_pass_to: http://127.0.0.1:9000",
+                "    api_keys_auth: admins",
+                "  - path: /health",
+                "    proxy_pass_to: http://127.0.0.1:9000",
+                "    api_keys_auth: none",
+            ]
+            .join("\n")
+            .as_str(),
+        )
+        .unwrap();
+
+        let settings = SettingsCompiled {
+            hosts,
+            api_keys: HashMap::from([(
+                "mcp_clients".to_string(),
+                vec!["file-key-1".to_string(), "file-key-2".to_string()],
+            )]),
+            dynamic_api_keys: HashMap::from([
+                (
+                    "mcp_clients".to_string(),
+                    vec!["file-key-1".to_string(), "url-key".to_string()],
+                ),
+                ("not_used".to_string(), vec!["url-key-2".to_string()]),
+            ]),
+            ..Default::default()
+        };
+
+        let summary = build_settings_summary(&settings, String::new(), vec![]);
+
+        let api_keys: Vec<_> = summary
+            .api_keys
+            .iter()
+            .map(|itm| {
+                (
+                    itm.id.as_str(),
+                    itm.keys,
+                    itm.keys_in_files,
+                    itm.keys_from_urls,
+                    itm.used,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            api_keys,
+            [
+                ("admins", 0, 0, 0, true),
+                ("mcp_clients", 3, 2, 2, true),
+                ("not_used", 1, 0, 1, false),
+            ]
+        );
+
+        assert_eq!(summary.hosts[0].api_keys_auth, "mcp_clients");
+        assert_eq!(summary.hosts[0].locations[1].api_keys_auth, "none");
+
+        let json = serde_json::to_string(&summary).unwrap();
+        for key in ["file-key-1", "file-key-2", "url-key"] {
+            assert!(!json.contains(key), "{json}");
+        }
     }
 }

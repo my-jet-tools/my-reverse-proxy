@@ -16,7 +16,7 @@ pub struct TcpEndpointHostConfig {
     pub timeouts: crate::types::HttpTimeouts,
     /// `Some`: the endpoint was given an access setting it can not apply, and serves nobody.
     pub not_served_reason: Option<NotServedReason>,
-    /// The host came from `dynamic_hosts.url`: see `HttpEndpointInfo::dynamic_host`.
+    /// The host came from a url of `real_time_configurations`: see `HttpEndpointInfo::dynamic_host`.
     pub dynamic_host: bool,
 }
 
@@ -118,7 +118,7 @@ impl TcpEndpointHostConfig {
 }
 
 /// A tcp endpoint forwards bytes: there is no request in which it could look for a header or
-/// a session. `auth_header`, `google_auth` and `allowed_users` load, and the endpoint serves
+/// a session. `api_keys_auth`, `google_auth` and `allowed_users` load, and the endpoint serves
 /// nobody: see [`NotServedReason`]. Its `whitelisted_ip` - of the endpoint and of the location
 /// - it checks by the address of the connection.
 fn access_settings_a_tcp_endpoint_can_not_apply(
@@ -128,12 +128,8 @@ fn access_settings_a_tcp_endpoint_can_not_apply(
 ) -> Result<Option<NotServedReason>, String> {
     let mut settings = Vec::new();
 
-    if host_settings
-        .locations
-        .iter()
-        .any(|location| location.auth_header.is_some())
-    {
-        settings.push("auth_header");
+    if crate::scripts::endpoint_has_api_keys_auth(settings_model, host_settings)? {
+        settings.push("api_keys_auth");
     }
 
     let google_auth = crate::scripts::get_from_host_or_templates(

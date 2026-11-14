@@ -4,45 +4,66 @@ use serde::*;
 
 use super::HostSettings;
 
-/// The shortest `refresh_interval` taken: a smaller one - a zero above all - would ask the url
-/// for the hosts without a pause.
-pub const MIN_DYNAMIC_HOSTS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// The shortest `refresh_interval` taken: a smaller one - a zero above all - would ask the urls
+/// without a pause.
+pub const MIN_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
-/// `dynamic_hosts:` - the url the proxy reads more hosts from, and how often it does.
+/// `real_time_configurations:` - the urls the proxy reads more hosts and api keys from, and how
+/// often it reads them. One interval and one timeout for all of them.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct DynamicHostsSettings {
-    /// Answers with the hosts: see [`DynamicHostsModel`].
-    pub url: String,
-    /// Milliseconds between two reads of the url. Absent: [`DEFAULT_DYNAMIC_HOSTS_REFRESH_INTERVAL`].
+#[serde(deny_unknown_fields)]
+pub struct RealTimeConfigurationsSettings {
+    /// Each answers with a [`RealTimeConfigurationModel`]. A host which two of them give is
+    /// served as the one lower in the list gives it.
+    pub urls: Vec<String>,
+    /// Milliseconds between two reads of the urls. Absent:
+    /// [`DEFAULT_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL`].
     ///
-    /// [`DEFAULT_DYNAMIC_HOSTS_REFRESH_INTERVAL`]: crate::consts::DEFAULT_DYNAMIC_HOSTS_REFRESH_INTERVAL
+    /// [`DEFAULT_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL`]: crate::consts::DEFAULT_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL
     pub refresh_interval: Option<u64>,
-    /// Milliseconds a read of the url may take - the request and its whole answer. Absent:
-    /// [`DEFAULT_DYNAMIC_HOSTS_REQUEST_TIMEOUT`].
+    /// Milliseconds a read of a url may take - the request and its whole answer. Absent:
+    /// [`DEFAULT_REAL_TIME_CONFIGURATIONS_REQUEST_TIMEOUT`].
     ///
-    /// [`DEFAULT_DYNAMIC_HOSTS_REQUEST_TIMEOUT`]: crate::consts::DEFAULT_DYNAMIC_HOSTS_REQUEST_TIMEOUT
+    /// [`DEFAULT_REAL_TIME_CONFIGURATIONS_REQUEST_TIMEOUT`]: crate::consts::DEFAULT_REAL_TIME_CONFIGURATIONS_REQUEST_TIMEOUT
     pub request_timeout: Option<u64>,
 }
 
-impl DynamicHostsSettings {
-    /// Refuses the settings which can not work: no url, or an interval which would ask the url
-    /// without a pause.
+impl RealTimeConfigurationsSettings {
+    /// Refuses the settings which can not work: no urls, a url which is empty or in the list
+    /// twice, an interval which would ask the urls without a pause.
     pub fn check(&self) -> Result<(), String> {
-        if self.url.trim().is_empty() {
-            return Err("dynamic_hosts.url is empty".to_string());
+        if self.urls.is_empty() {
+            return Err("real_time_configurations.urls is empty".to_string());
+        }
+
+        for (index, url) in self.urls.iter().enumerate() {
+            if url.trim().is_empty() {
+                return Err(format!(
+                    "real_time_configurations.urls: url #{} is empty",
+                    index + 1
+                ));
+            }
+
+            if self.urls[..index].contains(url) {
+                return Err(format!(
+                    "real_time_configurations.urls: {url} is in the list twice"
+                ));
+            }
         }
 
         if let Some(refresh_interval) = self.refresh_interval {
-            if Duration::from_millis(refresh_interval) < MIN_DYNAMIC_HOSTS_REFRESH_INTERVAL {
+            if Duration::from_millis(refresh_interval)
+                < MIN_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL
+            {
                 return Err(format!(
-                    "dynamic_hosts.refresh_interval is {refresh_interval}ms: it is in milliseconds, and can not be less than {}",
-                    MIN_DYNAMIC_HOSTS_REFRESH_INTERVAL.as_millis()
+                    "real_time_configurations.refresh_interval is {refresh_interval}ms: it is in milliseconds, and can not be less than {}",
+                    MIN_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL.as_millis()
                 ));
             }
         }
 
         if self.request_timeout == Some(0) {
-            return Err("dynamic_hosts.request_timeout can not be 0".to_string());
+            return Err("real_time_configurations.request_timeout can not be 0".to_string());
         }
 
         Ok(())
@@ -51,45 +72,63 @@ impl DynamicHostsSettings {
     pub fn get_refresh_interval(&self) -> Duration {
         match self.refresh_interval {
             Some(value) => Duration::from_millis(value),
-            None => crate::consts::DEFAULT_DYNAMIC_HOSTS_REFRESH_INTERVAL,
+            None => crate::consts::DEFAULT_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL,
         }
     }
 
     pub fn get_request_timeout(&self) -> Duration {
         match self.request_timeout {
             Some(value) => Duration::from_millis(value),
-            None => crate::consts::DEFAULT_DYNAMIC_HOSTS_REQUEST_TIMEOUT,
+            None => crate::consts::DEFAULT_REAL_TIME_CONFIGURATIONS_REQUEST_TIMEOUT,
         }
     }
 }
 
-/// What `dynamic_hosts.url` answers with, in YAML - read by the same parser as the settings
-/// files: the `hosts:` of a settings file, and `additional_hosts:` for hosts which have their
-/// configuration already. Either may be left out. Nothing else of a settings file is read from
-/// there - another key is an error rather than quietly left out.
-#[derive(Serialize, Deserialize, Debug, Default)]
+/// What a url of `real_time_configurations` answers with, in YAML - read by the same parser as
+/// the settings files: the `hosts:` of a settings file, `additional_hosts:` for hosts which have
+/// their configuration already, and `api_keys:`. Any of them may be left out. Nothing else of a
+/// settings file is read from there - another key is an error rather than quietly left out.
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 #[serde(deny_unknown_fields)]
-pub struct DynamicHostsModel {
+pub struct RealTimeConfigurationModel {
     #[serde(default, deserialize_with = "super::null_as_default")]
     pub hosts: HashMap<String, HostSettings>,
     /// A host of the settings files - or of `hosts` above, or a name of one - and more names of
     /// it, as if they were in its `additional_hosts`.
     #[serde(default, deserialize_with = "super::null_as_default")]
     pub additional_hosts: HashMap<String, Vec<String>>,
+    /// Keys by the ids of their sets, put together with the keys the settings files and the other
+    /// urls declare under the same ids. Taken as they are written: no variable is put into them.
+    #[serde(default, deserialize_with = "super::null_as_default")]
+    pub api_keys: HashMap<String, Vec<String>>,
 }
 
-impl DynamicHostsModel {
+impl RealTimeConfigurationModel {
     /// `None` for a blank answer - empty, or nothing but spaces and line breaks: the url said
-    /// nothing, so the hosts read before stay, and it is not a failure either. That there are no
+    /// nothing, so what it gave before stays, and it is not a failure either. That there are no
     /// hosts is said with `hosts: {}`.
+    ///
+    /// A set of keys which can not work - one under the id `none`, an empty key - refuses the
+    /// whole answer: what the url gave before stays.
     pub fn parse(content: &[u8]) -> Result<Option<Self>, String> {
         if super::SettingsModel::is_blank_content(content) {
             return Ok(None);
         }
 
-        my_settings_reader::serde_yaml::from_slice(content)
-            .map(Some)
-            .map_err(|err| format!("the answer is not the hosts of a settings file: {err}"))
+        let mut model: Self = my_settings_reader::serde_yaml::from_slice(content)
+            .map_err(|err| format!("the answer is not a real-time configuration: {err}"))?;
+
+        let mut api_keys = HashMap::with_capacity(model.api_keys.len());
+
+        for (id, keys) in std::mem::take(&mut model.api_keys) {
+            let keys = crate::api_keys::check_api_keys(&id, keys)
+                .map_err(|err| format!("the answer is refused: {err}"))?;
+            api_keys.insert(id, keys);
+        }
+
+        model.api_keys = api_keys;
+
+        Ok(Some(model))
     }
 }
 
@@ -97,53 +136,73 @@ impl DynamicHostsModel {
 mod tests {
     use super::*;
 
-    fn settings(yaml: &str) -> DynamicHostsSettings {
+    fn settings(yaml: &str) -> RealTimeConfigurationsSettings {
         my_settings_reader::serde_yaml::from_str(yaml).unwrap()
     }
 
     #[test]
-    fn only_the_url_is_required() {
-        let settings = settings("url: http://127.0.0.1:5000/hosts");
+    fn only_the_urls_are_required() {
+        let settings = settings("urls:\n- http://127.0.0.1:5000/hosts");
 
         settings.check().unwrap();
+        assert_eq!(settings.urls, ["http://127.0.0.1:5000/hosts"]);
         assert_eq!(
             settings.get_refresh_interval(),
-            crate::consts::DEFAULT_DYNAMIC_HOSTS_REFRESH_INTERVAL
+            crate::consts::DEFAULT_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL
         );
         assert_eq!(
             settings.get_request_timeout(),
-            crate::consts::DEFAULT_DYNAMIC_HOSTS_REQUEST_TIMEOUT
+            crate::consts::DEFAULT_REAL_TIME_CONFIGURATIONS_REQUEST_TIMEOUT
         );
     }
 
     #[test]
-    fn the_intervals_are_milliseconds() {
-        let settings =
-            settings("url: http://127.0.0.1/hosts\nrefresh_interval: 30000\nrequest_timeout: 2500");
+    fn the_intervals_are_milliseconds_and_one_for_all_the_urls() {
+        let settings = settings(
+            "urls:\n- http://127.0.0.1/a\n- http://127.0.0.1/b\nrefresh_interval: 30000\nrequest_timeout: 2500",
+        );
 
         settings.check().unwrap();
         assert_eq!(settings.get_refresh_interval(), Duration::from_secs(30));
         assert_eq!(settings.get_request_timeout(), Duration::from_millis(2500));
     }
 
-    /// `refresh_interval: 30` meant as seconds would ask the url 33 times a second.
+    /// `refresh_interval: 30` meant as seconds would ask the urls 33 times a second.
     #[test]
     fn settings_which_can_not_work_are_refused() {
         for yaml in [
-            "url: ''",
-            "url: '  '",
-            "url: http://127.0.0.1/hosts\nrefresh_interval: 0",
-            "url: http://127.0.0.1/hosts\nrefresh_interval: 30",
-            "url: http://127.0.0.1/hosts\nrequest_timeout: 0",
+            "urls: []",
+            "urls:\n- ''",
+            "urls:\n- '  '",
+            "urls:\n- http://127.0.0.1/a\n- http://127.0.0.1/a",
+            "urls:\n- http://127.0.0.1/hosts\nrefresh_interval: 0",
+            "urls:\n- http://127.0.0.1/hosts\nrefresh_interval: 30",
+            "urls:\n- http://127.0.0.1/hosts\nrequest_timeout: 0",
         ] {
             assert!(settings(yaml).check().is_err(), "{yaml}");
+        }
+    }
+
+    /// `url:` of the `dynamic_hosts` it took the place of, or a key written wrong, is not left
+    /// out without a word.
+    #[test]
+    fn a_key_which_is_not_there_is_an_error() {
+        for yaml in [
+            "url: http://127.0.0.1/hosts",
+            "urls:\n- http://127.0.0.1/hosts\nrefresh_intreval: 5000",
+        ] {
+            assert!(
+                my_settings_reader::serde_yaml::from_str::<RealTimeConfigurationsSettings>(yaml)
+                    .is_err(),
+                "{yaml}"
+            );
         }
     }
 
     #[test]
     fn a_blank_answer_says_nothing() {
         for content in ["", " ", "\n", "\r\n  \n"] {
-            let model = DynamicHostsModel::parse(content.as_bytes())
+            let model = RealTimeConfigurationModel::parse(content.as_bytes())
                 .unwrap_or_else(|err| panic!("{content:?}: {err}"));
             assert!(model.is_none(), "{content:?}");
         }
@@ -158,10 +217,11 @@ mod tests {
             r#"{"hosts":{}}"#,
             r#"{"hosts":null}"#,
         ] {
-            let model = DynamicHostsModel::parse(content.as_bytes())
+            let model = RealTimeConfigurationModel::parse(content.as_bytes())
                 .unwrap_or_else(|err| panic!("{content:?}: {err}"))
                 .unwrap_or_else(|| panic!("{content:?} is taken for a blank answer"));
             assert!(model.hosts.is_empty(), "{content:?}");
+            assert!(model.api_keys.is_empty(), "{content:?}");
         }
     }
 
@@ -171,7 +231,7 @@ mod tests {
         let json = r#"{"hosts":{"a.example.com:8000":{"endpoint":{"type":"http"},"locations":[{"proxy_pass_to":"http://127.0.0.1:9000"}]}}}"#;
 
         for content in [yaml, json] {
-            let model = DynamicHostsModel::parse(content.as_bytes())
+            let model = RealTimeConfigurationModel::parse(content.as_bytes())
                 .unwrap()
                 .unwrap();
             let host = model.hosts.get("a.example.com:8000").unwrap();
@@ -189,7 +249,9 @@ mod tests {
     fn the_answer_may_be_additional_hosts_only() {
         let yaml = "additional_hosts:\n  example.com:443:\n  - tenant1.example.com\n  - tenant2.example.com:8443\n  other.example.com:443: []\n";
 
-        let model = DynamicHostsModel::parse(yaml.as_bytes()).unwrap().unwrap();
+        let model = RealTimeConfigurationModel::parse(yaml.as_bytes())
+            .unwrap()
+            .unwrap();
 
         assert!(model.hosts.is_empty());
         assert_eq!(
@@ -198,24 +260,56 @@ mod tests {
         );
         assert!(model.additional_hosts["other.example.com:443"].is_empty());
 
-        let model = DynamicHostsModel::parse(b"additional_hosts:\n")
+        let model = RealTimeConfigurationModel::parse(b"additional_hosts:\n")
             .unwrap()
             .unwrap();
         assert!(model.additional_hosts.is_empty());
     }
 
-    /// The url gives hosts and nothing else: a certificate or a variable there would be read by
-    /// nobody.
+    /// Keys only: a url which hands out keys for the hosts of the settings files.
     #[test]
-    fn anything_but_hosts_is_an_error() {
+    fn the_answer_may_be_api_keys_only() {
+        let yaml = "api_keys:\n  mcp_clients:\n  - tenant7-key\n  - ' spaced-key '\n  admins: []\n";
+
+        let model = RealTimeConfigurationModel::parse(yaml.as_bytes())
+            .unwrap()
+            .unwrap();
+
+        assert!(model.hosts.is_empty());
+        assert_eq!(model.api_keys["mcp_clients"], ["tenant7-key", "spaced-key"]);
+        assert!(model.api_keys["admins"].is_empty());
+    }
+
+    #[test]
+    fn a_set_of_keys_which_can_not_work_refuses_the_answer() {
+        for content in [
+            "api_keys:\n  none:\n  - key\n",
+            "api_keys:\n  NONE: []\n",
+            "api_keys:\n  clients:\n  - ''\n",
+            "api_keys:\n  clients:\n  - ${MCP_KEY}\n",
+            "hosts: {}\napi_keys:\n  clients:\n  - ${lower_case}\n",
+        ] {
+            assert!(
+                RealTimeConfigurationModel::parse(content.as_bytes()).is_err(),
+                "{content:?}"
+            );
+        }
+    }
+
+    /// The url gives hosts and keys and nothing else: a certificate or a variable there would be
+    /// read by nobody.
+    #[test]
+    fn anything_else_is_an_error() {
         for content in [
             "variables:\n  ENV: dev\n",
             "hosts: {}\nssl_certificates: []\n",
             "not the hosts",
             "hosts: 5\n",
+            "api_keys: 5\n",
+            "api_keys:\n  clients: key\n",
         ] {
             assert!(
-                DynamicHostsModel::parse(content.as_bytes()).is_err(),
+                RealTimeConfigurationModel::parse(content.as_bytes()).is_err(),
                 "{content:?}"
             );
         }

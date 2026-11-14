@@ -8,9 +8,10 @@ use super::put_together_port::*;
 /// names of its `additional_hosts` are one configuration. A name which moved to another host,
 /// or became a host of its own, takes that host along.
 ///
-/// The settings applied are updated with what is reloaded, and the hosts of `dynamic_hosts.url`
-/// are put next to them anew: a later read of the url is checked against the hosts as they are
-/// served, not as the last full reload left them.
+/// The settings applied are updated with what is reloaded, and what the urls of
+/// `real_time_configurations` gave is put next to them anew: a later read of the urls is checked
+/// against the hosts as they are served, not as the last full reload left them. The keys of
+/// `api_keys:` are taken from the files as they are now.
 ///
 /// A host of the files which does not compile fails the reload, and nothing is changed.
 pub async fn reload_endpoint_configuration(host_id_to_refresh: &str) -> Result<String, String> {
@@ -35,6 +36,8 @@ pub async fn reload_endpoint_configuration(host_id_to_refresh: &str) -> Result<S
 
     let (after, host_ids) = settings_with_reloaded_hosts(applied.as_deref(), &fresh, host_ids);
 
+    crate::api_keys::publish_api_keys(&after);
+
     let not_served = apply_reloaded_hosts(applied.as_deref(), &after, &host_ids).await?;
 
     APP_CTX.applied_settings.store(Some(Arc::new(after)));
@@ -56,8 +59,8 @@ pub async fn reload_endpoint_configuration(host_id_to_refresh: &str) -> Result<S
 }
 
 /// Puts the hosts `host_ids` of `after` - the settings `applied` with them reloaded - into the
-/// live configuration in place of what they served, with their names; then the hosts of
-/// `dynamic_hosts.url` against them. Returns what is not served of theirs, as `id: error`.
+/// live configuration in place of what they served, with their names; then the hosts of the
+/// urls of `real_time_configurations` against them. Returns what is not served of theirs, as `id: error`.
 ///
 /// A host of the files which does not compile fails it before anything is written: what is
 /// served stays as it is.
@@ -147,8 +150,10 @@ pub async fn apply_reloaded_hosts(
 }
 
 /// The settings applied - `None` before the first reload of the settings - with the hosts of
-/// the files `host_ids`, and the ones they take along, as `fresh` has them; and the hosts of
-/// `dynamic_hosts.url` put next to them anew. Also returns the hosts reloaded.
+/// the files `host_ids`, and the ones they take along, as `fresh` has them; and what the urls of
+/// `real_time_configurations` gave put next to them anew. The keys of `api_keys:` are the ones of
+/// `fresh`: a set is of no endpoint, and the files are what it is read from. Also returns the
+/// hosts reloaded.
 pub fn settings_with_reloaded_hosts(
     applied: Option<&SettingsCompiled>,
     fresh: &SettingsCompiled,
@@ -160,12 +165,15 @@ pub fn settings_with_reloaded_hosts(
 
     let host_ids = applied.get_hosts_of_files_reloaded_with(fresh, host_ids);
 
-    let answer = applied
-        .dynamic_hosts
-        .as_ref()
-        .and_then(|dynamic_hosts| APP_CTX.dynamic_hosts.get_answer(&dynamic_hosts.url));
+    let answers = match applied.real_time_configurations.as_ref() {
+        Some(real_time_configurations) => APP_CTX
+            .real_time_configurations
+            .get_answers(&real_time_configurations.urls),
+        None => Vec::new(),
+    };
 
-    let after = applied.with_hosts_of_files_from(fresh, &host_ids, answer.as_deref());
+    let mut after = applied.with_hosts_of_files_from(fresh, &host_ids, &answers);
+    after.api_keys = fresh.api_keys.clone();
 
     (after, host_ids)
 }

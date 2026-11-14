@@ -29,6 +29,10 @@ pub struct EndpointSettings {
     pub whitelisted_ip: Option<String>,
     pub template_id: Option<String>,
     pub allowed_users: Option<String>,
+    /// The id of a set of `api_keys:`: each location of the endpoint takes a request with a key
+    /// of the set in `X-Api-Key` only. A location may name a set of its own, or `none`. `none`
+    /// here takes away the one of the template. See [`crate::api_keys`].
+    pub api_keys_auth: Option<String>,
     pub keep_alive: Option<bool>,
     pub track_metrics_by_all_domains: Option<bool>,
     pub hsts: Option<bool>,

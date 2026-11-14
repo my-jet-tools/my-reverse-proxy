@@ -82,9 +82,23 @@ impl IpBlocklist {
         blocked_until > DateTimeAsMicroseconds::now()
     }
 
+    /// A connection of `ip` got through to an endpoint: the noisy failures it had are forgiven -
+    /// not the hard ones. Getting through takes nothing but a TLS handshake and a `Host`, so an
+    /// address which tries one wrong api key or client secret after another, each on a connection
+    /// of its own, would have its count taken back before every try, and never be blocked. A hard
+    /// failure goes when its window is out.
     pub fn register_success(&self, ip: &IpAddr) {
         let mut map = self.map.lock();
-        map.remove(ip);
+
+        let Some(entry) = map.get_mut(ip) else {
+            return;
+        };
+
+        if entry.hard_count == 0 && entry.blocked_until.is_none() {
+            map.remove(ip);
+        } else {
+            entry.soft_count = 0;
+        }
     }
 
     pub fn unblock(&self, ip: &IpAddr) -> bool {
@@ -171,5 +185,78 @@ impl IpBlocklist {
                 None => false,
             })
             .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::from([10, 99, 0, last])
+    }
+
+    #[test]
+    fn five_hard_failures_block_the_address() {
+        let blocklist = IpBlocklist::new();
+
+        for _ in 0..HARD_FAIL_THRESHOLD - 1 {
+            blocklist.register_failure(ip(1), FailureSeverity::Hard);
+        }
+        assert!(!blocklist.is_blocked(&ip(1)));
+
+        blocklist.register_failure(ip(1), FailureSeverity::Hard);
+        assert!(blocklist.is_blocked(&ip(1)));
+        assert!(!blocklist.is_blocked(&ip(2)));
+    }
+
+    /// One wrong key after another, each on a connection of its own which gets through to the
+    /// endpoint first: the hard failures add up all the same.
+    #[test]
+    fn a_connection_which_gets_through_does_not_forgive_hard_failures() {
+        let blocklist = IpBlocklist::new();
+
+        for _ in 0..HARD_FAIL_THRESHOLD {
+            blocklist.register_success(&ip(3));
+            blocklist.register_failure(ip(3), FailureSeverity::Hard);
+        }
+
+        assert!(blocklist.is_blocked(&ip(3)));
+    }
+
+    #[test]
+    fn a_connection_which_gets_through_forgives_soft_failures() {
+        let blocklist = IpBlocklist::new();
+
+        for _ in 0..SOFT_FAIL_THRESHOLD * 2 {
+            blocklist.register_failure(ip(4), FailureSeverity::Soft);
+            blocklist.register_success(&ip(4));
+        }
+        assert!(!blocklist.is_blocked(&ip(4)));
+
+        // With a hard failure counted, the soft ones are still forgiven - and the hard one stays.
+        blocklist.register_failure(ip(5), FailureSeverity::Hard);
+        for _ in 0..SOFT_FAIL_THRESHOLD * 2 {
+            blocklist.register_failure(ip(5), FailureSeverity::Soft);
+            blocklist.register_success(&ip(5));
+        }
+        assert!(!blocklist.is_blocked(&ip(5)));
+
+        for _ in 0..HARD_FAIL_THRESHOLD - 1 {
+            blocklist.register_failure(ip(5), FailureSeverity::Hard);
+        }
+        assert!(blocklist.is_blocked(&ip(5)));
+    }
+
+    #[test]
+    fn a_white_listed_address_is_never_counted() {
+        let blocklist = IpBlocklist::new();
+        blocklist.set_white_list(Some(vec!["10.99.0.6".to_string()]));
+
+        for _ in 0..HARD_FAIL_THRESHOLD * 2 {
+            blocklist.register_failure(ip(6), FailureSeverity::Hard);
+        }
+
+        assert!(!blocklist.is_blocked(&ip(6)));
     }
 }

@@ -12,8 +12,15 @@ pub struct SettingsModel {
     pub hosts: HashMap<String, HostSettings>,
     pub include: Option<Vec<String>>,
     pub dynamic_configurations_file: Option<String>,
-    /// More hosts, read from a url on a timer: see [`DynamicHostsSettings`].
-    pub dynamic_hosts: Option<DynamicHostsSettings>,
+    /// More hosts and api keys, read from urls on a timer: see
+    /// [`RealTimeConfigurationsSettings`].
+    pub real_time_configurations: Option<RealTimeConfigurationsSettings>,
+    /// Renamed to `real_time_configurations`. Read only to refuse the settings with a word on
+    /// what it is called now, rather than leave its hosts out without one.
+    pub dynamic_hosts: Option<my_settings_reader::serde_yaml::Value>,
+    /// Sets of keys by their ids - what `api_keys_auth` of an endpoint or a location names. See
+    /// [`crate::api_keys`].
+    pub api_keys: Option<HashMap<String, Vec<String>>>,
     pub variables: Option<HashMap<String, String>>,
     pub ssl_certificates: Option<Vec<SslCertificatesSettingsModel>>,
     pub client_certificate_ca: Option<Vec<ClientCertificateCaSettings>>,
@@ -139,6 +146,7 @@ mod tests {
                     whitelisted_ip: None,
                     template_id: None,
                     allowed_users: None,
+                    api_keys_auth: None,
                     keep_alive: None,
                     track_metrics_by_all_domains: None,
                     hsts: None,
@@ -158,6 +166,7 @@ mod tests {
                     domain_name: None,
                     compress: None,
                     trace_payload: None,
+                    api_keys_auth: None,
                     auth_header: None,
                     allowed_hosts: None,
                     strip_path: None,
@@ -206,7 +215,9 @@ mod tests {
             global_settings: None,
             include: None,
             dynamic_configurations_file: None,
+            real_time_configurations: None,
             dynamic_hosts: None,
+            api_keys: None,
             variables: None,
             ssl_certificates: None,
             client_certificate_ca: None,

@@ -7,6 +7,7 @@ use timers::{
     SslCertsRefreshTimer, TrafficTimer,
 };
 
+mod api_keys;
 mod app;
 mod flows;
 //mod http2_executor;
@@ -42,6 +43,8 @@ mod network_stream;
 mod oauth;
 mod ssl;
 mod tcp_gateway;
+#[cfg(test)]
+mod test_ports;
 mod timers;
 mod types;
 mod upstream_h1_pool;
@@ -69,9 +72,12 @@ async fn main() {
         .await
         .expect("Failed to load initial settings");
 
-    // The hosts of `dynamic_hosts.url`: read right away - the load above asked for it - and
-    // then every `refresh_interval`.
-    crate::app::spawn_named("dynamic_hosts", crate::timers::dynamic_hosts_timer());
+    // The urls of `real_time_configurations`: read right away - the load above asked for it -
+    // and then every `refresh_interval`.
+    crate::app::spawn_named(
+        "real_time_configurations",
+        crate::timers::real_time_configurations_timer(),
+    );
 
     let mut my_timer = MyTimer::new(Duration::from_secs(3600), my_logger::LOGGER.clone());
 

@@ -34,7 +34,7 @@ impl HttpConnectionInfo {
 
     /// A keep-alive connection keeps serving the port configuration it was
     /// accepted with. After a settings reload this swaps in the live one, so a
-    /// changed location (`auth_header`, upstream, headers) applies to the next
+    /// changed location (`api_keys_auth`, upstream, headers) applies to the next
     /// request on an already-open connection as well. Returns true when the
     /// configuration was replaced — the caller must re-resolve the endpoint.
     pub async fn pick_up_reload(&mut self) -> bool {

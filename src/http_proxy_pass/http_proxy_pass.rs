@@ -180,7 +180,7 @@ impl HttpProxyPass {
                 ));
             }
 
-            // The location's own IP allow-list: before `auth_header`, and before
+            // The location's own IP allow-list: before `api_keys_auth`, and before
             // anything of the request body is read.
             if !proxy_pass_location
                 .config
@@ -192,13 +192,14 @@ impl HttpProxyPass {
                 ));
             }
 
-            // Per-location `auth_header` gate — same rule as the h1 pipeline's
-            // `H1Reader::authorize`: refused before anything is sent upstream,
-            // and an absent header is indistinguishable from a wrong one.
+            // The `api_keys_auth` gate of the location - the same rule as the h1 pipeline's
+            // `H1Reader::authorize`: refused before anything is sent upstream, and an absent key
+            // is indistinguishable from a wrong one.
             if !proxy_pass_location
                 .config
-                .auth_header_accepts(req.get_authorization_header())
+                .api_keys_auth_accepts(req.get_api_key_values())
             {
+                crate::api_keys::register_rejection(connection_ip.get_ip_addr());
                 return Err(ProxyPassError::Unauthorized);
             }
 

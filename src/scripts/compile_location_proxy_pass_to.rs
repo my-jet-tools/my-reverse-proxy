@@ -2,11 +2,14 @@ use my_ssh::ssh_settings::OverSshConnectionSettings;
 
 use crate::{configurations::*, settings::*, settings_compiled::SettingsCompiled};
 
+/// `endpoint_api_keys_auth`: `api_keys_auth` of the endpoint the location is of - or of its
+/// template: the location is guarded by it unless it names a set of its own, or `none`.
 pub async fn compile_location_proxy_pass_to(
     settings_model: &SettingsCompiled,
     location_settings: &LocationSettings,
     listen_host: &str,
     resolved: &ResolvedTimeouts,
+    endpoint_api_keys_auth: Option<&str>,
 ) -> Result<ProxyPassLocationConfig, String> {
     let path = location_settings.path.as_deref().unwrap_or("/").to_string();
 
@@ -123,7 +126,13 @@ pub async fn compile_location_proxy_pass_to(
         }
     }
 
-    let result = ProxyPassLocationConfig::new(path, location_settings, proxy_pass_to, listen_host);
+    let result = ProxyPassLocationConfig::new(
+        path,
+        location_settings,
+        proxy_pass_to,
+        listen_host,
+        endpoint_api_keys_auth,
+    );
 
     Ok(result)
 }

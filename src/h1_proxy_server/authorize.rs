@@ -7,19 +7,29 @@ use rust_extensions::slice_of_u8_utils::SliceOfU8Ext;
 
 use super::*;
 
-const AUTHORIZATION_HEADER: &[u8] = b"authorization";
+/// The values of the first two `X-Api-Key` headers of the request. A request with more than one
+/// is refused whatever they are, so a third is never looked for.
+fn find_api_key_values<'a>(http_headers: &Http1Headers, data: &'a [u8]) -> [Option<&'a [u8]>; 2] {
+    let mut result = [None, None];
+    let mut found = 0;
 
-fn find_authorization_value<'a>(http_headers: &Http1Headers, data: &'a [u8]) -> Option<&'a [u8]> {
     let mut pos = http_headers.first_line_end + crate::consts::HTTP_CR_LF.len();
     loop {
-        let next = data.find_sequence_pos(crate::consts::HTTP_CR_LF, pos)?;
+        let Some(next) = data.find_sequence_pos(crate::consts::HTTP_CR_LF, pos) else {
+            return result;
+        };
         if next == pos {
-            return None;
+            return result;
         }
         if let Some(header) = HttpHeader::new(data, pos, next) {
-            if header.is_my_header_name(AUTHORIZATION_HEADER) {
+            if header.is_my_header_name(crate::api_keys::API_KEY_HEADER.as_bytes()) {
                 let value_pos = header.get_value();
-                return Some(&data[value_pos.start..value_pos.end]);
+                result[found] = Some(&data[value_pos.start..value_pos.end]);
+                found += 1;
+
+                if found == result.len() {
+                    return result;
+                }
             }
         }
         pos = next + crate::consts::HTTP_CR_LF.len();
@@ -46,9 +56,13 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
             .cloned()
             .map(HttpProxyPassIdentity::ClientCert);
 
-        if location.auth_header.is_some() {
-            let actual = find_authorization_value(http_headers, self.loop_buffer.get_data());
-            if !location.auth_header_accepts(actual) {
+        if location.api_keys_auth.is_some() {
+            let values = find_api_key_values(http_headers, self.loop_buffer.get_data());
+
+            if !location.api_keys_auth_accepts(values.into_iter().flatten()) {
+                crate::api_keys::register_rejection(
+                    http_connection_info.connection_ip.get_ip_addr(),
+                );
                 return Err(ProxyServerError::NotAuthorized);
             }
         }

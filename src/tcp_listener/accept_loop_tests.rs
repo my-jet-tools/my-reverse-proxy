@@ -9,6 +9,7 @@ use tokio::{
     net::{TcpListener, TcpSocket, TcpStream},
 };
 
+use crate::test_ports::free_port;
 use crate::{
     configurations::EndpointPort, settings::SettingsModel, settings_compiled::SettingsCompiled,
 };
@@ -213,13 +214,4 @@ async fn connect_to_port(port: u16) -> TcpStream {
     }
 
     panic!("nothing listens on port {port}");
-}
-
-async fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }

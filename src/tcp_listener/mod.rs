@@ -30,6 +30,9 @@ mod location_whitelist_tests;
 mod ambiguous_path_tests;
 
 #[cfg(test)]
+mod api_keys_tests;
+
+#[cfg(test)]
 mod h1_malformed_request_tests;
 
 #[cfg(test)]

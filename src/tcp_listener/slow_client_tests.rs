@@ -37,6 +37,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
+use crate::test_ports::free_port;
 use crate::{
     configurations::EndpointPort, settings::SettingsModel, settings_compiled::SettingsCompiled,
 };
@@ -589,15 +590,6 @@ async fn apply_settings(yaml: &str) {
 /// The accept loop the proxy runs for a tcp port, on the loopback.
 fn serve(port: u16) {
     super::start_listen_tcp_server(SocketAddr::from(([127, 0, 0, 1], port)));
-}
-
-async fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
 }
 
 /// The accept loop is started by a spawned task: the port may not be listening yet.

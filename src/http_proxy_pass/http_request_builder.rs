@@ -529,9 +529,13 @@ impl HttpRequestBuilder {
 
         let req_parts = self.parts.clone();
 
+        let body_len = bytes.len();
         let body = into_full_body(bytes, location.config.id, ip.clone());
 
-        let request = builder.body(body).unwrap();
+        let mut request = builder.body(body).unwrap();
+
+        // An h2 body has no length of its own on the wire: the http/1.1 upstream is told it.
+        frame_whole_body(request.headers_mut(), body_len);
 
         if crate::app::APP_CTX
             .debug_flags
@@ -559,12 +563,12 @@ impl HttpRequestBuilder {
         &self.parts.uri
     }
 
-    /// Raw `Authorization` value as received, for the location's `auth_header`
-    /// gate. `None` when the header is absent.
-    pub fn get_authorization_header(&self) -> Option<&[u8]> {
+    /// Every `X-Api-Key` value as received, for the `api_keys_auth` gate of the location.
+    pub fn get_api_key_values(&self) -> impl Iterator<Item = &[u8]> {
         self.parts
             .headers
-            .get(hyper::header::AUTHORIZATION)
+            .get_all(crate::api_keys::API_KEY_HEADER)
+            .iter()
             .map(|value| value.as_bytes())
     }
 
@@ -692,15 +696,12 @@ impl HttpRequestBuilder {
                 HeaderValue::from_static("application/octet-stream"),
             );
 
-            parts.headers.remove(CONTENT_LENGTH);
-
-            parts.headers.append(
-                CONTENT_LENGTH,
-                HeaderValue::from_str(compressed_data_len.to_string().as_str()).unwrap(),
-            );
+            frame_whole_body(&mut parts.headers, compressed_data_len);
 
             BuiltBody::Buffered(http_body_util::Full::new(compressed_data.into()))
         } else {
+            frame_whole_body(&mut parts.headers, bytes.len());
+
             BuiltBody::Buffered(into_full_body(bytes, location_id, ip.clone()))
         };
 
@@ -774,6 +775,27 @@ fn apply_cf_ip_country(parts: &mut Parts, inner: &HttpProxyPassInner, endpoint: 
     parts
         .headers
         .insert(HeaderName::from_static("cf-ipcountry"), value);
+}
+
+/// The framing of a body which goes upstream whole: its length, and nothing else.
+///
+/// The headers of the client go along with the body, and they describe it as the client sent it:
+/// a `transfer-encoding: chunked` of an http/1.1 client tells of chunks which are gone once the
+/// body is collected, and an h2 body comes with no length at all. An http/1.1 upstream reads from
+/// these headers where the request ends - left as they are, the body, or a part of it, is read
+/// as one more request (request smuggling), past the checks of the location and on a pooled
+/// connection other clients share.
+///
+/// An empty body gets a `content-length` only if the client sent one: a request without a body
+/// is framed by having none.
+fn frame_whole_body(headers: &mut HeaderMap, body_len: usize) {
+    // Every value of each: two `content-length`s are framing of their own.
+    let had_content_length = headers.remove(CONTENT_LENGTH).is_some();
+    headers.remove(TRANSFER_ENCODING);
+
+    if body_len > 0 || had_content_length {
+        headers.insert(CONTENT_LENGTH, HeaderValue::from(body_len));
+    }
 }
 
 fn into_full_body(src: Bytes, location_id: i64, ip: Option<String>) -> Full<Bytes> {

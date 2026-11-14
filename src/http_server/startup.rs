@@ -1,7 +1,4 @@
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
-};
+use std::{net::SocketAddr, sync::Arc};
 
 use mcp_server_middleware::McpMiddleware;
 use my_http_server::{
@@ -16,30 +13,10 @@ use crate::mcp::{
     ReloadSettingsHandler, SetDynamicSettingsHandler,
 };
 
-const DEFAULT_PORT: u16 = 8000;
-
+/// The control port at the address of the settings: `global_settings.http_control_port` and
+/// `http_control_ip`, `127.0.0.1:8000` when they say nothing.
 pub fn start() {
-    start_at(control_port_addr(
-        crate::app::APP_CTX.http_control_ip,
-        crate::app::APP_CTX.http_control_port,
-    ));
-}
-
-/// The address of the control port: `http_control_ip` and `http_control_port` of the global
-/// settings, `0.0.0.0` and 8000 for what is not given.
-pub fn control_port_addr(
-    http_control_ip: Option<IpAddr>,
-    http_control_port: Option<u16>,
-) -> SocketAddr {
-    let http_port = if let Some(listen_port) = http_control_port {
-        listen_port
-    } else {
-        DEFAULT_PORT
-    };
-
-    let http_ip = http_control_ip.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-
-    SocketAddr::new(http_ip, http_port)
+    start_at(crate::app::APP_CTX.http_control_addr);
 }
 
 /// The control port server at the address given.

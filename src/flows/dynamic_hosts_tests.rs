@@ -1,10 +1,10 @@
-//! The hosts of `dynamic_hosts.url`: how the url is read, and how its hosts are put into the
-//! live configuration and served.
+//! The hosts of the urls of `real_time_configurations`: how a url is read, and how its hosts are
+//! put into the live configuration and served.
 //!
 //! Nothing on the proxy side is mocked. The hosts of the files are compiled with
 //! `scripts::compile_host_configuration` and published into `APP_CTX.current_configuration`, as a
 //! reload of the settings does; the dynamic hosts are put next to them by
-//! `apply_dynamic_hosts_change`, the function a read of the url applies them with; and the ports
+//! `apply_dynamic_hosts_change`, the function a read of the urls applies them with; and the ports
 //! are served by the real accept loop. The settings are never read from `~/.my-reverse-proxy`.
 //!
 //! Every test has hosts of its own, on ports of its own: the live configuration is shared by
@@ -22,11 +22,12 @@ use crate::{
     configurations::{
         EndpointPort, HttpEndpointInfo, HttpListenPortConfiguration, ListenConfiguration,
     },
-    settings::{DynamicHostsModel, DynamicHostsSettings, HostSettings},
+    settings::{HostSettings, RealTimeConfigurationModel, RealTimeConfigurationsSettings},
     settings_compiled::SettingsCompiled,
 };
 
-use super::{apply_dynamic_hosts_change, read_dynamic_hosts};
+use super::{apply_dynamic_hosts_change, read_real_time_configuration};
+use crate::test_ports::free_port;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -57,12 +58,12 @@ async fn answer_with(response: String) -> u16 {
     port
 }
 
-fn url_settings(port: u16) -> DynamicHostsSettings {
-    DynamicHostsSettings {
-        url: format!("http://127.0.0.1:{port}/hosts"),
-        refresh_interval: None,
-        request_timeout: Some(2000),
-    }
+fn url_of(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/hosts")
+}
+
+async fn read(port: u16) -> Result<Option<RealTimeConfigurationModel>, String> {
+    read_real_time_configuration(&url_of(port), Duration::from_millis(2000)).await
 }
 
 fn ok_response(content_type: &str, body: &str) -> String {
@@ -80,11 +81,7 @@ async fn the_hosts_are_read_from_the_url_in_yaml_and_in_json() {
     for (content_type, body) in [("application/yaml", yaml), ("application/json", json)] {
         let port = answer_with(ok_response(content_type, body)).await;
 
-        let hosts = read_dynamic_hosts(&url_settings(port))
-            .await
-            .unwrap()
-            .unwrap()
-            .hosts;
+        let hosts = read(port).await.unwrap().unwrap().hosts;
 
         assert_eq!(hosts.len(), 1, "{content_type}");
         assert!(hosts.contains_key("a.example.com:8000"), "{content_type}");
@@ -103,7 +100,7 @@ async fn a_blank_answer_says_nothing() {
     ] {
         let port = answer_with(response.clone()).await;
 
-        let answer = read_dynamic_hosts(&url_settings(port)).await;
+        let answer = read(port).await;
 
         assert!(matches!(answer, Ok(None)), "{response:?}: {answer:?}");
     }
@@ -118,7 +115,7 @@ async fn hosts_with_nothing_in_them_are_no_hosts() {
     ] {
         let port = answer_with(response.clone()).await;
 
-        let hosts = read_dynamic_hosts(&url_settings(port))
+        let hosts = read(port)
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("{response:?} is taken for a blank answer"))
@@ -144,16 +141,20 @@ async fn an_answer_which_is_not_the_hosts_is_a_failure() {
         ),
         (
             ok_response("text/html", "<html>maintenance</html>"),
-            "not the hosts",
+            "not a real-time configuration",
         ),
         (
             ok_response("application/yaml", "ssl_certificates: []\n"),
-            "not the hosts",
+            "not a real-time configuration",
+        ),
+        (
+            ok_response("application/yaml", "api_keys:\n  none:\n  - key\n"),
+            "refused",
         ),
     ] {
         let port = answer_with(response.clone()).await;
 
-        let err = read_dynamic_hosts(&url_settings(port)).await.unwrap_err();
+        let err = read(port).await.unwrap_err();
 
         assert!(err.contains(expected), "{response:?}: {err}");
     }
@@ -171,13 +172,8 @@ async fn a_url_which_does_not_answer_fails_within_the_request_timeout() {
         }
     });
 
-    let settings = DynamicHostsSettings {
-        request_timeout: Some(300),
-        ..url_settings(port)
-    };
-
     let started = std::time::Instant::now();
-    let result = read_dynamic_hosts(&settings).await;
+    let result = read_real_time_configuration(&url_of(port), Duration::from_millis(300)).await;
 
     assert!(result.is_err());
     assert!(
@@ -187,9 +183,7 @@ async fn a_url_which_does_not_answer_fails_within_the_request_timeout() {
     );
 
     let closed_port = free_port().await;
-    assert!(read_dynamic_hosts(&url_settings(closed_port))
-        .await
-        .is_err());
+    assert!(read(closed_port).await.is_err());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -440,14 +434,17 @@ async fn a_port_whose_hosts_did_not_change_is_not_touched() {
     ));
 }
 
-/// The whole way a read of the url goes, from `refresh_dynamic_hosts`: the hosts it answers
-/// with are served; while it fails, or answers with a blank body, the ones read before stay;
-/// what it does not give any more goes. The only test which uses `APP_CTX.applied_settings` and `APP_CTX.dynamic_hosts`.
+/// The whole way a read of the urls goes, from `refresh_real_time_configurations`: what they
+/// answer with is served - their hosts, and their keys; while a url fails, or answers with a
+/// blank body, what it gave before stays; a host two urls give is served as the lower one gives
+/// it; what they do not give any more goes. The only test which uses `APP_CTX.applied_settings`
+/// and `APP_CTX.real_time_configurations`.
 #[tokio::test]
-async fn the_hosts_of_the_url_are_served_and_follow_what_it_answers() {
+async fn what_the_urls_give_is_served_and_follows_what_they_answer() {
     let id = unique_id();
     let static_upstream = start_upstream("static upstream").await;
     let dynamic_upstream = start_upstream("dynamic upstream").await;
+    let lower_upstream = start_upstream("lower upstream").await;
     let port = free_port().await;
 
     // A host of the files on the port: the dynamic one comes next to it, and the listener the
@@ -455,29 +452,40 @@ async fn the_hosts_of_the_url_are_served_and_follow_what_it_answers() {
     let static_host = format!("static-{id}.localhost:{port}");
     let dynamic_name = format!("dynamic-{id}.localhost");
     let dynamic_host = format!("{dynamic_name}:{port}");
+    let keys_id = format!("keys_{id}");
+    let api_key = format!("key-of-{id}");
 
-    let answer = Arc::new(parking_lot::Mutex::new(String::new()));
-    let url_port = answer_with_what_is_set(answer.clone()).await;
+    // The hosts come from the upper url, the keys from the lower one.
+    let upper = Arc::new(parking_lot::Mutex::new(String::new()));
+    let upper_port = answer_with_what_is_set(upper.clone()).await;
+    let lower = Arc::new(parking_lot::Mutex::new(String::new()));
+    let lower_port = answer_with_what_is_set(lower.clone()).await;
 
-    let hosts_answer = ok_response(
+    let host_answer = |upstream: u16| {
+        format!(
+            "hosts:\n  {dynamic_host}:\n    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: http://127.0.0.1:{upstream}\n"
+        )
+    };
+    let hosts_answer = ok_response("application/yaml", &host_answer(dynamic_upstream));
+    let keys_answer = ok_response(
         "application/yaml",
-        &format!(
-            "hosts:\n  {dynamic_host}:\n    endpoint:\n      type: http\n    locations:\n    - proxy_pass_to: http://127.0.0.1:{dynamic_upstream}\n"
-        ),
+        &format!("api_keys:\n  {keys_id}:\n  - {api_key}\n"),
     );
 
     let mut settings = settings_of_files(&[(static_host.clone(), static_upstream)]);
-    settings.dynamic_hosts = Some(DynamicHostsSettings {
+    settings.real_time_configurations = Some(RealTimeConfigurationsSettings {
+        urls: vec![url_of(upper_port), url_of(lower_port)],
         refresh_interval: Some(60_000),
-        ..url_settings(url_port)
+        request_timeout: Some(2000),
     });
     publish(&settings).await;
     serve(port);
     APP_CTX.applied_settings.store(Some(Arc::new(settings)));
 
-    *answer.lock() = hosts_answer.clone();
+    *upper.lock() = hosts_answer.clone();
+    *lower.lock() = keys_answer.clone();
     assert_eq!(
-        super::refresh_dynamic_hosts().await,
+        super::refresh_real_time_configurations().await,
         Some(Duration::from_secs(60))
     );
 
@@ -490,19 +498,25 @@ async fn the_hosts_of_the_url_are_served_and_follow_what_it_answers() {
         .load_full()
         .unwrap()
         .is_dynamic_host(&dynamic_host));
+    assert!(APP_CTX.api_keys.accepts(&keys_id, api_key.as_bytes()));
 
-    // The url is down: the host read before is served.
-    *answer.lock() =
+    // The lower url is down: the keys it gave stay, and so does the host of the upper one.
+    *lower.lock() =
         "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             .to_string();
     let configuration = http_port_configuration(port).await;
-    super::refresh_dynamic_hosts().await;
+    super::refresh_real_time_configurations().await;
 
     assert!(APP_CTX
-        .dynamic_hosts
-        .get_last_error()
+        .real_time_configurations
+        .get_last_error(&url_of(lower_port))
         .unwrap()
         .contains("503"));
+    assert!(APP_CTX
+        .real_time_configurations
+        .get_last_error(&url_of(upper_port))
+        .is_none());
+    assert!(APP_CTX.api_keys.accepts(&keys_id, api_key.as_bytes()));
     assert!(Arc::ptr_eq(
         &http_port_configuration(port).await,
         &configuration
@@ -512,39 +526,63 @@ async fn the_hosts_of_the_url_are_served_and_follow_what_it_answers() {
         served_by("dynamic upstream")
     );
 
-    // Up again, with the same hosts: nothing to apply.
-    *answer.lock() = hosts_answer;
-    super::refresh_dynamic_hosts().await;
+    // Up again, with the same keys: nothing to apply.
+    *lower.lock() = keys_answer;
+    super::refresh_real_time_configurations().await;
 
-    assert!(APP_CTX.dynamic_hosts.get_last_error().is_none());
+    assert!(APP_CTX
+        .real_time_configurations
+        .get_last_error(&url_of(lower_port))
+        .is_none());
     assert!(Arc::ptr_eq(
         &http_port_configuration(port).await,
         &configuration
     ));
 
     // A 200 with a blank body says nothing: the host read before stays, and it is no failure.
-    *answer.lock() = ok_response("application/json", "");
-    super::refresh_dynamic_hosts().await;
+    *upper.lock() = ok_response("application/json", "");
+    super::refresh_real_time_configurations().await;
 
-    assert!(APP_CTX.dynamic_hosts.get_last_error().is_none());
     assert!(APP_CTX
-        .dynamic_hosts
-        .get_answer(&url_settings(url_port).url)
-        .unwrap()
+        .real_time_configurations
+        .get_last_error(&url_of(upper_port))
+        .is_none());
+    assert!(APP_CTX
+        .real_time_configurations
+        .get_answers(&[url_of(upper_port)])[0]
         .hosts
         .contains_key(&dynamic_host));
     assert!(Arc::ptr_eq(
         &http_port_configuration(port).await,
         &configuration
     ));
+
+    // The lower url gives the same host too: it writes over the upper one.
+    *upper.lock() = hosts_answer;
+    *lower.lock() = ok_response(
+        "application/yaml",
+        &format!(
+            "{}api_keys:\n  {keys_id}:\n  - {api_key}\n",
+            host_answer(lower_upstream)
+        ),
+    );
+    super::refresh_real_time_configurations().await;
+
     assert_eq!(
         request(&mut connect(port).await, &dynamic_name).await,
-        served_by("dynamic upstream")
+        served_by("lower upstream")
     );
+    assert!(APP_CTX
+        .applied_settings
+        .load_full()
+        .unwrap()
+        .dynamic_host_errors
+        .is_empty());
 
-    // The url has no hosts any more.
-    *answer.lock() = ok_response("application/yaml", "hosts: {}\n");
-    super::refresh_dynamic_hosts().await;
+    // The urls have no hosts and no keys any more.
+    *upper.lock() = ok_response("application/yaml", "hosts: {}\n");
+    *lower.lock() = ok_response("application/yaml", "hosts: {}\napi_keys: {}\n");
+    super::refresh_real_time_configurations().await;
 
     assert_not_served(port, &dynamic_name).await;
     assert_eq!(
@@ -552,22 +590,24 @@ async fn the_hosts_of_the_url_are_served_and_follow_what_it_answers() {
         served_by("static upstream")
     );
     assert_eq!(http_port_configuration(port).await.endpoints.len(), 1);
+    assert!(!APP_CTX.api_keys.accepts(&keys_id, api_key.as_bytes()));
 
-    // The settings have no `dynamic_hosts` any more: nothing is read, and nothing is kept.
+    // The settings have no `real_time_configurations` any more: nothing is read, and nothing is
+    // kept.
     let mut settings = APP_CTX
         .applied_settings
         .load_full()
         .unwrap()
         .as_ref()
         .clone();
-    settings.dynamic_hosts = None;
+    settings.real_time_configurations = None;
     APP_CTX.applied_settings.store(Some(Arc::new(settings)));
 
-    assert_eq!(super::refresh_dynamic_hosts().await, None);
+    assert_eq!(super::refresh_real_time_configurations().await, None);
     assert!(APP_CTX
-        .dynamic_hosts
-        .get_answer(&url_settings(url_port).url)
-        .is_none());
+        .real_time_configurations
+        .get_answers(&[url_of(upper_port), url_of(lower_port)])
+        .is_empty());
 }
 
 /// What a port has already, and a dynamic host to be put on it: where it would take the place
@@ -859,7 +899,7 @@ async fn the_url_may_give_only_names_for_a_host_of_the_files() {
     let answer = |tenants: &[&String]| {
         let tenants: String = tenants.iter().map(|itm| format!("  - {itm}\n")).collect();
 
-        DynamicHostsModel::parse(
+        RealTimeConfigurationModel::parse(
             format!("additional_hosts:\n  {static_host}:\n{tenants}").as_bytes(),
         )
         .unwrap()
@@ -947,7 +987,7 @@ async fn a_name_follows_the_endpoint_its_host_is_served_by_now() {
     let answer = |tenants: &[&String]| {
         let tenants: String = tenants.iter().map(|itm| format!("  - {itm}\n")).collect();
 
-        DynamicHostsModel::parse(
+        RealTimeConfigurationModel::parse(
             format!("additional_hosts:\n  {static_host}:\n{tenants}").as_bytes(),
         )
         .unwrap()
@@ -1100,21 +1140,12 @@ fn unique_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
 
-async fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 fn host_settings(endpoint_type: &str, proxy_pass_to: &str) -> HostSettings {
     let yaml = format!(
         "hosts:\n  'host':\n    endpoint:\n      type: {endpoint_type}\n    locations:\n    - proxy_pass_to: '{proxy_pass_to}'\n"
     );
 
-    DynamicHostsModel::parse(yaml.as_bytes())
+    RealTimeConfigurationModel::parse(yaml.as_bytes())
         .unwrap()
         .unwrap()
         .hosts
@@ -1142,9 +1173,10 @@ fn settings_of_files(items: &[(String, u16)]) -> SettingsCompiled {
     }
 }
 
-/// What a reload of the settings does with the hosts of the files: each is compiled next to
-/// what its port has already, the names of their `additional_hosts` are put next to them, and
-/// the ports are published into the live configuration.
+/// What a reload of the settings does with the hosts of the files: each is compiled next to the
+/// ones of its port before it, the names of their `additional_hosts` are put next to them, and
+/// the ports are published into the live configuration - each replaced as a whole, as the reload
+/// does: what another test put there for a port it was handed stays there after that test.
 async fn publish(settings: &SettingsCompiled) {
     use super::put_together_port::*;
 
@@ -1157,8 +1189,7 @@ async fn publish(settings: &SettingsCompiled) {
     let names_by_port = names_by_port(settings, |_, itm| !itm.dynamic);
 
     for (port, host_ids) in hosts_by_port {
-        let existing = live_configuration(&port).await;
-        let configuration = put_hosts(settings, existing, &host_ids, true, &mut errors)
+        let configuration = put_hosts(settings, None, &host_ids, true, &mut errors)
             .await
             .unwrap();
         let names = names_by_port.get(&port).cloned().unwrap_or_default();

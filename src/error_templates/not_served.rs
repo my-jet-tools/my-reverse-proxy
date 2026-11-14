@@ -51,7 +51,7 @@ mod tests {
         NotServedReason::new(
             "localhost:443",
             "mcp",
-            &["auth_header"],
+            &["api_keys_auth"],
             "a raw bridge with no HTTP layer",
             "remove <the setting>",
         )
@@ -64,7 +64,7 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
         assert!(response.contains("Forbidden"));
-        assert!(!response.contains("auth_header"), "{response}");
+        assert!(!response.contains("api_keys_auth"), "{response}");
         assert!(!response.contains("localhost:443"), "{response}");
         assert!(!response.contains("mcp"), "{response}");
     }
@@ -74,7 +74,9 @@ mod tests {
         let response = String::from_utf8(not_served_h1_response(&reason(), true)).unwrap();
 
         assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
-        assert!(response.contains("&#39;auth_header&#39;") || response.contains("'auth_header'"));
+        assert!(
+            response.contains("&#39;api_keys_auth&#39;") || response.contains("'api_keys_auth'")
+        );
         assert!(response.contains("localhost:443"));
         // The reason goes into a page: what is in it is escaped.
         assert!(
@@ -95,7 +97,7 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.starts_with("Forbidden\n\n"), "{body}");
-        assert!(body.contains("'auth_header'"), "{body}");
+        assert!(body.contains("'api_keys_auth'"), "{body}");
         assert!(body.contains("localhost:443"), "{body}");
     }
 

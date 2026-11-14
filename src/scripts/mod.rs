@@ -35,6 +35,8 @@ mod make_sure_client_ca_exists;
 pub use make_sure_client_ca_exists::*;
 mod get_from_host_or_templates;
 pub use get_from_host_or_templates::*;
+mod get_endpoint_api_keys_auth;
+pub use get_endpoint_api_keys_auth::*;
 mod update_ssh_config_list;
 pub use update_ssh_config_list::*;
 mod update_crl;

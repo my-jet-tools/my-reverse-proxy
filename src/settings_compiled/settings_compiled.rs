@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    net::IpAddr,
+    net::SocketAddr,
+    sync::Arc,
 };
 
 use rust_extensions::duration_utils::DurationExtensions;
@@ -17,21 +18,26 @@ pub struct SettingsCompiled {
     /// `dynamic_host_ids`. The names of their `additional_hosts` are not hosts of their own: they
     /// are in `additional_hosts`, and the settings here have no `additional_hosts` left.
     pub hosts: HashMap<String, HostSettings>,
-    /// Each name of `additional_hosts` - of a host of the settings files, of a host of the url, or
-    /// of `additional_hosts:` of the url - with the host it is a name of. A request for a name is
+    /// Each name of `additional_hosts` - of a host of the settings files, of a host of a url, or
+    /// of `additional_hosts:` of a url - with the host it is a name of. A request for a name is
     /// served by the configuration of that host, under the name.
     pub additional_hosts: BTreeMap<String, AdditionalHost>,
     /// The entries of `additional_hosts` of the settings files which are ignored - by the host
-    /// whose list has them - each with why. The ones of the url are in `dynamic_host_errors`.
+    /// whose list has them - each with why. The ones of the urls are in `dynamic_host_errors`.
     pub additional_host_errors: BTreeMap<String, Vec<String>>,
-    /// `dynamic_hosts:` of the settings - the url more hosts are read from.
-    pub dynamic_hosts: Option<DynamicHostsSettings>,
-    /// The ids of `hosts` which came from `dynamic_hosts.url`.
+    /// `real_time_configurations:` of the settings - the urls more hosts and keys are read from.
+    pub real_time_configurations: Option<RealTimeConfigurationsSettings>,
+    /// The ids of `hosts` which came from the urls of `real_time_configurations`.
     pub dynamic_host_ids: HashSet<String>,
-    /// The hosts and the names of `dynamic_hosts.url` which are not taken, and why: a variable
-    /// which is not there, an id the settings files have already, a name which is not a domain
-    /// name.
+    /// The hosts and the names of the urls which are not taken, and why: a variable which is not
+    /// there, an id the settings files have already, a name which is not a domain name.
     pub dynamic_host_errors: BTreeMap<String, String>,
+    /// The sets of `api_keys:` of the settings files, by their ids - each put together from every
+    /// file which declares keys under its id.
+    pub api_keys: HashMap<String, Vec<String>>,
+    /// The keys the urls of `real_time_configurations` gave, by the ids of their sets. A request
+    /// is checked against these together with `api_keys`: see [`Self::get_api_keys`].
+    pub dynamic_api_keys: HashMap<String, Vec<String>>,
     /// The variables the settings were compiled with - the dynamic hosts are compiled with them
     /// as well, when they come.
     pub variables: VariablesCompiled,
@@ -47,6 +53,21 @@ pub struct SettingsCompiled {
     pub gateway_clients: HashMap<String, GatewayClientSettings>,
 }
 
+/// Who has an id already, while the answers of the urls are put next to the hosts of the files.
+#[derive(Clone, Copy)]
+enum TakenBy {
+    Files,
+    /// The url at this place of `real_time_configurations.urls`.
+    Url(usize),
+}
+
+impl TakenBy {
+    /// Taken by a url lower in the list than the one at `source`: that one writes over it.
+    fn is_url_below(&self, source: usize) -> bool {
+        matches!(self, Self::Url(other) if *other > source)
+    }
+}
+
 impl SettingsCompiled {
     pub fn get_endpoint_host_string(
         &self,
@@ -55,7 +76,8 @@ impl SettingsCompiled {
         EndpointHttpHostString::new(host_id.to_string())
     }
 
-    /// Whether the host came from `dynamic_hosts.url` rather than from a settings file.
+    /// Whether the host came from a url of `real_time_configurations` rather than from a settings
+    /// file.
     pub fn is_dynamic_host(&self, host_id: &str) -> bool {
         self.dynamic_host_ids.contains(host_id)
     }
@@ -234,134 +256,195 @@ impl SettingsCompiled {
         }
     }
 
-    /// Puts what `dynamic_hosts.url` answered with next to the hosts of the settings files, in
-    /// place of what it answered before: the hosts of its `hosts`, each with the names of its own
-    /// `additional_hosts`, then the names of its `additional_hosts:` - names of a host the
-    /// settings files have, or its `hosts` have.
+    /// Puts what the urls of `real_time_configurations` answered with - `answers`, in the order of
+    /// the urls - next to the hosts of the settings files, in place of what they answered before:
+    /// the hosts of their `hosts`, each with the names of its own `additional_hosts`, then the
+    /// names of their `additional_hosts:` - names of a host the settings files have, or a url
+    /// gives; and their keys, with the keys of the files.
     ///
     /// A host or a name of the settings files is never replaced: a dynamic one with its id -
-    /// letter case aside - is refused. Neither does one which can not be taken keep the others
-    /// out: it is put into `dynamic_host_errors`, and the rest are taken. Each name is taken on
-    /// its own: a wrong entry of a long list does not take the list down.
-    pub fn set_dynamic_hosts_answer(&mut self, answer: &DynamicHostsModel) {
+    /// letter case aside - is refused. A host or a name two urls give is taken from the one lower
+    /// in the list, and the other is left out without a word: the urls are gone through from the
+    /// top, and the one below writes over the one above. Neither does one which can not be taken
+    /// keep the others out: it is put into `dynamic_host_errors`, and the rest are taken. Each
+    /// name is taken on its own: a wrong entry of a long list does not take the list down.
+    pub fn set_real_time_answers(&mut self, answers: &[Arc<RealTimeConfigurationModel>]) {
         self.clear_dynamic_hosts();
 
-        let mut taken_ids: HashSet<String> = self
+        let mut taken: HashMap<String, TakenBy> = self
             .hosts
             .keys()
             .chain(self.additional_hosts.keys())
-            .map(|host_id| host_id.to_ascii_lowercase())
+            .map(|host_id| (host_id.to_ascii_lowercase(), TakenBy::Files))
             .collect();
 
-        // In the order of the ids, so two which can not both be taken are decided the same way
-        // at every read.
-        let mut host_ids: Vec<&String> = answer.hosts.keys().collect();
-        host_ids.sort();
+        // The names of each url, taken once the hosts of every url are there: a url can give
+        // names of a host another url gives.
+        let mut names_of_hosts: Vec<Vec<(String, HostSettings, Vec<String>)>> =
+            vec![Vec::new(); answers.len()];
 
-        for host_id in host_ids {
-            let entries = answer.hosts[host_id]
-                .additional_hosts
-                .clone()
-                .unwrap_or_default();
+        // From the url lower in the list up: whatever a url gives first is what one below it
+        // left free.
+        for (source, answer) in answers.iter().enumerate().rev() {
+            // In the order of the ids, so two which can not both be taken are decided the same
+            // way at every read.
+            let mut host_ids: Vec<&String> = answer.hosts.keys().collect();
+            host_ids.sort();
 
-            let compiled = super::compile_host(
-                host_id.clone(),
-                answer.hosts[host_id].clone(),
-                &self.variables,
-            );
+            for host_id in host_ids {
+                let entries = answer.hosts[host_id]
+                    .additional_hosts
+                    .clone()
+                    .unwrap_or_default();
 
-            let (main_host_id, mut host_settings) = match compiled {
-                Ok(compiled) => compiled,
-                Err(err) => {
-                    self.add_dynamic_host_error(host_id.clone(), format!("Dynamic host: {err}"));
+                // A url below gives a host with this id: it writes over this one - its names
+                // included - and nothing is told.
+                if let Ok(id) = self.variables.apply_variables(host_id.clone()) {
+                    if taken
+                        .get(&id.to_ascii_lowercase())
+                        .is_some_and(|taken_by| taken_by.is_url_below(source))
+                    {
+                        continue;
+                    }
+                }
 
-                    for entry in &entries {
+                let compiled = super::compile_host(
+                    host_id.clone(),
+                    answer.hosts[host_id].clone(),
+                    &self.variables,
+                );
+
+                let (main_host_id, mut host_settings) = match compiled {
+                    Ok(compiled) => compiled,
+                    Err(err) => {
                         self.add_dynamic_host_error(
-                            entry.trim().to_string(),
-                            format!("Dynamic host is refused: it is in additional_hosts of '{host_id}', which is refused"),
+                            host_id.clone(),
+                            format!("Dynamic host: {err}"),
+                        );
+
+                        for entry in &entries {
+                            self.add_dynamic_host_error(
+                                entry.trim().to_string(),
+                                format!("Dynamic host is refused: it is in additional_hosts of '{host_id}', which is refused"),
+                            );
+                        }
+                        continue;
+                    }
+                };
+
+                host_settings.additional_hosts = None;
+
+                if taken.contains_key(&main_host_id.to_ascii_lowercase()) {
+                    let err = self.get_refusal_of_taken_id(&main_host_id);
+                    self.add_dynamic_host_error(main_host_id.clone(), err.to_string());
+
+                    // They are not served with a configuration which is not served.
+                    for entry in &entries {
+                        let key = self.get_entry_key(&main_host_id, &host_settings, entry);
+                        self.add_dynamic_host_error(
+                            key,
+                            format!("Dynamic host is refused: it is in additional_hosts of '{main_host_id}', which is refused"),
                         );
                     }
                     continue;
                 }
-            };
 
-            host_settings.additional_hosts = None;
+                taken.insert(main_host_id.to_ascii_lowercase(), TakenBy::Url(source));
 
-            if !taken_ids.insert(main_host_id.to_ascii_lowercase()) {
-                let err = self.get_refusal_of_taken_id(&main_host_id);
-                self.add_dynamic_host_error(main_host_id.clone(), err.to_string());
+                self.dynamic_host_ids.insert(main_host_id.clone());
+                self.hosts
+                    .insert(main_host_id.clone(), host_settings.clone());
 
-                // They are not served with a configuration which is not served.
-                for entry in &entries {
-                    let key = self.get_entry_key(&main_host_id, &host_settings, entry);
-                    self.add_dynamic_host_error(
-                        key,
-                        format!("Dynamic host is refused: it is in additional_hosts of '{main_host_id}', which is refused"),
-                    );
-                }
-                continue;
-            }
-
-            self.dynamic_host_ids.insert(main_host_id.clone());
-            self.hosts
-                .insert(main_host_id.clone(), host_settings.clone());
-
-            for entry in &entries {
-                self.take_dynamic_name(&mut taken_ids, &main_host_id, &host_settings, entry);
+                names_of_hosts[source].push((main_host_id, host_settings, entries));
             }
         }
 
-        let mut keys: Vec<&String> = answer.additional_hosts.keys().collect();
-        keys.sort();
+        for source in (0..answers.len()).rev() {
+            for (main_host_id, host_settings, entries) in
+                std::mem::take(&mut names_of_hosts[source])
+            {
+                for entry in &entries {
+                    self.take_dynamic_name(
+                        &mut taken,
+                        source,
+                        &main_host_id,
+                        &host_settings,
+                        entry,
+                    );
+                }
+            }
 
-        for key in keys {
-            let entries = &answer.additional_hosts[key];
+            let answer = &answers[source];
 
-            let key = match self.variables.apply_variables(key.clone()) {
-                Ok(key) => key,
-                Err(err) => {
+            let mut keys: Vec<&String> = answer.additional_hosts.keys().collect();
+            keys.sort();
+
+            for key in keys {
+                let entries = &answer.additional_hosts[key];
+
+                let key = match self.variables.apply_variables(key.clone()) {
+                    Ok(key) => key,
+                    Err(err) => {
+                        for entry in entries {
+                            self.add_dynamic_host_error(
+                                entry.trim().to_string(),
+                                format!("Dynamic host: {err}"),
+                            );
+                        }
+                        continue;
+                    }
+                };
+
+                // The host whose configuration they are served with - the one `key` is a name
+                // of, if it is a name itself.
+                let Some(main_host_id) = self.get_main_host_id(&key) else {
                     for entry in entries {
                         self.add_dynamic_host_error(
                             entry.trim().to_string(),
-                            format!("Dynamic host: {err}"),
+                            format!(
+                                "Dynamic host is refused: it is in additional_hosts of '{key}', which neither the settings files nor the hosts of the urls have"
+                            ),
                         );
                     }
                     continue;
-                }
-            };
+                };
 
-            // The host whose configuration they are served with - the one `key` is a name of,
-            // if it is a name itself.
-            let Some(main_host_id) = self.get_main_host_id(&key) else {
+                let host_settings = self.hosts[&main_host_id].clone();
+
                 for entry in entries {
-                    self.add_dynamic_host_error(
-                        entry.trim().to_string(),
-                        format!(
-                            "Dynamic host is refused: it is in additional_hosts of '{key}', which neither the settings files nor the hosts of the url have"
-                        ),
+                    self.take_dynamic_name(
+                        &mut taken,
+                        source,
+                        &main_host_id,
+                        &host_settings,
+                        entry,
                     );
                 }
-                continue;
-            };
-
-            let host_settings = self.hosts[&main_host_id].clone();
-
-            for entry in entries {
-                self.take_dynamic_name(&mut taken_ids, &main_host_id, &host_settings, entry);
             }
+        }
+
+        for answer in answers {
+            crate::api_keys::merge_api_keys(&mut self.dynamic_api_keys, &answer.api_keys);
         }
     }
 
-    /// The hosts of `hosts`, read from `dynamic_hosts.url` with nothing else.
+    /// What one url answered with, and nothing of any other url.
+    #[cfg(test)]
+    pub fn set_dynamic_hosts_answer(&mut self, answer: &RealTimeConfigurationModel) {
+        self.set_real_time_answers(&[Arc::new(answer.clone())]);
+    }
+
+    /// The hosts of `hosts`, read from a url with nothing else.
     #[cfg(test)]
     pub fn set_dynamic_hosts(&mut self, hosts: &HashMap<String, HostSettings>) {
-        self.set_dynamic_hosts_answer(&DynamicHostsModel {
+        self.set_dynamic_hosts_answer(&RealTimeConfigurationModel {
             hosts: hosts.clone(),
-            additional_hosts: HashMap::new(),
+            ..Default::default()
         });
     }
 
-    /// Takes away what the url answered with: its hosts, its names, and their errors.
+    /// Takes away what the urls answered with: their hosts, their names, their errors, their
+    /// keys.
     fn clear_dynamic_hosts(&mut self) {
         for host_id in self.dynamic_host_ids.drain() {
             self.hosts.remove(&host_id);
@@ -369,13 +452,24 @@ impl SettingsCompiled {
 
         self.additional_hosts.retain(|_, itm| !itm.dynamic);
         self.dynamic_host_errors.clear();
+        self.dynamic_api_keys.clear();
     }
 
-    /// Takes `entry` - an entry of `additional_hosts` of `main_host_id`, given by the url - as a
-    /// name of that host, unless it is not one, or is taken already: then it is refused.
+    /// Every set of keys requests are checked against: the keys the settings files declare, with
+    /// the ones the urls gave under the same ids.
+    pub fn get_api_keys(&self) -> HashMap<String, Vec<String>> {
+        let mut result = self.api_keys.clone();
+        crate::api_keys::merge_api_keys(&mut result, &self.dynamic_api_keys);
+        result
+    }
+
+    /// Takes `entry` - an entry of `additional_hosts` of `main_host_id`, given by the url at
+    /// `source` - as a name of that host, unless it is not one, or is taken already: then it is
+    /// refused - or left out without a word, if a url below has it.
     fn take_dynamic_name(
         &mut self,
-        taken_ids: &mut HashSet<String>,
+        taken: &mut HashMap<String, TakenBy>,
+        source: usize,
         main_host_id: &str,
         host_settings: &HostSettings,
         entry: &str,
@@ -406,14 +500,20 @@ impl SettingsCompiled {
             }
         };
 
-        if !taken_ids.insert(name.to_ascii_lowercase()) {
-            let err = self.get_refusal_of_taken_id(&name);
-            self.add_dynamic_host_error(
-                name,
-                format!("{err} (it is in additional_hosts of '{main_host_id}')"),
-            );
-            return;
+        match taken.get(&name.to_ascii_lowercase()) {
+            None => {}
+            Some(taken_by) if taken_by.is_url_below(source) => return,
+            Some(_) => {
+                let err = self.get_refusal_of_taken_id(&name);
+                self.add_dynamic_host_error(
+                    name,
+                    format!("{err} (it is in additional_hosts of '{main_host_id}')"),
+                );
+                return;
+            }
         }
+
+        taken.insert(name.to_ascii_lowercase(), TakenBy::Url(source));
 
         self.additional_hosts.insert(
             name,
@@ -562,13 +662,14 @@ impl SettingsCompiled {
 
     /// These settings with the hosts of the settings files `host_ids` - and their names, and the
     /// errors of their lists - as `fresh` has them: one which `fresh` does not have is gone. What
-    /// `answer` - the answer of `dynamic_hosts.url` - gives is put next to them anew: a dynamic
-    /// host is taken or refused against the hosts of the files as they are now.
+    /// `answers` - the answers of the urls of `real_time_configurations` - give is put next to
+    /// them anew: a dynamic host is taken or refused against the hosts of the files as they are
+    /// now.
     pub fn with_hosts_of_files_from(
         &self,
         fresh: &SettingsCompiled,
         host_ids: &BTreeSet<String>,
-        answer: Option<&DynamicHostsModel>,
+        answers: &[Arc<RealTimeConfigurationModel>],
     ) -> SettingsCompiled {
         let mut result = self.clone();
         result.clear_dynamic_hosts();
@@ -606,26 +707,20 @@ impl SettingsCompiled {
             }
         }
 
-        if let Some(answer) = answer {
-            result.set_dynamic_hosts_answer(answer);
+        if !answers.is_empty() {
+            result.set_real_time_answers(answers);
         }
 
         result
     }
 
-    pub fn get_http_control_port(&self) -> Option<u16> {
-        if let Some(global_settings) = self.global_settings.as_ref() {
-            return global_settings.http_control_port;
-        }
-
-        None
-    }
-
-    /// `global_settings.http_control_ip` - checked when the settings are loaded.
-    pub fn get_http_control_ip(&self) -> Result<Option<IpAddr>, String> {
+    /// The address the control port listens on: `global_settings.http_control_port` and
+    /// `http_control_ip`, `127.0.0.1:8000` when they say nothing - checked when the settings are
+    /// loaded.
+    pub fn get_http_control_addr(&self) -> Result<SocketAddr, String> {
         match self.global_settings.as_ref() {
-            Some(global_settings) => global_settings.get_http_control_ip(),
-            None => Ok(None),
+            Some(global_settings) => global_settings.get_http_control_addr(),
+            None => Ok(crate::settings::default_http_control_addr()),
         }
     }
 
@@ -731,14 +826,16 @@ mod dynamic_hosts_tests {
     use super::*;
 
     fn hosts(yaml: &str) -> HashMap<String, HostSettings> {
-        DynamicHostsModel::parse(yaml.as_bytes())
+        RealTimeConfigurationModel::parse(yaml.as_bytes())
             .unwrap()
             .unwrap()
             .hosts
     }
 
-    fn answer(yaml: &str) -> DynamicHostsModel {
-        DynamicHostsModel::parse(yaml.as_bytes()).unwrap().unwrap()
+    fn answer(yaml: &str) -> RealTimeConfigurationModel {
+        RealTimeConfigurationModel::parse(yaml.as_bytes())
+            .unwrap()
+            .unwrap()
     }
 
     fn host(host_id: &str, proxy_pass_to: &str) -> String {
@@ -1104,7 +1201,7 @@ mod dynamic_hosts_tests {
         assert_eq!(errors.len(), 6, "{errors:?}");
 
         // The answer without them: they go, and the host of the files keeps its own name.
-        settings.set_dynamic_hosts_answer(&DynamicHostsModel::default());
+        settings.set_dynamic_hosts_answer(&RealTimeConfigurationModel::default());
 
         assert_eq!(sorted(settings.hosts.keys()), ["static.example.com:8000"]);
         assert_eq!(
@@ -1187,7 +1284,7 @@ mod dynamic_hosts_tests {
                 "a.localhost:8000".to_string(),
                 "b.localhost:8000".to_string(),
             ]),
-            None,
+            &[],
         );
 
         assert_eq!(
@@ -1220,7 +1317,7 @@ mod dynamic_hosts_tests {
         let patched = applied.with_hosts_of_files_from(
             &fresh,
             &BTreeSet::from(["a.localhost:8000".to_string()]),
-            Some(&answer),
+            &[Arc::new(answer.clone())],
         );
 
         assert!(patched.is_dynamic_host("a.localhost:8000"));
@@ -1231,5 +1328,195 @@ mod dynamic_hosts_tests {
             Some("http://127.0.0.1:9100")
         );
         assert!(patched.dynamic_host_errors.is_empty());
+    }
+
+    fn answers(yamls: &[String]) -> Vec<Arc<RealTimeConfigurationModel>> {
+        yamls.iter().map(|yaml| Arc::new(answer(yaml))).collect()
+    }
+
+    fn upstream_of<'s>(settings: &'s SettingsCompiled, host_id: &str) -> Option<&'s str> {
+        settings.hosts.get(host_id)?.locations[0]
+            .proxy_pass_to
+            .as_deref()
+    }
+
+    /// The urls are gone through from the top, and the one lower in the list writes over the one
+    /// above: nothing is told about the host which is written over.
+    #[test]
+    fn a_host_two_urls_give_is_taken_from_the_lower_one() {
+        let mut settings = settings_with_static_host();
+
+        settings.set_real_time_answers(&answers(&[
+            format!(
+                "hosts:\n{}{}",
+                host("a.example.com:8000", "http://127.0.0.1:9001"),
+                host("only-upper.example.com:8000", "http://127.0.0.1:9002"),
+            ),
+            format!(
+                "hosts:\n{}{}",
+                host("A.example.com:8000", "http://127.0.0.1:9101"),
+                host("only-lower.example.com:8000", "http://127.0.0.1:9102"),
+            ),
+        ]));
+
+        assert_eq!(
+            upstream_of(&settings, "A.example.com:8000"),
+            Some("http://127.0.0.1:9101")
+        );
+        assert!(!settings.hosts.contains_key("a.example.com:8000"));
+        assert_eq!(
+            upstream_of(&settings, "only-upper.example.com:8000"),
+            Some("http://127.0.0.1:9002")
+        );
+        assert_eq!(
+            upstream_of(&settings, "only-lower.example.com:8000"),
+            Some("http://127.0.0.1:9102")
+        );
+        assert!(
+            settings.dynamic_host_errors.is_empty(),
+            "{:?}",
+            settings.dynamic_host_errors
+        );
+    }
+
+    /// The names of a host written over go with it: the host is served as the url below gives
+    /// it, names included.
+    #[test]
+    fn the_names_of_a_host_written_over_go_with_it() {
+        let mut settings = settings_with_static_host();
+
+        settings.set_real_time_answers(&answers(&[
+            format!(
+                "hosts:\n{}",
+                host_with_names(
+                    "a.example.com:8000",
+                    "http",
+                    &["upper-name.example.com"],
+                    "http://127.0.0.1:9001"
+                ),
+            ),
+            format!(
+                "hosts:\n{}",
+                host_with_names(
+                    "a.example.com:8000",
+                    "http",
+                    &["lower-name.example.com"],
+                    "http://127.0.0.1:9101"
+                ),
+            ),
+        ]));
+
+        assert_eq!(
+            name_of(&settings, "lower-name.example.com:8000"),
+            Some(("a.example.com:8000", true))
+        );
+        assert_eq!(name_of(&settings, "upper-name.example.com:8000"), None);
+        assert!(
+            settings.dynamic_host_errors.is_empty(),
+            "{:?}",
+            settings.dynamic_host_errors
+        );
+    }
+
+    #[test]
+    fn a_name_two_urls_give_is_taken_from_the_lower_one() {
+        let mut settings = settings_with_static_host();
+
+        settings.set_real_time_answers(&answers(&[
+            format!(
+                "hosts:\n{}{}additional_hosts:\n  a.example.com:8000:\n  - tenant.example.com\n",
+                host("a.example.com:8000", "http://127.0.0.1:9001"),
+                host("b.example.com:8000", "http://127.0.0.1:9002"),
+            ),
+            "additional_hosts:\n  b.example.com:8000:\n  - tenant.example.com\n".to_string(),
+        ]));
+
+        assert_eq!(
+            name_of(&settings, "tenant.example.com:8000"),
+            Some(("b.example.com:8000", true))
+        );
+        assert!(
+            settings.dynamic_host_errors.is_empty(),
+            "{:?}",
+            settings.dynamic_host_errors
+        );
+    }
+
+    /// One url gives the configuration, another the names it is served under.
+    #[test]
+    fn a_url_may_give_names_of_a_host_another_url_gives() {
+        let mut settings = settings_with_static_host();
+
+        for order in [[0, 1], [1, 0]] {
+            let given = [
+                format!(
+                    "hosts:\n{}",
+                    host("a.example.com:8000", "http://127.0.0.1:9001")
+                ),
+                "additional_hosts:\n  a.example.com:8000:\n  - tenant.example.com\n".to_string(),
+            ];
+
+            settings.set_real_time_answers(&answers(&[
+                given[order[0]].clone(),
+                given[order[1]].clone(),
+            ]));
+
+            assert_eq!(
+                name_of(&settings, "tenant.example.com:8000"),
+                Some(("a.example.com:8000", true)),
+                "{order:?}"
+            );
+            assert!(
+                settings.dynamic_host_errors.is_empty(),
+                "{:?}",
+                settings.dynamic_host_errors
+            );
+        }
+    }
+
+    /// Whatever the place of the url in the list.
+    #[test]
+    fn no_url_replaces_a_host_of_the_files() {
+        let mut settings = settings_with_static_host();
+        let static_host_id = settings.hosts.keys().next().unwrap().clone();
+
+        settings.set_real_time_answers(&answers(&[
+            format!(
+                "hosts:\n{}",
+                host("a.example.com:8000", "http://127.0.0.1:9001")
+            ),
+            format!("hosts:\n{}", host(&static_host_id, "http://127.0.0.1:9101")),
+        ]));
+
+        assert!(!settings.is_dynamic_host(&static_host_id));
+        assert!(settings.dynamic_host_errors[&static_host_id]
+            .contains("the settings files have a host with this id"));
+    }
+
+    /// The keys of one id - from the files and from every url - make one set; another read of the
+    /// urls replaces what they gave before, and the keys of the files stay.
+    #[test]
+    fn the_keys_of_the_urls_are_put_together_with_the_keys_of_the_files() {
+        let mut settings = settings_with_static_host();
+        settings
+            .api_keys
+            .insert("mcp_clients".to_string(), vec!["file-key".to_string()]);
+
+        settings.set_real_time_answers(&answers(&[
+            "api_keys:\n  mcp_clients:\n  - upper-key\n  admins:\n  - admin-key\n".to_string(),
+            "api_keys:\n  mcp_clients:\n  - lower-key\n  - upper-key\n".to_string(),
+        ]));
+
+        let api_keys = settings.get_api_keys();
+        let mut clients = api_keys["mcp_clients"].clone();
+        clients.sort();
+        assert_eq!(clients, ["file-key", "lower-key", "upper-key"]);
+        assert_eq!(api_keys["admins"], ["admin-key"]);
+
+        settings.set_real_time_answers(&answers(&["hosts: {}\n".to_string()]));
+
+        let api_keys = settings.get_api_keys();
+        assert_eq!(api_keys["mcp_clients"], ["file-key"]);
+        assert!(!api_keys.contains_key("admins"));
     }
 }

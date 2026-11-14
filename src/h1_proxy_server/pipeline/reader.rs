@@ -456,7 +456,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
 
     // The location's own IP allow-list - the same rule the hyper path has in
     // `HttpProxyPass::send_payload`. Checked before `authorize`, so an address
-    // which is not listed can not even probe the location's `auth_header`.
+    // which is not listed can not even probe the location's `api_keys_auth`.
     if !location
         .ip_is_allowed(&http_connection_info.connection_ip)
         .await

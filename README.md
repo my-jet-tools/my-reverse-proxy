@@ -24,13 +24,14 @@ File should be at `~/.my-reverse-proxy` location with yaml format:
 ```yaml
 global_settings:
   http_control_port: 9000 # admin ui, REST API (/api/...), Swagger (/swagger) and MCP (/mcp) are
-                          # served HERE - never on the ports under `hosts:`
-  http_control_ip: 127.0.0.1 # Optional: address of the control port, IPv4 or IPv6 (in quotes: "::1"); absent = 0.0.0.0 (see "Certificates provided at runtime")
+                          # served HERE - never on the ports under `hosts:`. A bare port is served on
+                          # 127.0.0.1; the whole address opens it up: 0.0.0.0:9000, "[::]:9000".
+                          # Absent = 127.0.0.1:8000 (see "Certificates provided at runtime")
   connection_settings:
     buffer_size: 512Kb # Buffer, which is allocated twice (read/write) per connection to pass traffic by
     connect_to_remote_timeout: 5000 # ms — timeout to connect to remote host (type: tcp endpoints)
     session_key: # key to encrypt session data. Not having this field means that key is going to be randomly generated
-  show_error_description_on_error_page: true # Show error description on error page
+  show_error_description_on_error_page: false # Optional: the error behind a 4xx/5xx page of the proxy, on the page - for the debug_ip sources only; everybody else gets the title alone
   default_h2_livness_url: /health # Optional: HTTP path used by the h2 upstream pool supervisor as an active liveness probe (see "HTTP/2 upstream pool" section)
   debug_ip: 10.0.0.5 # Optional: source ip (or a list of them) shown a detailed page instead of a bare 400 (see "Debug ip" section)
   
@@ -198,21 +199,26 @@ hosts:
 - `get_settings` / `get_applied_settings` (MCP) list each name as a host, with `additional_host_of` naming
   its host.
 - The names can also be given by a url, while the configuration stays in the settings files: see
-  `additional_hosts:` in "Dynamic hosts".
+  `additional_hosts:` in "Real-time configurations".
 
-## Dynamic hosts
+## Real-time configurations
 
-More hosts can be read from a url, on a timer, next to the hosts of the settings files:
+More hosts and api keys can be read from urls, on a timer, next to what the settings files have:
 
 ```yaml
-dynamic_hosts:
-  url: https://config.internal/proxy/hosts?env=${env}   # variables are substituted, as in any source
-  refresh_interval: 10000   # ms, optional, default 10000, at least 1000
-  request_timeout: 10000    # ms, optional, default 10000 - the request and its whole answer
+real_time_configurations:
+  refresh_interval: 10000   # ms, optional, default 10000, at least 1000 - one for all the urls
+  request_timeout: 10000    # ms, optional, default 10000 - a request and its whole answer
+  urls:                     # variables are substituted, as in any source
+  - https://config.internal/proxy/hosts?env=${env}
+  - https://keys.internal/proxy/api-keys
 ```
 
-The url answers in YAML, read by the same parser as the settings files, with two sections - either may be left
-out - and nothing else:
+This was `dynamic_hosts:` with one `url:` before. Settings which still have `dynamic_hosts:` are refused, with a
+word on the new name.
+
+Each url answers in YAML, read by the same parser as the settings files, with three sections - any of them may
+be left out - and nothing else:
 
 ```yaml
 hosts:                                  # hosts with a configuration of their own, written as in a settings file
@@ -224,53 +230,72 @@ hosts:                                  # hosts with a configuration of their ow
     - proxy_pass_to: http://10.0.0.5:8080
 
 additional_hosts:                       # more names for a host which is there already
-  example.com:443:                      # a host of the settings files - or of `hosts` above
+  example.com:443:                      # a host of the settings files - or of `hosts` of any of the urls
   - tenant2.example.com                 # served on its port: tenant2.example.com:443
   - tenant3.example.com:443
+
+api_keys:                               # more keys for the sets of `api_keys:` - see "API keys"
+  mcp_clients:
+  - tenant7-issued-key
 ```
 
-`additional_hosts:` is what makes it possible to keep the configuration in the settings files and have the url
+`additional_hosts:` is what makes it possible to keep the configuration in the settings files and have a url
 give only the list of names it is served under - as if they were written in `additional_hosts` of that host
 (see the section above). A name of a host names that host.
 
-- **Each read replaces the dynamic hosts of the read before.** A host the url does not give any more is no
-  longer served. `hosts: {}` (or `additional_hosts: {}`, or both) means there are no dynamic hosts.
+- **The urls are read together, each on its own.** Every `refresh_interval` all of them are read at once: one
+  which is down or slow does not hold up the others.
+- **A host two urls give is served as the one lower in the list gives it.** The urls are gone through from the
+  top, and the one below writes over the one above - the host with its names. Nothing is told about the host
+  which is written over. The same goes for a name two urls give.
+- **The keys of one id are put together** from the settings files and from every url: see "API keys". A url's
+  keys are taken as it writes them - no variable is put into them. A set under the id `none`, an empty key, or
+  a key with `${` in it refuses the whole answer of that url.
+- **Each read of a url replaces what it gave the read before.** A host or a key the url does not give any more
+  is no longer served. `hosts: {}` (or `additional_hosts: {}`, `api_keys: {}`) means it gives none.
 - **A blank answer changes nothing.** A `2xx` - `204` included - whose body is empty, or nothing but spaces and
-  line breaks, says nothing: the hosts read before stay served, and nothing is printed. It is not a failure.
+  line breaks, says nothing: what the url gave before stays served, and nothing is printed. It is not a
+  failure.
 - **Only the ports whose dynamic hosts or names changed are touched.** Such a port keeps what it serves of the
   settings files, and each dynamic host which did not change - its very endpoint, and its upstream connections
-  with it. A dynamic host which changed is compiled anew; the names of the url are put next to their hosts
-  anew, and nothing is compiled for them: a read which changes only names changes only names. The settings
-  files are not read again. A connection that is already open picks up the change on its next request, and a
-  new connection sees it right away. A dynamic host can be on a port of its own: that port's listener is
-  started, and stopped once it has no hosts left. A read that gives the same hosts changes nothing.
-- **A failed read changes nothing.** If the url does not answer, answers with anything but `2xx`, or with
-  something that is not `hosts:`, the hosts read before stay served. The failure is printed once, and so is
-  the url coming back.
-- **A host of the settings files is never replaced.** A dynamic host with the same id (letter case aside) is
-  refused. So is a `type: tcp` dynamic host on a port that already has hosts, and an http host on a port of a
-  `type: tcp` endpoint. A dynamic host that can not be compiled (a `client_certificate_ca` that is not declared,
-  a missing variable, a wrong type) is refused on its own, and the rest are served. Every refusal is printed. The reason is also listed with
-  the configuration errors, under the host's id. A refusal for an id the settings files have is the exception:
-  it is listed in `dynamic_hosts.refused_hosts` instead, so it is not mistaken for that host's own error.
+  with it. A dynamic host which changed is compiled anew; the names of the urls are put next to their hosts
+  anew, and nothing is compiled for them: a read which changes only names changes only names - and one which
+  changes only keys changes only keys. The settings files are not read again. A connection that is already
+  open picks up the change on its next request, and a new connection sees it right away. A dynamic host can
+  be on a port of its own: that port's listener is started, and stopped once it has no hosts left. A read that
+  gives the same as the read before changes nothing.
+- **A failed read changes nothing of that url.** If a url does not answer, answers with anything but `2xx`, or
+  with something that is not a real-time configuration, what it gave before - hosts and keys - stays served.
+  The failure is printed once, and so is the url coming back.
+- **A host of the settings files is never replaced**, by any of the urls. A dynamic host with the same id
+  (letter case aside) is refused. So is a `type: tcp` dynamic host on a port that already has hosts, and an
+  http host on a port of a `type: tcp` endpoint. A dynamic host that can not be compiled (a
+  `client_certificate_ca` that is not declared, a missing variable, a wrong type, an `auth_header`) is refused
+  on its own, and the rest are served. Every refusal is printed. The reason is also listed with the
+  configuration errors, under the host's id. A refusal for an id the settings files have is the exception: it
+  is listed in `real_time_configurations.refused_hosts` instead, so it is not mistaken for that host's own
+  error.
 - **Each name - of `additional_hosts:`, or of a host of `hosts:` - is taken on its own.** One which another
   host or name has already, which is on another port, is not a domain name, or has a variable which is not
   there, is refused, and the rest of the list is served: one wrong entry does not take a long list down. If
   the host they are listed for is not there, or is refused itself, they are refused with it. Each is listed in
   the configuration errors under the name - or under the entry as it is written, if that is not a name.
 - **A name is served by the endpoint its host is served by now.** After `ReloadEndpoint` of a host, its names
-  - those of the url as well - are served by its new endpoint, and so is a name the url gives later.
-  `ReloadEndpoint` and a reload of a port also update the settings a read of the url is checked against: a
-  host `ReloadEndpoint` adds can be given names by the url right away.
+  - those of the urls as well - are served by its new endpoint, and so is a name a url gives later.
+  `ReloadEndpoint` and a reload of a port also update the settings a read of the urls is checked against: a
+  host `ReloadEndpoint` adds can be given names by a url right away.
 - **An `ssl_certificate` id no settings file declares is not a refusal.** The host is served, and its TLS
   handshakes are cut until a certificate is uploaded under that id - see "Certificates provided at runtime".
   An uploaded certificate is held in memory only: after a restart it is to be uploaded again.
-- **A reload of the settings keeps the dynamic hosts** and reads the url right away, so a changed `url`
-  takes effect immediately. The hosts of the old url are not served after the change.
-- `dynamic_hosts` can be declared in one settings file only. `get_settings` / `get_applied_settings` (MCP)
-  mark each host `dynamic`, and list the refused hosts and the last read error.
+- **A reload of the settings keeps what the urls gave** and reads them right away, so a changed list takes
+  effect immediately. A url taken out of the list gives nothing any more; one put into it gives nothing until
+  it is read.
+- `real_time_configurations` can be declared in one settings file only. `get_settings` /
+  `get_applied_settings` (MCP) mark each host `dynamic`, and list each url with whether it has answered and
+  its last read error, the refused hosts, and every set of keys with how many keys it has.
 
-Use `https://`: whoever can answer for this url decides where traffic for the hosts it names goes.
+Use `https://`: whoever can answer for a url decides where traffic for the hosts it names goes, and who gets
+through what its keys guard.
 
 ## Certificates provided at runtime
 
@@ -280,17 +305,26 @@ from the admin ui or over the API, instead of being read from a file next to the
 Everything below is served on the **control port** (`global_settings.http_control_port`, `9000` in these
 examples) - the admin ui, `/api/...`, `/swagger` and `/mcp`. The ports under `hosts:` never serve it.
 
-Nothing on the control port asks for a login. It listens on every IPv4 address of the host (`0.0.0.0`) unless
-`global_settings.http_control_ip` names one; `127.0.0.1` keeps it to the host itself:
+Nothing on the control port asks for a login, so by default it is the host's own: `127.0.0.1:8000`, and a bare
+port is served on `127.0.0.1` as well. To reach it from anywhere else - from outside a Docker container, say -
+give `http_control_port` the whole address:
+
+```yaml
+global_settings:
+  http_control_port: 0.0.0.0:9000   # every IPv4 address; an IPv6 one in quotes: "[::]:9000"
+```
+
+`http_control_ip` is the other way of saying it - the address for a bare port:
 
 ```yaml
 global_settings:
   http_control_port: 9000
-  http_control_ip: 127.0.0.1   # an IPv6 address in quotes: "::1"
+  http_control_ip: 0.0.0.0          # an IPv6 address in quotes: "::"
 ```
 
-A value that is not an ip address fails the settings load, the same way a wrong `debug_ip` does - the port does not
-fall back to every address.
+A value which is neither a port nor an address with a port, an `http_control_ip` that is not an ip address, and an
+address given in both settings fail the settings load, the same way a wrong `debug_ip` does - the port does not
+end up on an address nobody meant. The address is bound at startup: a change takes effect after a restart.
 
 ### 1. Declare it
 
@@ -667,7 +701,7 @@ Whatever the folder is - local, behind ssh or behind a gateway:
 - The request path is the path of the file inside the folder. The query string is not a part of it: `/index.html?v=1` serves `index.html`. To serve a folder under a prefix, give the location a `path` and `strip_path: true` (see [strip_path](#strip_path)): the request path without the prefix is then the path of the file.
 - `default_file` is served for the root: `/`, and `/?utm=x` as well. Without `default_file` the root is answered 404.
 - A path with a `..` segment is answered `400 Bad Request`, written as it is or percent-encoded - `/../x`, `/%2e%2e/x`, `/..%2fx`. So is a path with a control character in it - percent-encoded, or as it is where a request line can carry one. A request path does not get out of the folder.
-- A path with an empty segment or a `.` segment - `//x`, `/./x` - is answered `400 Bad Request` as well. To the file system it is the file `/x`, and a location is picked by the path as it is written: served, it would get the file past the location which guards `/x` - its `drop`, its `auth_header`. A file has one path.
+- A path with an empty segment or a `.` segment - `//x`, `/./x` - is answered `400 Bad Request` as well. To the file system it is the file `/x`, and a location is picked by the path as it is written: served, it would get the file past the location which guards `/x` - its `drop`, its `api_keys_auth`. A file has one path.
 - On Windows a name has more spellings than these, and a path which uses one is answered `400 Bad Request` too: a segment which ends with `.` or a space (`/private./x` is `/private/x` to Windows), holds a `\` or a `:` (`/private\x`, `/private::$INDEX_ALLOCATION/x`), is a device name - `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, `CONIN$`, `CONOUT$`, with an extension or without - or has a `~` and a digit in it, the way a short 8.3 name ends (`/PRIVAT~1/x` for `private-files`). That is wider than a short name: `report~2.html` is refused as well. The check is made by a proxy which runs on Windows, for every folder it serves; a folder on a Windows host behind ssh or a gateway is read by that host, and a proxy on Linux does not make it. And it does not cover all: letters other than `a`-`z` are told apart by case by a location and not by the file system, and short names on other file systems (an SMB share) take other forms. On Windows, do not guard a subfolder of a served folder with a location of its own - serve it from a folder of its own.
 - It is the request path which is checked. A symbolic link inside the folder is followed wherever it points, a file whose name begins with a dot is served like any other, and `default_file` and the folder are taken from the settings as they are.
 - A file name is not percent-decoded: `/my%20file.txt` is a file named `my%20file.txt`, not `my file.txt`.
@@ -795,15 +829,15 @@ sends all its requests at once over one connection: one handshake, no queueing b
 endpoint with `client_certificate_ca`, where every connection is a full handshake (see
 [TLS session resumption](#tls-session-resumption)), that difference is larger still.
 
-Routing by `Host`, `whitelisted_ip`, `client_certificate_ca`, `auth_header`, `google_auth`, `oauth`,
+Routing by `Host`, `whitelisted_ip`, `client_certificate_ca`, `api_keys_auth`, `google_auth`, `oauth`,
 `allowed_users`, `strip_path`, file and static locations and `hsts` all work the same on both types. `https2`
 does not take the request through the same code as `https`, though - an `https2` endpoint serves its http/1.1
 clients through its own path too - and these differences matter when a site moves:
 
-- **http/1.1 upstreams: wait for a fix first.** There is a known issue with request bodies sent from an
-  `https2` endpoint to an upstream of type `http` / `unix+http`. Until it is fixed, keep a site whose upstreams
-  are http/1.1 on `https`. Sites whose locations are `http2` / `unix+http2` are not affected, and on `https2`
-  an upload to them is streamed, not held in memory.
+- **http/1.1 upstreams get a body whole.** On `https2` a request body for an upstream of type `http` /
+  `unix+http` is collected in memory first and sent with its `content-length` - whatever framing the client
+  used, chunked or an h2 body of no stated length. To locations of type `http2` / `unix+http2` an upload is
+  streamed, not held in memory.
 - **`request_timeout` covers the wait for the response head.** On `https2` an upstream has `request_timeout`
   (15 s by default) to start answering; on `https` the limit is `read_timeout` (3 min). Raise
   `request_timeout` on locations that take longer, e.g. reports or long polls.
@@ -898,7 +932,7 @@ hosts:
       type: tcp
 ```
 
-A tcp endpoint forwards bytes to its location - it has one. `whitelisted_ip`, of the endpoint and of the location, is checked by the address of the connection. `auth_header`, `google_auth` and `allowed_users` can not be checked on it: see "An endpoint which can not apply an access setting".
+A tcp endpoint forwards bytes to its location - it has one. `whitelisted_ip`, of the endpoint and of the location, is checked by the address of the connection. `api_keys_auth`, `google_auth` and `allowed_users` can not be checked on it: see "An endpoint which can not apply an access setting".
 
 ### Mcp (Model Context Protocol)
 MCP endpoints provide TCP forwarding with enhanced debugging capabilities for Model Context Protocol connections. They forward raw TCP traffic to remote MCP servers.
@@ -930,7 +964,7 @@ A `type: mcp` endpoint bridges to its **first** location and reads no request, s
 **Access settings:**
 
 - `whitelisted_ip` - of the endpoint and of the location - is checked by the address of the connection.
-- `auth_header` of a location, `google_auth` and `allowed_users` can not be checked: the bridge reads no header and no session. Settings with one of them load, and the endpoint serves nobody - see "An endpoint which can not apply an access setting". To guard an MCP server with them, use `type: https` on the endpoint with a location of `type: mcp`.
+- `api_keys_auth` (of the endpoint or of a location), `google_auth` and `allowed_users` can not be checked: the bridge reads no header and no session. Settings with one of them load, and the endpoint serves nobody - see "An endpoint which can not apply an access setting". To guard an MCP server with them, use `type: https` on the endpoint with a location of `type: mcp`.
 - `oauth` on a `type: mcp` endpoint is refused when the settings load.
 
 
@@ -1013,7 +1047,7 @@ None tls connections can not infer which type of HTTP protocol endpoint supports
 
 ### How a request picks a location
 
-A request goes to the first location, in the order of the settings, whose `path` the request path starts with. The rules of that location - its `auth_header`, its `whitelisted_ip` - are the rules of the request, and the path goes on to the upstream as it was received, unless the location has `strip_path` (see [strip_path](#strip_path)).
+A request goes to the first location, in the order of the settings, whose `path` the request path starts with. The rules of that location - its `api_keys_auth`, its `whitelisted_ip` - are the rules of the request, and the path goes on to the upstream as it was received, unless the location has `strip_path` (see [strip_path](#strip_path)).
 
 The match is by the start of the string, not by whole segments: the location `/a` takes `/ab/x` as well as `/a/x`. A `path` meant for a subtree should end with `/` - `/a/`.
 
@@ -1069,13 +1103,13 @@ A location with `strip_path` publishes every path of its upstream. When another 
     locations:
     - path: /admin/
       proxy_pass_to: http://127.0.0.1:5123
-      auth_header: "Bearer secret"
+      api_keys_auth: admins
     - path: /public/
       proxy_pass_to: http://127.0.0.1:5123
       strip_path: true
 ```
 
-`/public/admin/x` is a request of `/public/`, which has no `auth_header`, and goes to the upstream as `/admin/x`.
+`/public/admin/x` is a request of `/public/`, which has no `api_keys_auth`, and goes to the upstream as `/admin/x`.
 
 ### Http
 
@@ -1261,7 +1295,7 @@ Behavior per protocol:
 
 Drop locations:
 - never resolve an upstream — there is no `proxy_pass_to: drop://...` form.
-- bypass `auth_header`, `google_auth`, and `client_certificate_ca` checks —
+- bypass `api_keys_auth`, `google_auth`, and `client_certificate_ca` checks —
   the request is rejected before any of them runs.
 - bypass per-domain metrics (`domain_rps`, `*_traffic_*`, `ws_*_*`) when the
   endpoint also satisfies the default strict mode (`track_metrics_by_all_domains`
@@ -1318,7 +1352,7 @@ Behavior notes:
   case-insensitively against the parsed host) are accepted; anything else
   returns **403**. When absent, any host is allowed — the location behaves
   as an open proxy and the caller is responsible for authentication
-  (combine with `auth_header` / `google_auth` / `whitelisted_ip`).
+  (combine with `api_keys_auth` / `google_auth` / `whitelisted_ip`).
 - **No connection reuse** — every request creates and tears down its own
   upstream connection. This is intentional: the target host is unbounded,
   and a per-host pool with a TTL is not worth the complexity here.
@@ -1343,10 +1377,14 @@ hosts:
     locations:
     - path: /
       proxy_pass_to: dynamic
-      auth_header: "Bearer ${env:DYNAMIC_PROXY_TOKEN}"
+      api_keys_auth: dynamic_proxy_clients
       allowed_hosts:
       - api.internal
       - storage.internal
+
+api_keys:
+  dynamic_proxy_clients:
+  - ${dynamic_proxy_key}
 ```
 
 A request like:
@@ -1354,12 +1392,13 @@ A request like:
 ```
 GET /v1/users?limit=10 HTTP/1.1
 Host: proxy.example.com
-Authorization: Bearer ...
+X-Api-Key: ...
 proxy-to: https://api.internal
 ```
 
 is forwarded to `https://api.internal/v1/users?limit=10` with `Host:
-api.internal` and without the `proxy-to` header.
+api.internal` and without the `proxy-to` header. The `X-Api-Key` goes on with it,
+unless `modify_http_headers` takes it off (see "API keys").
 
 
 
@@ -1403,6 +1442,9 @@ global_settings:
 - Covers `http2` and `https2` endpoints - the ones that answer such a request with `400`. `http` and
   `https` endpoints close the connection silently on an unknown host, for everybody.
 - A debug ip is also told why an endpoint serves nobody - see the next section.
+- With `show_error_description_on_error_page: true`, a debug ip also sees the error behind a 4xx/5xx page
+  of the proxy on `http2` / `https2` endpoints (which upstream, which file, what failed). Everybody else gets
+  the title of the page alone, whatever the flag says.
 
 ### An endpoint which can not apply an access setting
 
@@ -1410,8 +1452,8 @@ Some access settings can not be applied by a type of endpoint:
 
 | Endpoint type | Can not apply |
 |---|---|
-| `mcp` | `auth_header` of a location, `google_auth`, `allowed_users` |
-| `tcp` | `auth_header` of a location, `google_auth`, `allowed_users` |
+| `mcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users` |
+| `tcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users` |
 | `http`, `http2` | `google_auth` - it works on `https` and `https2` endpoints |
 
 Settings with one of these load: an endpoint written wrong does not take the others down with it. But the endpoint **serves nobody** until the setting is removed - otherwise it would be open to everybody while its settings say it is guarded.
@@ -1474,64 +1516,109 @@ ssh:
 
 
 
-## Per-location header authentication
+## API keys
 
-Any location can require an `Authorization` header on every incoming
-request. If the header is missing or its value does not match exactly,
-the proxy returns **401** with the standard `NOT_AUTHORIZED_PAGE` body
-and never opens an upstream connection.
-
-Configure with the `auth_header` field on a location. The value is the
-**full expected `Authorization` header value**, scheme included
-(`Bearer …`, `Basic …`, etc.):
-
-```yaml
-hosts:
-  mcp.domain.com:443:
-    endpoint:
-      type: https
-      ssl_certificate: my_ssl_cert
-    locations:
-    - path: /mcp
-      type: mcp
-      proxy_pass_to: http://internal_mcp:8100/mcp
-      auth_header: "Bearer secret-token-123"
-```
-
-Behavior:
-
-- The header **name** is matched case-insensitively (`Authorization`,
-  `AUTHORIZATION`, `authorization` all work).
-- The header **value** is matched byte-for-byte exact, after stripping
-  surrounding ASCII whitespace from the request value.
-- If `auth_header` is absent or empty in the YAML, the check is a no-op
-  and the location accepts any (or no) `Authorization` header.
-- The header is **forwarded to the upstream as-is** — defense in depth,
-  the upstream may revalidate.
-- Missing-header and wrong-value cases both produce the same 401 — the
-  proxy does not leak which one is wrong.
-- The check runs **before** any endpoint-level auth (`google_auth`,
-  `client_certificate_ca`). Both can be combined: header auth gates
-  access, then endpoint auth attaches an identity.
-
-The expected value can be supplied via a variable to keep secrets out of
-config files:
+An endpoint, or one of its locations, can take only requests which carry a key of a set in the `X-Api-Key`
+header. Any other request is answered **401** with the standard `NOT_AUTHORIZED_PAGE` body, and no upstream
+connection is opened.
 
 ```yaml
 variables:
-  mcp_token: "Bearer ${env:MCP_TOKEN}"
+  ci_mcp_key: ...                   # or an environment variable of the same name
+
+api_keys:
+  mcp_clients:                      # the id of a set, and its keys
+  - 6f1c2a9e-claude-desktop
+  - ${ci_mcp_key}                   # a ${lower_case} variable
+  admins:
+  - very-secret-admin-key
 
 hosts:
   mcp.domain.com:443:
     endpoint:
       type: https
       ssl_certificate: my_ssl_cert
+      api_keys_auth: mcp_clients    # every location of the endpoint
     locations:
     - path: /mcp
       type: mcp
       proxy_pass_to: http://internal_mcp:8100/mcp
-      auth_header: ${mcp_token}
+    - path: /admin
+      proxy_pass_to: http://internal_mcp:8100/admin
+      api_keys_auth: admins         # in place of mcp_clients
+    - path: /health
+      proxy_pass_to: http://internal_mcp:8100/health
+      api_keys_auth: none           # open, although the endpoint is guarded
 ```
+
+A client sends the key as `X-Api-Key: 6f1c2a9e-claude-desktop`.
+
+Where `api_keys_auth` goes:
+
+- **On the endpoint** - every location of the endpoint is guarded by the set. `endpoint_templates` can give it
+  too; `api_keys_auth` of the endpoint takes the place of the template's, and `none` there takes the
+  template's away.
+- **On a location** - in place of the set of the endpoint. `none` opens the location.
+
+Where the keys come from - a set is put together from every place which declares keys under its id:
+
+- `api_keys:` of the settings file, of the files it includes, and of the dynamic settings file;
+- `api_keys:` of the answers of the urls of `real_time_configurations` (see "Real-time configurations"). A key
+  a url does not give any more is not taken after its next read.
+
+A set with no keys - one nothing declares, or one a url has not given yet - lets nobody through: the endpoint
+is served, and what the set guards answers everybody with 401. `get_settings` / `get_applied_settings` (MCP)
+list every set with how many keys it has, and whether an `api_keys_auth` names it; the keys themselves are
+never shown.
+
+The check:
+
+- The header **name** is matched case-insensitively; the **value** byte for byte - letter case included -
+  without the spaces around it. A key of the settings is taken without the spaces around it as well.
+- The request has to carry **exactly one** `X-Api-Key`. Two are refused, whatever they are: the header goes on
+  to the upstream, which might read the other one.
+- Every key of the set is compared, each in a time which does not depend on where the two differ.
+- A missing key and a wrong one get the same 401.
+- A refused request counts as a **hard failure** for the IP block-list: five within 15 seconds block the
+  address for 5 minutes. An address of `global_settings.ip_blocklist_white_list` is never counted, and a block
+  is lifted with `POST /api/IpBlocklist/Unblock` on the control port. A connection which gets through to an
+  endpoint does not take a hard failure back - only the soft ones.
+- The key is checked before anything of the request goes on, and before the headers of the endpoint and of
+  the location are applied. On an endpoint with `oauth`, a guarded location takes a request which carries
+  both: the token in `Authorization`, and the key in `X-Api-Key`.
+- `X-Api-Key` is **forwarded to the upstream as it came**: the upstream may tell its clients apart by it. To
+  keep it from the upstream, take it off with `modify_http_headers` of the location or of the endpoint (not of
+  `endpoint_templates`, where `modify_http_headers` is not applied):
+
+```yaml
+    - path: /mcp
+      api_keys_auth: mcp_clients
+      modify_http_headers:
+        remove:
+          request:
+          - x-api-key
+```
+
+- A change of the keys - by a reload of the settings, of a port or of an endpoint, or by a url - applies to the
+  connections already open from their next request.
+
+What refuses the settings:
+
+- `api_keys:` with the id `none`: it is what opens a location. A url which answers with one has that answer
+  refused.
+- A key which is empty, has a control character, or still has `${` in it once the variables are put in. A key
+  takes `${lower_case}` variables only: a `${UPPER_CASE}` name is one of the system variables, which are put
+  into headers per request, and would stay in the key as the very text of the placeholder.
+- `auth_header`, which `api_keys_auth` took the place of - with a word on `api_keys_auth`: a location with it
+  left in would otherwise be open to everybody.
+
+`api_keys_auth` can not be checked by a `type: mcp` or a `type: tcp` endpoint, which read no request: such an
+endpoint serves nobody - see "An endpoint which can not apply an access setting". To guard an MCP server, use
+`type: https` on the endpoint with a location of `type: mcp`, as above. On `http`, `https`, `http2` and
+`https2` endpoints it works the same, for every location type: `http`, `http2`, `mcp`, `mcp-h2`,
+`unix+http`, files, static, `dynamic`.
+
+More: [docs/api-keys.md](docs/api-keys.md).
 
 ## Google OAuth authentication
 
@@ -1565,9 +1652,8 @@ clients that only offer a **Client ID** and **Client Secret** — the "Add custo
 connector" dialog on claude.ai is the motivating one — can reach an upstream
 that does no authentication of its own.
 
-Prefer `auth_header` (see [Per-location header authentication](#per-location-header-authentication))
-whenever the client can be configured with a static token. Use `oauth` when it
-cannot.
+Prefer `api_keys_auth` (see [API keys](#api-keys)) whenever the client can be
+configured with a static key in a header. Use `oauth` when it cannot.
 
 ```yaml
 oauth:
@@ -1631,8 +1717,9 @@ the settings file. `oauth` can also be set on an `endpoint_templates` entry.
 - A wrong consent password or client secret counts as a hard failure for the IP
   block-list.
 - `whitelisted_ip`, `client_certificate_ca` and `allowed_users` still apply, and
-  they apply to the OAuth endpoints too. `auth_header` on a location is checked
-  in addition to the OAuth gate.
+  they apply to the OAuth endpoints too. `api_keys_auth` is checked in addition
+  to the OAuth gate, on the proxied requests: those carry the token in
+  `Authorization` and the key in `X-Api-Key`.
 
 ### Endpoint type
 
@@ -2132,7 +2219,7 @@ The **control port** (`global_settings.http_control_port`: the admin ui, the API
 by `my-http-server`, which times the head of every http/1.1 request and the first bytes of a
 connection itself; it takes `header_read_timeout` from `global_settings`. An h2 client of it is
 not timed past its preface, and the other keys above do not apply there. It is not meant for the
-internet: `http_control_ip: 127.0.0.1`, or a firewall.
+internet: it listens on `127.0.0.1` unless `http_control_port` names another address.
 
 ### Outside the cascade (fixed scope)
 
@@ -2514,8 +2601,7 @@ exporter as `/metrics` (see `strip_path` under "Location types").
 
 ```yaml
 global_settings:
-  http_control_port: 9000
-  http_control_ip: 127.0.0.1   # the admin ui and the API for this machine only
+  http_control_port: 9000      # 127.0.0.1:9000 - the admin ui and the API for this machine only
 
 hosts:
   9443:

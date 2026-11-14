@@ -74,6 +74,10 @@ pub async fn load_everything_from_settings() -> Result<(), String> {
 
     errors.print();
 
+    // Before the endpoints: a guarded endpoint which comes with these settings is served with
+    // its keys already.
+    crate::api_keys::publish_api_keys(&settings_model);
+
     println!("Applying new configuration (atomic swap)");
 
     let static_host_ids = settings_model.get_static_host_ids_lowercase();
@@ -102,9 +106,11 @@ pub async fn load_everything_from_settings() -> Result<(), String> {
 
     drop(apply_lock);
 
-    // The settings may name another url, or one they did not name before: it is read now
-    // rather than when the interval of the one before is out.
-    crate::app::APP_CTX.dynamic_hosts.request_refresh();
+    // The settings may name other urls, or ones they did not name before: they are read now
+    // rather than when the interval of the ones before is out.
+    crate::app::APP_CTX
+        .real_time_configurations
+        .request_refresh();
 
     Ok(())
 }

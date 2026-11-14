@@ -465,10 +465,14 @@ async fn a_file_is_not_served_past_the_location_which_guards_it() {
 
     let site = TestSite::new();
 
+    crate::app::APP_CTX
+        .api_keys
+        .add_for_tests("files_location_tests_keys", &["secret-key"]);
+
     // The folder of the guarded location is the folder of the open one: the file is a file of
     // both.
     let locations = format!(
-        "- path: /css\n  proxy_pass_to: '{root}'\n  auth_header: 'Bearer secret'\n- proxy_pass_to: '{root}'\n  default_file: index.html\n",
+        "- path: /css\n  proxy_pass_to: '{root}'\n  api_keys_auth: files_location_tests_keys\n- proxy_pass_to: '{root}'\n  default_file: index.html\n",
         root = site.root()
     );
 

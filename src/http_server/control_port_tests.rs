@@ -16,10 +16,11 @@ use std::{
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UdpSocket},
+    net::{TcpStream, UdpSocket},
 };
 
 use crate::settings::GlobalSettings;
+use crate::test_ports::free_port;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -129,21 +130,16 @@ async fn a_file_of_the_host_is_not_served_by_its_absolute_path() {
     assert!(!contains(&response.body, SECRET));
 }
 
-/// `http_control_ip: 127.0.0.1` - the control port is served on the loopback address, and on no
-/// other address of the host.
+/// `http_control_port: 9000` - a bare port: the control port is served on the loopback address,
+/// and on no other address of the host.
 #[tokio::test]
-async fn the_control_port_listens_on_the_http_control_ip() {
+async fn the_control_port_is_the_hosts_own_by_default() {
     let port = free_port().await;
 
-    let settings: GlobalSettings = serde_yaml::from_str(&format!(
-        "http_control_port: {port}\nhttp_control_ip: 127.0.0.1"
-    ))
-    .unwrap();
+    let settings: GlobalSettings =
+        serde_yaml::from_str(&format!("http_control_port: {port}")).unwrap();
 
-    let addr = super::control_port_addr(
-        settings.get_http_control_ip().unwrap(),
-        settings.http_control_port,
-    );
+    let addr = settings.get_http_control_addr().unwrap();
     assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], port)));
 
     super::start_at(addr);
@@ -160,23 +156,29 @@ async fn the_control_port_listens_on_the_http_control_ip() {
     }
 }
 
-/// Without `http_control_ip` the control port listens on every address, as it always did.
-#[test]
-fn the_control_port_listens_on_every_address_by_default() {
-    let settings: GlobalSettings = serde_yaml::from_str("http_control_port: 9000").unwrap();
+/// `http_control_port: 0.0.0.0:9000` - the whole address: the control port is served on every
+/// IPv4 address of the host, the loopback one and the one of its network card.
+#[tokio::test]
+async fn the_control_port_listens_on_the_address_of_the_settings() {
+    let port = free_port().await;
 
-    assert_eq!(
-        super::control_port_addr(
-            settings.get_http_control_ip().unwrap(),
-            settings.http_control_port
-        ),
-        SocketAddr::from(([0, 0, 0, 0], 9000))
-    );
+    let settings: GlobalSettings =
+        serde_yaml::from_str(&format!("http_control_port: 0.0.0.0:{port}")).unwrap();
 
-    assert_eq!(
-        super::control_port_addr(None, None),
-        SocketAddr::from(([0, 0, 0, 0], 8000))
-    );
+    let addr = settings.get_http_control_addr().unwrap();
+    assert_eq!(addr, SocketAddr::from(([0, 0, 0, 0], port)));
+
+    super::start_at(addr);
+    wait_until_served(port).await;
+
+    let response = get(port, "/index.html").await;
+    assert_eq!(response.status, 200);
+
+    if let Some(ip) = an_address_which_is_not_loopback().await {
+        let connect = TcpStream::connect((ip, port));
+        let connected = tokio::time::timeout(TIMEOUT, connect).await;
+        assert!(matches!(connected, Ok(Ok(_))), "not served on {ip}:{port}");
+    }
 }
 
 /// The control port server on a free port.
@@ -188,11 +190,6 @@ async fn start_control_port() -> u16 {
     wait_until_served(port).await;
 
     port
-}
-
-async fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap().port()
 }
 
 /// The server binds its port in a task of its own.

@@ -1,3 +1,7 @@
+> **Superseded (2026-11-14):** `auth_header` is removed. A location is guarded with
+> `api_keys_auth` and a key in `X-Api-Key` now - see [api-keys.md](api-keys.md). The
+> live pick-up of a reload described here still holds for it.
+
 # `auth_header` on h2 endpoints + live pick-up of a settings reload
 
 Status: **complete** (2026-09-09), in the working tree. `cargo check` clean,

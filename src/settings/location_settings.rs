@@ -83,6 +83,12 @@ pub struct LocationSettings {
     pub whitelisted_ip: Option<String>,
     pub compress: Option<bool>,
     pub trace_payload: Option<bool>,
+    /// The id of a set of `api_keys:` this location takes requests with a key of in `X-Api-Key`
+    /// only - in place of the one of its endpoint. `none` opens the location although its
+    /// endpoint is guarded. See [`crate::api_keys`].
+    pub api_keys_auth: Option<String>,
+    /// Removed: `api_keys_auth` took its place. Read only to refuse the settings - a location
+    /// with it left in would be open to everybody without a word.
     pub auth_header: Option<String>,
     pub allowed_hosts: Option<Vec<String>>,
     pub strip_path: Option<bool>,

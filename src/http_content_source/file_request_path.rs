@@ -58,7 +58,7 @@ impl<'s> FileRequestPath<'s> {
         // To the file system `//x` and `/./x` are the file `/x`; to the rules they are another
         // path: the location of a request is picked by the path as it is written, so such a
         // spelling would be served past a location written for `/x` - its `drop`, its
-        // `auth_header`. A path names its file in one way only. The last segment may be empty:
+        // `api_keys_auth`. A path names its file in one way only. The last segment may be empty:
         // `/css/`.
         let mut segments = path[1..].split('/').peekable();
         while let Some(segment) = segments.next() {

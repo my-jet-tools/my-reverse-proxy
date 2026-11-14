@@ -5,65 +5,92 @@ use flurl::FlUrl;
 use crate::{
     app::APP_CTX,
     configurations::{EndpointHttpHostString, EndpointPort, ListenConfiguration},
-    settings::{DynamicHostsModel, DynamicHostsSettings, EndpointTypeSettings, HostSettings},
+    settings::{EndpointTypeSettings, HostSettings, RealTimeConfigurationModel},
     settings_compiled::{AdditionalHost, SettingsCompiled},
 };
 
 use super::put_together_port::*;
 
-/// Reads `dynamic_hosts.url` and applies its hosts, if they are not the ones served already.
+/// Reads every url of `real_time_configurations`, all at once, and applies what they give if it
+/// is not what is served already: their hosts next to the hosts of the files, their keys with
+/// the keys of the files.
 ///
 /// Returns how long to wait before the next read: `None` when the applied settings have no
-/// `dynamic_hosts` - then the url is read again after a reload of the settings only.
+/// `real_time_configurations` - then the urls are read again after a reload of the settings
+/// only.
 ///
-/// A read which fails changes nothing: the hosts read before are served until a read succeeds.
-/// Neither does a blank answer, which is not told about either: the url said nothing.
-pub async fn refresh_dynamic_hosts() -> Option<Duration> {
+/// A read of a url which fails changes nothing of it: what it gave before is served until a read
+/// of it succeeds. Neither does a blank answer, which is not told about either: the url said
+/// nothing. Each url is on its own: one which is down does not hold up the others.
+pub async fn refresh_real_time_configurations() -> Option<Duration> {
     let applied = APP_CTX.applied_settings.load_full()?;
 
-    let Some(settings) = applied.dynamic_hosts.clone() else {
-        APP_CTX.dynamic_hosts.clear();
+    let Some(settings) = applied.real_time_configurations.clone() else {
+        APP_CTX.real_time_configurations.clear();
         return None;
     };
 
-    match read_dynamic_hosts(&settings).await {
-        Ok(answer) => {
-            if APP_CTX.dynamic_hosts.clear_error() {
-                println!("Dynamic hosts: {} is read again", settings.url);
+    APP_CTX.real_time_configurations.keep_only(&settings.urls);
+
+    let request_timeout = settings.get_request_timeout();
+
+    let reads = futures::future::join_all(
+        settings
+            .urls
+            .iter()
+            .map(|url| read_real_time_configuration(url, request_timeout)),
+    )
+    .await;
+
+    let mut changed = false;
+
+    for (url, read) in settings.urls.iter().zip(reads) {
+        match read {
+            Ok(answer) => {
+                if APP_CTX.real_time_configurations.clear_error(url) {
+                    println!("Real-time configurations: {url} is read again");
+                }
+
+                let Some(answer) = answer else {
+                    continue;
+                };
+
+                if !APP_CTX
+                    .real_time_configurations
+                    .has_same_answer(url, &answer)
+                {
+                    APP_CTX
+                        .real_time_configurations
+                        .set_answer(url, Arc::new(answer));
+                    changed = true;
+                }
             }
-
-            let Some(answer) = answer else {
-                return Some(settings.get_refresh_interval());
-            };
-
-            if !APP_CTX
-                .dynamic_hosts
-                .has_same_answer(settings.url.as_str(), &answer)
-            {
-                apply_dynamic_hosts(settings.url.as_str(), answer).await;
+            Err(err) => {
+                if APP_CTX.real_time_configurations.set_error(url, err.clone()) {
+                    println!(
+                        "Real-time configurations: can not read {url}: {err}. What it gave before is served."
+                    );
+                }
             }
         }
-        Err(err) => {
-            if APP_CTX.dynamic_hosts.set_error(err.clone()) {
-                println!(
-                    "Dynamic hosts: can not read {}: {}. The hosts read before are served.",
-                    settings.url, err
-                );
-            }
-        }
+    }
+
+    if changed {
+        apply_real_time_configurations().await;
     }
 
     Some(settings.get_refresh_interval())
 }
 
-/// What `dynamic_hosts.url` answers with - `None` if it answers `2xx` with a blank body, which
-/// says nothing. Any answer but `2xx` is a failure. Neither is ever no hosts: a url which is
-/// restarted must not take every dynamic host away - no hosts are `hosts: {}`.
-pub async fn read_dynamic_hosts(
-    settings: &DynamicHostsSettings,
-) -> Result<Option<DynamicHostsModel>, String> {
-    let mut response = FlUrl::new(settings.url.as_str())
-        .set_timeout(settings.get_request_timeout())
+/// What `url` answers with - `None` if it answers `2xx` with a blank body, which says nothing.
+/// Any answer but `2xx` is a failure. Neither is ever nothing: a url which is restarted must not
+/// take away every host and key it gave - no hosts are `hosts: {}`.
+pub async fn read_real_time_configuration(
+    url: &str,
+    request_timeout: Duration,
+) -> Result<Option<RealTimeConfigurationModel>, String> {
+    let mut response = FlUrl::new(url)
+        .set_timeout(request_timeout)
         .get()
         .await
         .map_err(|err| format!("the request failed: {err}"))?;
@@ -77,46 +104,50 @@ pub async fn read_dynamic_hosts(
     let body = response
         .get_body()
         .map_err(|err| format!("the answer can not be read: {err}"))?
-        .into_vec(crate::consts::MAX_DYNAMIC_HOSTS_RESPONSE_SIZE)
+        .into_vec(crate::consts::MAX_REAL_TIME_CONFIGURATION_RESPONSE_SIZE)
         .await
         .map_err(|err| format!("the answer can not be read: {err}"))?;
 
-    DynamicHostsModel::parse(&body)
+    RealTimeConfigurationModel::parse(&body)
 }
 
-/// Serves the hosts of `answer`, read from `url`, in place of the dynamic hosts served before.
-/// Nothing of the settings files is read again: the hosts of the files stay as the last reload
-/// left them - and so does the configuration the additional hosts of the answer are served with.
-async fn apply_dynamic_hosts(url: &str, answer: DynamicHostsModel) {
+/// Serves what the urls the applied settings name answered last, in place of what they gave
+/// before. Nothing of the settings files is read again: the hosts and the keys of the files stay
+/// as the last reload left them - and so does the configuration the additional hosts of the
+/// answers are served with.
+async fn apply_real_time_configurations() {
     let _apply_lock = APP_CTX.settings_apply_lock.lock().await;
 
     let Some(before) = APP_CTX.applied_settings.load_full() else {
         return;
     };
 
-    // The settings were reloaded while the url was read, and name another url now: what was
-    // read is not their hosts. The url they name is read next.
-    if before.dynamic_hosts.as_ref().map(|itm| itm.url.as_str()) != Some(url) {
+    // The settings were reloaded while the urls were read, and name none any more.
+    let Some(real_time_configurations) = before.real_time_configurations.as_ref() else {
         return;
-    }
+    };
+
+    let answers = APP_CTX
+        .real_time_configurations
+        .get_answers(&real_time_configurations.urls);
 
     let mut after = before.as_ref().clone();
-    after.set_dynamic_hosts_answer(&answer);
+    after.set_real_time_answers(&answers);
 
     println!(
-        "Dynamic hosts: {} hosts and {} names are read from {}",
+        "Real-time configurations: {} hosts, {} names and {} sets of keys are read from {} urls",
         after.dynamic_host_ids.len(),
         after
             .additional_hosts
             .values()
             .filter(|itm| itm.dynamic)
             .count(),
-        url
+        after.dynamic_api_keys.len(),
+        answers.len()
     );
 
-    APP_CTX
-        .dynamic_hosts
-        .set_answer(url.to_string(), Arc::new(answer));
+    // Before the hosts: a guarded host the urls give now is served with its keys already.
+    crate::api_keys::publish_api_keys(&after);
 
     let listeners_changed = apply_dynamic_hosts_change(&before, &after).await;
 
@@ -128,12 +159,12 @@ async fn apply_dynamic_hosts(url: &str, answer: DynamicHostsModel) {
 }
 
 /// Puts the dynamic hosts of `after` into the live configuration in place of the ones of
-/// `before`, and the names of the url in place of its names before.
+/// `before`, and the names of the urls in place of their names before.
 ///
 /// Only the ports a dynamic host or a name came to, left, or changed on are touched. Each of
 /// them keeps what it serves of the settings files - hosts and names, as the last reload put
 /// them there - and every dynamic host which did not change: its very endpoint, and with it its
-/// upstream connections. A dynamic host which changed is compiled anew; the names of the url are
+/// upstream connections. A dynamic host which changed is compiled anew; the names of the urls are
 /// put next to the endpoints of their hosts anew - nothing is compiled for them. A read which
 /// changes only names changes only names. The ports are replaced in one write: a connection sees
 /// either all of the change or none of it, and picks it up with the next request it reads
@@ -166,7 +197,7 @@ pub async fn apply_dynamic_hosts_change(
         }
     }
 
-    // The names of the url which are not what they were - and the ones of a host which changed:
+    // The names of the urls which are not what they were - and the ones of a host which changed:
     // they are put next to its new endpoint.
     let mut changed_names: HashSet<&str> = HashSet::new();
 
@@ -213,7 +244,7 @@ pub async fn apply_dynamic_hosts_change(
         hosts_by_port(after, |host_id| after.is_dynamic_host(host_id), &mut errors);
     let names_by_port_after = names_by_port(after, is_dynamic_name);
 
-    // What the ports had of the url, the errors of which are looked at anew.
+    // What the ports had of the urls, the errors of which are looked at anew.
     let mut ignored = FoundErrors::default();
     let hosts_by_port_before = hosts_by_port(
         before,
@@ -243,7 +274,7 @@ pub async fn apply_dynamic_hosts_change(
         };
 
         // What stays: what the port serves of the settings files, and each dynamic host which did
-        // not change. The names of the url go: they are put anew below.
+        // not change. The names of the urls go: they are put anew below.
         let configuration = without_endpoints(
             live,
             |endpoint| {
@@ -266,15 +297,16 @@ pub async fn apply_dynamic_hosts_change(
             })
             .collect();
 
-        let configuration =
-            match put_hosts(after, configuration, &host_ids, false, &mut errors).await {
-                Ok(configuration) => configuration,
-                // Not strict: a dynamic host is left out with its error, it fails nothing.
-                Err(err) => {
-                    println!("Dynamic hosts: port {port:?} can not be put together: {err}");
-                    continue;
-                }
-            };
+        let configuration = match put_hosts(after, configuration, &host_ids, false, &mut errors)
+            .await
+        {
+            Ok(configuration) => configuration,
+            // Not strict: a dynamic host is left out with its error, it fails nothing.
+            Err(err) => {
+                println!("Real-time configurations: port {port:?} can not be put together: {err}");
+                continue;
+            }
+        };
 
         let names = names_by_port_after.get(&port).cloned().unwrap_or_default();
         for (name, _) in &names {
@@ -295,7 +327,7 @@ pub async fn apply_dynamic_hosts_change(
 /// than be next to it. `existing` is what the port has without this host: an endpoint with its
 /// id which is dynamic is the host itself, served before, and is replaced.
 ///
-/// Every way a dynamic host is put on a port goes through here - a read of the url, a reload of
+/// Every way a dynamic host is put on a port goes through here - a read of the urls, a reload of
 /// the settings, of a port, of one endpoint: a tcp endpoint replaces whatever its port had.
 pub fn check_dynamic_host_fits(
     existing: &ListenConfiguration,

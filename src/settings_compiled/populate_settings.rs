@@ -3,7 +3,8 @@ use crate::settings::*;
 use super::{SettingsCompiled, VariablesCompiled};
 
 impl SettingsCompiled {
-    /// The settings files, and the hosts last read from `dynamic_hosts.url` next to their hosts.
+    /// The settings files, and what the urls of `real_time_configurations` answered last - their
+    /// hosts next to the hosts of the files, their keys with the keys of the files.
     pub async fn load_settings() -> Result<Self, String> {
         let mut result = Self::default();
 
@@ -11,14 +12,15 @@ impl SettingsCompiled {
         let include_settings = load_includes(&settings_model).await?;
         result.populate(settings_model, include_settings)?;
 
-        // Only the hosts of the url the settings name now: after the url is changed, the hosts
-        // of the one before are not served until the new one is read.
-        if let Some(dynamic_hosts) = result.dynamic_hosts.as_ref() {
-            if let Some(answer) = crate::app::APP_CTX
-                .dynamic_hosts
-                .get_answer(dynamic_hosts.url.as_str())
-            {
-                result.set_dynamic_hosts_answer(&answer);
+        // Only what the urls the settings name now gave: a url taken out of the list gives
+        // nothing any more, and one put into it gives nothing until it is read.
+        if let Some(real_time_configurations) = result.real_time_configurations.as_ref() {
+            let answers = crate::app::APP_CTX
+                .real_time_configurations
+                .get_answers(&real_time_configurations.urls);
+
+            if !answers.is_empty() {
+                result.set_real_time_answers(&answers);
             }
         }
 
@@ -59,7 +61,8 @@ impl SettingsCompiled {
         self.populate_ip_white_lists(&mut settings_model, &variables)?;
         self.populate_gateway_server(&mut settings_model, &variables)?;
         self.populate_gateway_client(&mut settings_model, &variables)?;
-        self.populate_dynamic_hosts(&mut settings_model, &variables)?;
+        self.populate_real_time_configurations(&mut settings_model, &variables)?;
+        self.populate_api_keys(&mut settings_model, &variables)?;
 
         for sub_settings in include_settings.iter_mut() {
             self.populate_hosts(sub_settings, &variables)?;
@@ -74,7 +77,8 @@ impl SettingsCompiled {
             self.populate_ip_white_lists(sub_settings, &variables)?;
             self.populate_gateway_server(sub_settings, &variables)?;
             self.populate_gateway_client(sub_settings, &variables)?;
-            self.populate_dynamic_hosts(sub_settings, &variables)?;
+            self.populate_real_time_configurations(sub_settings, &variables)?;
+            self.populate_api_keys(sub_settings, &variables)?;
         }
 
         self.variables = variables;
@@ -87,33 +91,71 @@ impl SettingsCompiled {
         Ok(())
     }
 
-    fn populate_dynamic_hosts(
+    fn populate_real_time_configurations(
         &mut self,
         settings_model: &mut SettingsModel,
         variables: &VariablesCompiled,
     ) -> Result<(), String> {
-        let Some(itm) = settings_model.dynamic_hosts.take() else {
-            return Ok(());
-        };
-
-        // One url: a second one would quietly replace the first, depending on the order the
-        // files are read in.
-        if self.dynamic_hosts.is_some() {
+        if settings_model.dynamic_hosts.take().is_some() {
             return Err(
-                "dynamic_hosts is declared more than once. It can be declared in one settings file only."
+                "dynamic_hosts is renamed: it is real_time_configurations now, with a list of urls - 'urls:' in place of 'url:'"
                     .to_string(),
             );
         }
 
-        let itm = DynamicHostsSettings {
-            url: variables.apply_variables(itm.url)?,
+        let Some(itm) = settings_model.real_time_configurations.take() else {
+            return Ok(());
+        };
+
+        // One list: a second one would quietly replace the first, depending on the order the
+        // files are read in.
+        if self.real_time_configurations.is_some() {
+            return Err(
+                "real_time_configurations is declared more than once. It can be declared in one settings file only."
+                    .to_string(),
+            );
+        }
+
+        let mut urls = Vec::with_capacity(itm.urls.len());
+        for url in itm.urls {
+            urls.push(variables.apply_variables(url)?);
+        }
+
+        let itm = RealTimeConfigurationsSettings {
+            urls,
             refresh_interval: itm.refresh_interval,
             request_timeout: itm.request_timeout,
         };
 
         itm.check()?;
 
-        self.dynamic_hosts = Some(itm);
+        self.real_time_configurations = Some(itm);
+
+        Ok(())
+    }
+
+    /// The keys of `api_keys:` of a settings file: added to the sets of the same ids the other
+    /// files declare.
+    fn populate_api_keys(
+        &mut self,
+        settings_model: &mut SettingsModel,
+        variables: &VariablesCompiled,
+    ) -> Result<(), String> {
+        let Some(api_keys) = settings_model.api_keys.take() else {
+            return Ok(());
+        };
+
+        for (id, keys) in api_keys {
+            let id = variables.apply_variables(id)?;
+            let keys = super::populate_vec_of_string(keys, variables)
+                .map_err(|err| format!("api_keys '{id}': {err}"))?;
+            let keys = crate::api_keys::check_api_keys(&id, keys)?;
+
+            crate::api_keys::merge_api_keys(
+                &mut self.api_keys,
+                &std::collections::HashMap::from([(id, keys)]),
+            );
+        }
 
         Ok(())
     }
@@ -236,7 +278,7 @@ impl SettingsCompiled {
     ) -> Result<(), String> {
         if let Some(itm) = settings_model.global_settings.take() {
             itm.get_debug_ip()?;
-            itm.get_http_control_ip()?;
+            itm.get_http_control_addr()?;
 
             self.global_settings = Some(GlobalSettings {
                 connection_settings: itm.connection_settings,
@@ -331,6 +373,7 @@ impl SettingsCompiled {
                             variables,
                         )?,
                         whitelisted_ip: variables.apply_variables_opt(itm.whitelisted_ip)?,
+                        api_keys_auth: variables.apply_variables_opt(itm.api_keys_auth)?,
                     },
                 );
             }
@@ -510,6 +553,7 @@ pub fn compile_host(
             whitelisted_ip: variables.apply_variables_opt(host_settings.endpoint.whitelisted_ip)?,
             template_id: variables.apply_variables_opt(host_settings.endpoint.template_id)?,
             allowed_users: variables.apply_variables_opt(host_settings.endpoint.allowed_users)?,
+            api_keys_auth: variables.apply_variables_opt(host_settings.endpoint.api_keys_auth)?,
             keep_alive: host_settings.endpoint.keep_alive,
             track_metrics_by_all_domains: host_settings.endpoint.track_metrics_by_all_domains,
             hsts: host_settings.endpoint.hsts,
@@ -530,6 +574,13 @@ fn compile_locations(
     let mut result = Vec::with_capacity(locations.len());
 
     for location in locations {
+        if location.auth_header.is_some() {
+            return Err(format!(
+                "Location '{}': auth_header is removed. A location is guarded with api keys now: 'api_keys_auth: <id>' names a set of 'api_keys:', and the key comes in the 'X-Api-Key' header",
+                location.path.as_deref().unwrap_or("/")
+            ));
+        }
+
         result.push(LocationSettings {
             path: variables.apply_variables_opt(location.path)?,
             proxy_pass_to: variables.apply_variables_opt(location.proxy_pass_to)?,
@@ -546,7 +597,8 @@ fn compile_locations(
             whitelisted_ip: variables.apply_variables_opt(location.whitelisted_ip)?,
             compress: location.compress,
             trace_payload: location.trace_payload,
-            auth_header: variables.apply_variables_opt(location.auth_header)?,
+            api_keys_auth: variables.apply_variables_opt(location.api_keys_auth)?,
+            auth_header: None,
             allowed_hosts: location.allowed_hosts,
             strip_path: location.strip_path,
             timeouts: location.timeouts,
@@ -646,21 +698,27 @@ mod tests {
         result
     }
 
-    /// The url is written with the variables of the settings - the ones of the files it
-    /// includes as well - and the variables are kept for the hosts the url gives.
+    /// The urls are written with the variables of the settings - the ones of the files it
+    /// includes as well - and the variables are kept for the hosts the urls give.
     #[test]
-    fn dynamic_hosts_is_read_with_the_variables_of_the_settings() {
+    fn real_time_configurations_is_read_with_the_variables_of_the_settings() {
         let compiled = compile_files(
-            "dynamic-hosts",
-            "variables:\n  hosts_api: 10.0.0.7:5000\ninclude:\n- other.yaml\ndynamic_hosts:\n  url: http://${hosts_api}/hosts?env=${env}\n  refresh_interval: 30000\n",
+            "real-time-configurations",
+            "variables:\n  hosts_api: 10.0.0.7:5000\ninclude:\n- other.yaml\nreal_time_configurations:\n  refresh_interval: 30000\n  urls:\n  - http://${hosts_api}/hosts?env=${env}\n  - http://${hosts_api}/keys\n",
             &[("other.yaml", "variables:\n  env: dev\n")],
         )
         .unwrap();
 
-        let dynamic_hosts = compiled.dynamic_hosts.as_ref().unwrap();
-        assert_eq!(dynamic_hosts.url, "http://10.0.0.7:5000/hosts?env=dev");
+        let real_time_configurations = compiled.real_time_configurations.as_ref().unwrap();
         assert_eq!(
-            dynamic_hosts.get_refresh_interval(),
+            real_time_configurations.urls,
+            [
+                "http://10.0.0.7:5000/hosts?env=dev",
+                "http://10.0.0.7:5000/keys"
+            ]
+        );
+        assert_eq!(
+            real_time_configurations.get_refresh_interval(),
             std::time::Duration::from_secs(30)
         );
         assert_eq!(
@@ -673,40 +731,127 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_hosts_is_not_required() {
-        let compiled = compile_files("no-dynamic-hosts", "hosts: {}\n", &[]).unwrap();
-        assert!(compiled.dynamic_hosts.is_none());
+    fn real_time_configurations_is_not_required() {
+        let compiled = compile_files("no-real-time-configurations", "hosts: {}\n", &[]).unwrap();
+        assert!(compiled.real_time_configurations.is_none());
     }
 
-    /// Two urls would be one of them, depending on the order the files are read in.
+    /// Two lists would be one of them, depending on the order the files are read in.
     #[test]
-    fn dynamic_hosts_in_two_files_refuses_the_settings() {
+    fn real_time_configurations_in_two_files_refuses_the_settings() {
         let err = compile_files(
-            "dynamic-hosts-twice",
-            "include:\n- other.yaml\ndynamic_hosts:\n  url: http://10.0.0.7/hosts\n",
+            "real-time-configurations-twice",
+            "include:\n- other.yaml\nreal_time_configurations:\n  urls:\n  - http://10.0.0.7/hosts\n",
             &[(
                 "other.yaml",
-                "dynamic_hosts:\n  url: http://10.0.0.8/hosts\n",
+                "real_time_configurations:\n  urls:\n  - http://10.0.0.8/hosts\n",
             )],
         )
         .unwrap_err();
 
         assert!(
-            err.contains("dynamic_hosts is declared more than once"),
+            err.contains("real_time_configurations is declared more than once"),
             "{err}"
         );
     }
 
     #[test]
-    fn dynamic_hosts_which_can_not_work_refuses_the_settings() {
+    fn real_time_configurations_which_can_not_work_refuses_the_settings() {
         let err = compile_files(
-            "dynamic-hosts-interval",
-            "dynamic_hosts:\n  url: http://10.0.0.7/hosts\n  refresh_interval: 5\n",
+            "real-time-configurations-interval",
+            "real_time_configurations:\n  urls:\n  - http://10.0.0.7/hosts\n  refresh_interval: 5\n",
             &[],
         )
         .unwrap_err();
 
         assert!(err.contains("refresh_interval"), "{err}");
+    }
+
+    /// The hosts of the url are not left out without a word: the settings say what it is called
+    /// now.
+    #[test]
+    fn dynamic_hosts_refuses_the_settings_with_its_new_name() {
+        let err = compile_files(
+            "dynamic-hosts-renamed",
+            "dynamic_hosts:\n  url: http://10.0.0.7/hosts\n",
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(err.contains("real_time_configurations"), "{err}");
+    }
+
+    /// A set is put together from every file which declares keys under its id - the dynamic
+    /// settings file is one of them, read as an include.
+    #[test]
+    fn the_keys_of_one_id_in_several_files_make_one_set() {
+        let compiled = compile_files(
+            "api-keys-merged",
+            "variables:\n  ci_key: ci-key-value\ninclude:\n- other.yaml\napi_keys:\n  mcp_clients:\n  - desktop-key\n  - ${ci_key}\n  admins:\n  - admin-key\n",
+            &[(
+                "other.yaml",
+                "api_keys:\n  mcp_clients:\n  - desktop-key\n  - tenant-key\n  empty: []\n",
+            )],
+        )
+        .unwrap();
+
+        let mut clients = compiled.api_keys["mcp_clients"].clone();
+        clients.sort();
+        assert_eq!(clients, ["ci-key-value", "desktop-key", "tenant-key"]);
+        assert_eq!(compiled.api_keys["admins"], ["admin-key"]);
+        assert!(compiled.api_keys["empty"].is_empty());
+    }
+
+    #[test]
+    fn a_set_of_keys_which_can_not_work_refuses_the_settings() {
+        for (name, main) in [
+            ("api-keys-none", "api_keys:\n  none:\n  - key\n"),
+            (
+                "api-keys-upper-variable",
+                "api_keys:\n  clients:\n  - ${MCP_KEY}\n",
+            ),
+            (
+                "api-keys-missing-variable",
+                "api_keys:\n  clients:\n  - ${not_declared}\n",
+            ),
+            ("api-keys-empty-key", "api_keys:\n  clients:\n  - ''\n"),
+        ] {
+            let err = compile_files(name, main, &[]).unwrap_err();
+            assert!(err.contains("api_keys"), "{main}: {err}");
+        }
+    }
+
+    /// A location with `auth_header` left in would be open to everybody without a word.
+    #[test]
+    fn auth_header_refuses_the_settings() {
+        let err = compile_files(
+            "auth-header-removed",
+            "hosts:\n  localhost:8000:\n    endpoint:\n      type: http\n    locations:\n    - path: /mcp\n      proxy_pass_to: http://127.0.0.1:9000\n      auth_header: Bearer secret\n",
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(err.contains("auth_header is removed"), "{err}");
+        assert!(err.contains("api_keys_auth"), "{err}");
+        assert!(!err.contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn api_keys_auth_is_read_with_the_variables_of_the_settings() {
+        let compiled = compile_files(
+            "api-keys-auth-variables",
+            "variables:\n  keys_id: mcp_clients\nhosts:\n  localhost:8000:\n    endpoint:\n      type: http\n      api_keys_auth: ${keys_id}\n    locations:\n    - path: /open\n      proxy_pass_to: http://127.0.0.1:9000\n      api_keys_auth: none\nendpoint_templates:\n  tpl:\n    api_keys_auth: ${keys_id}\n",
+            &[],
+        )
+        .unwrap();
+
+        let host = &compiled.hosts["localhost:8000"];
+        assert_eq!(host.endpoint.api_keys_auth.as_deref(), Some("mcp_clients"));
+        assert_eq!(host.locations[0].api_keys_auth.as_deref(), Some("none"));
+        assert_eq!(
+            compiled.endpoint_templates["tpl"].api_keys_auth.as_deref(),
+            Some("mcp_clients")
+        );
     }
 
     /// The control port would listen on every address if a typo were taken for no value: the

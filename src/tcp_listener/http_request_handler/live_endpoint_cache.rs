@@ -16,7 +16,7 @@ use crate::http_proxy_pass::HttpProxyPass;
 /// accepted with a snapshot of the port configuration, and an h2 connection
 /// (every MCP client keeps one open for hours) would otherwise keep serving that
 /// snapshot for its whole life — a `reload_settings` would not reach it, so a
-/// changed `auth_header`, upstream or header rule would apply only to clients
+/// changed `api_keys_auth`, upstream or header rule would apply only to clients
 /// that happened to reconnect. Reloads are not frequent, so the check is a
 /// single atomic load per request and the lock is taken only when the generation
 /// actually moved.
@@ -40,7 +40,7 @@ impl LiveEndpointCache {
     /// settings reload if one happened since the last request on this
     /// connection. When the configuration was replaced, the per-`Host`
     /// `HttpProxyPass` cache is dropped so the next lookup rebuilds it from the
-    /// new endpoint info (new locations, new `auth_header`).
+    /// new endpoint info (new locations, new `api_keys_auth`).
     ///
     /// Concurrent calls on one connection are harmless: they resolve to the same
     /// live `Arc`, and both clearing the cache and re-inserting a `HttpProxyPass`

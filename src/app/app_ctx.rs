@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    net::IpAddr,
+    net::SocketAddr,
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
         Arc,
@@ -80,12 +80,15 @@ pub struct AppContext {
     pub applied_settings: arc_swap::ArcSwapOption<SettingsCompiled>,
 
     /// Held while settings are put into the live configuration - by a reload of the settings
-    /// files, of one of their ports, or by a read of `dynamic_hosts.url`. Each of them reads
-    /// what the other one applied, so one is never in the middle of the other.
+    /// files, of one of their ports, or by a read of the urls of `real_time_configurations`. Each
+    /// of them reads what the other one applied, so one is never in the middle of the other.
     pub settings_apply_lock: Mutex<()>,
 
-    /// The hosts last read from `dynamic_hosts.url`.
-    pub dynamic_hosts: DynamicHosts,
+    /// What each url of `real_time_configurations` answered last.
+    pub real_time_configurations: RealTimeConfigurations,
+
+    /// The keys requests to a location guarded by `api_keys_auth` are checked against.
+    pub api_keys: crate::api_keys::ApiKeysStore,
 
     pub token_secret_key: AesKey,
     pub current_configuration: AppConfiguration,
@@ -111,8 +114,9 @@ pub struct AppContext {
 
     pub gateway_server: Option<TcpGatewayServer>,
     pub gateway_clients: HashMap<String, TcpGatewayClient>,
-    pub http_control_port: Option<u16>,
-    pub http_control_ip: Option<IpAddr>,
+    /// The address the control port listens on (`global_settings.http_control_port` /
+    /// `http_control_ip`, `127.0.0.1:8000` by default). Bound once, at startup.
+    pub http_control_addr: SocketAddr,
     /// `header_read_timeout` of `global_settings`, for the control port: my-http-server times the
     /// head of an http/1.1 request with it (it is no endpoint, so only the global level applies).
     pub http_control_header_read_timeout: std::time::Duration,
@@ -136,8 +140,7 @@ pub struct AppContext {
 
 impl AppContext {
     pub fn new(settings_model: SettingsCompiled) -> Self {
-        let http_control_port = settings_model.get_http_control_port();
-        let http_control_ip = settings_model.get_http_control_ip().unwrap();
+        let http_control_addr = settings_model.get_http_control_addr().unwrap();
         let http_control_header_read_timeout = settings_model
             .get_global_timeouts()
             .resolve()
@@ -204,7 +207,8 @@ impl AppContext {
             pool_supervisor_interval,
             applied_settings: arc_swap::ArcSwapOption::empty(),
             settings_apply_lock: Mutex::new(()),
-            dynamic_hosts: DynamicHosts::new(),
+            real_time_configurations: RealTimeConfigurations::new(),
+            api_keys: crate::api_keys::ApiKeysStore::new(),
             // saved_client_certs: SavedClientCert::new(),
             token_secret_key,
             current_configuration: AppConfiguration::new(),
@@ -239,8 +243,7 @@ impl AppContext {
             h1_uds_pools: H1PoolRegistry::new(),
             gateway_server,
             gateway_clients,
-            http_control_port,
-            http_control_ip,
+            http_control_addr,
             http_control_header_read_timeout,
             ssh_sessions_pool: SshSessionsPool::new(),
             self_signed_cert: Arc::new(
