@@ -93,6 +93,11 @@ pub struct HostSettingsSummary {
     pub api_keys_auth: String,
 
     #[property(
+        description = "request_with_header_only of the endpoint: the headers every request to it has to come with, each as '<name>: ***' - the values are never shown. A request without one of them, with one twice or with another value closes its connection without a response, and the headers never reach the upstream. Empty if not set"
+    )]
+    pub request_with_header_only: Vec<String>,
+
+    #[property(
         description = "True if the host was read from a url of real_time_configurations rather than from a settings file"
     )]
     pub dynamic: bool,
@@ -345,6 +350,12 @@ pub fn build_settings_summary(
                 .unwrap_or_default(),
             hsts: host.endpoint.hsts.unwrap_or(false),
             api_keys_auth: host.endpoint.api_keys_auth.clone().unwrap_or_default(),
+            request_with_header_only: host
+                .endpoint
+                .request_with_header_only
+                .as_ref()
+                .map(|headers| headers.masked())
+                .unwrap_or_default(),
             dynamic,
             additional_host_of,
             locations,

@@ -30,6 +30,10 @@ pub struct EndpointSettings {
     /// connection is taken from the networks of Cloudflare only, and the client of a request is
     /// its `CF-Connecting-IP`. See [`crate::cloudflare`].
     pub cloudflare: Option<bool>,
+    /// The headers, each with its one value, every request to the endpoint has to come with -
+    /// a request without them closes its connection without a word. They never reach an
+    /// upstream, and their values are never logged. See [`crate::required_headers`].
+    pub request_with_header_only: Option<RequestWithHeaderOnlySettings>,
     pub whitelisted_ip: Option<String>,
     /// The id of a list of `country_white_lists`: a client is served only from a country of it.
     /// Together with `whitelisted_ip` a client has to pass both.

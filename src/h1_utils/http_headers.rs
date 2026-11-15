@@ -144,6 +144,27 @@ impl Http1Headers {
         }
     }
 
+    /// Every header of the head, in the order they came: its name and its value, as they are
+    /// written around the `:` - the value with the whitespace before it.
+    pub fn headers_of<'s>(&self, src: &'s [u8]) -> impl Iterator<Item = (&'s [u8], &'s [u8])> + 's {
+        let mut pos = self.first_line_end + crate::consts::HTTP_CR_LF.len();
+
+        std::iter::from_fn(move || loop {
+            let end = src.find_sequence_pos(crate::consts::HTTP_CR_LF, pos)?;
+
+            if end == pos {
+                return None;
+            }
+
+            let line = &src[pos..end];
+            pos = end + crate::consts::HTTP_CR_LF.len();
+
+            if let Some(colon) = line.iter().position(|&byte| byte == b':') {
+                return Some((&line[..colon], &line[colon + 1..]));
+            }
+        })
+    }
+
     /// Every value of the headers an upstream could read as `header` (written in lowercase - see
     /// [`crate::cloudflare::header_name_is`]), in the order they came. A name sent twice, or once
     /// as `CF-Connecting-IP` and once as `CF_Connecting_IP`, gives two values.

@@ -2529,3 +2529,251 @@ async fn a_byte_bridge_with_the_flag_serves_nobody() {
         assert!(reason.contains("'cloudflare'"), "{endpoint:?}: {reason}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// `request_with_header_only`
+// ---------------------------------------------------------------------------------------------
+
+const ZONE_SECRET: &str = "s3cr3t-of-the-zone-0123456789abcdef";
+
+/// The endpoint lines which require `X-Zone-Secret: <ZONE_SECRET>`.
+fn zone_secret_lines() -> String {
+    format!("      request_with_header_only:\n      - X-Zone-Secret: {ZONE_SECRET}\n")
+}
+
+/// The lines of an upstream request's head of the header, in any spelling.
+fn zone_secret_lines_at_the_upstream(upstream_request: &str) -> Vec<String> {
+    upstream_request
+        .lines()
+        .filter(|line| {
+            crate::cloudflare::header_name_is(
+                line.split(':').next().unwrap_or("").as_bytes(),
+                "x-zone-secret",
+            )
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// A request with the header is served - and the header goes no further: not as it came, not in
+/// the spelling a visitor may add next to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_with_the_required_header_is_served_without_it() {
+    my_tls::install_default_crypto_providers();
+
+    for headers in [
+        vec![("x-zone-secret", ZONE_SECRET)],
+        vec![
+            ("x-zone-secret", ZONE_SECRET),
+            ("x_zone_secret", "anything"),
+        ],
+    ] {
+        for endpoint in HTTP_ENDPOINTS {
+            let outcome = client_ip_probe(endpoint, &zone_secret_lines(), "", &headers).await;
+            assert!(outcome.served(), "{endpoint:?}, {headers:?}: {outcome:#?}");
+
+            let request = &outcome.upstream_requests[0];
+            assert!(
+                zone_secret_lines_at_the_upstream(request).is_empty()
+                    && !request.contains(ZONE_SECRET),
+                "{endpoint:?}, {headers:?}: {request}"
+            );
+        }
+    }
+}
+
+/// A request without the header - or with it twice, or with another value - is taken for a
+/// break-in: the connection is closed without a word, and the upstream sees nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_without_the_required_header_closes_the_connection_without_a_word() {
+    my_tls::install_default_crypto_providers();
+
+    let cases: [(&str, &[(&str, &str)]); 5] = [
+        ("no header", &[]),
+        ("another value", &[("x-zone-secret", "guess")]),
+        (
+            "twice",
+            &[
+                ("x-zone-secret", ZONE_SECRET),
+                ("x-zone-secret", ZONE_SECRET),
+            ],
+        ),
+        ("the secret under another name", &[("x-other", ZONE_SECRET)]),
+        ("spelled with _", &[("x_zone_secret", ZONE_SECRET)]),
+    ];
+
+    for (case, headers) in cases {
+        for endpoint in HTTP_ENDPOINTS {
+            let outcome = client_ip_probe(endpoint, &zone_secret_lines(), "", headers).await;
+
+            assert!(
+                outcome.status.is_none() && outcome.upstream_requests.is_empty(),
+                "{case}, {endpoint:?}: {outcome:#?}"
+            );
+        }
+    }
+}
+
+/// With `cloudflare: true` a request through Cloudflare has to come with the header as well: a
+/// request from Cloudflare's networks with a `CF-Connecting-IP` of its own choosing - what a
+/// Worker of another account can send - does not get through without it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn through_cloudflare_the_required_header_is_asked_for_too() {
+    my_tls::install_default_crypto_providers();
+    crate::cloudflare::the_loopback_is_cloudflare_in_tests();
+
+    let endpoint_lines = format!("      cloudflare: true\n{}", zone_secret_lines());
+
+    for endpoint in HTTP_ENDPOINTS {
+        let with_the_header = client_ip_probe(
+            endpoint,
+            &endpoint_lines,
+            "",
+            &[
+                ("cf-connecting-ip", "198.51.100.4"),
+                ("x-zone-secret", ZONE_SECRET),
+            ],
+        )
+        .await;
+        assert!(
+            with_the_header.served(),
+            "{endpoint:?}: {with_the_header:#?}"
+        );
+        assert_eq!(
+            client_ip_lines(&with_the_header.upstream_requests[0]),
+            vec![
+                "cf-connecting-ip: 198.51.100.4",
+                "x-client: 198.51.100.4",
+                "x-forwarded-for: 198.51.100.4, 127.0.0.1",
+            ],
+            "{endpoint:?}"
+        );
+
+        let without_it = client_ip_probe(
+            endpoint,
+            &endpoint_lines,
+            "",
+            &[("cf-connecting-ip", "198.51.100.4")],
+        )
+        .await;
+        assert!(
+            without_it.status.is_none() && without_it.upstream_requests.is_empty(),
+            "{endpoint:?}: {without_it:#?}"
+        );
+    }
+}
+
+/// The endpoint's debug log writes the headers of a request it takes: the value of the header is
+/// `***` there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_debug_log_of_the_endpoint_never_has_the_value() {
+    my_tls::install_default_crypto_providers();
+
+    for endpoint in HTTP_ENDPOINTS {
+        let upstream = Upstream::start().await;
+        let port = free_port().await;
+        let host_id = format!("localhost:{port}");
+
+        apply_settings(&client_ip_yaml(
+            endpoint,
+            port,
+            upstream.port,
+            &zone_secret_lines(),
+            "",
+        ))
+        .await;
+        crate::app::APP_CTX.debug_flags.set_endpoint(&host_id, true);
+        serve(port);
+
+        let reply = send(
+            endpoint.client(),
+            port,
+            "localhost",
+            &host_id,
+            &[("x-zone-secret", ZONE_SECRET)],
+        )
+        .await;
+        let outcome = Outcome::new(reply, &upstream).await;
+        crate::app::APP_CTX
+            .debug_flags
+            .set_endpoint(&host_id, false);
+        assert!(outcome.served(), "{endpoint:?}: {outcome:#?}");
+
+        let log: Vec<String> = crate::app::APP_CTX
+            .proxy_logs
+            .get_by_endpoint(&host_id)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect();
+
+        assert!(
+            log.iter().all(|line| !line.contains(ZONE_SECRET)),
+            "{endpoint:?}: {log:#?}"
+        );
+
+        // The hyper path writes the headers of the request it takes.
+        if matches!(
+            endpoint,
+            Endpoint::Http2 | Endpoint::Https2OverH2 | Endpoint::Https2OverHttp1
+        ) {
+            assert!(
+                log.iter()
+                    .any(|line| line.contains("\"x-zone-secret\": \"***\"")),
+                "{endpoint:?}: {log:#?}"
+            );
+        }
+    }
+}
+
+/// An endpoint which reads no HTTP - a byte bridge - can not see a header: with
+/// `request_with_header_only` it serves nobody, rather than let everybody in.
+#[tokio::test]
+async fn a_byte_bridge_with_required_headers_serves_nobody() {
+    for endpoint in [Endpoint::Mcp, Endpoint::Tcp] {
+        let port = free_port().await;
+        let yaml = format!(
+            "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {}\n{}    locations:\n    - proxy_pass_to: {}\n",
+            endpoint.type_name(),
+            zone_secret_lines(),
+            endpoint.proxy_pass_to(9),
+        );
+
+        apply_settings(&yaml).await;
+
+        let reason = crate::app::APP_CTX
+            .current_configuration
+            .get(|config| match config.listen_tcp_endpoints.get(&port) {
+                Some(crate::configurations::ListenConfiguration::Mcp(config)) => config.endpoints
+                    [0]
+                .not_served_reason
+                .as_ref()
+                .map(|reason| reason.as_str().to_string()),
+                Some(crate::configurations::ListenConfiguration::Tcp(config)) => config
+                    .not_served_reason
+                    .as_ref()
+                    .map(|reason| reason.as_str().to_string()),
+                _ => None,
+            })
+            .await;
+
+        let reason = reason.unwrap_or_else(|| panic!("{endpoint:?} is served\n{yaml}"));
+        assert!(
+            reason.contains("'request_with_header_only'"),
+            "{endpoint:?}: {reason}"
+        );
+    }
+}
+
+/// A header the endpoint could not take away without breaking the request is refused with the
+/// host - with no word of the value.
+#[tokio::test]
+async fn a_required_header_which_can_not_be_taken_away_refuses_the_host() {
+    let port = free_port().await;
+    let yaml = format!(
+        "hosts:\n  localhost:{port}:\n    endpoint:\n      type: http\n      request_with_header_only:\n      - Content-Length: \"{ZONE_SECRET}\"\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9\n"
+    );
+
+    let err = try_apply_settings(&yaml).await.unwrap_err();
+    assert!(err.contains("can not be required"), "{err}");
+    assert!(!err.contains(ZONE_SECRET), "{err}");
+}

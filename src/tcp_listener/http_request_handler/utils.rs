@@ -7,8 +7,9 @@ use crate::error_templates::DebugPageSection;
 use crate::http_proxy_pass::ProxyPassError;
 use crate::types::ConnectionIp;
 
-/// Who `req`, on a connection from `peer`, is of - see [`crate::cloudflare::client_of_request`].
-/// `None`: the connection is to be cut without a word.
+/// Who `req`, on a connection from `peer`, is of - see [`crate::cloudflare::client_of_request`] -,
+/// when it has the headers of `request_with_header_only` of the endpoint (see
+/// [`crate::required_headers`]). `None`: the connection is to be cut without a word.
 pub fn client_of_request(
     endpoint: &crate::configurations::HttpEndpointInfo,
     peer: ConnectionIp,
@@ -20,6 +21,22 @@ pub fn client_of_request(
             .map(|value| value.as_bytes())
     });
 
+    let client = cloudflare_client_of_request(endpoint, peer, req, host)?;
+
+    crate::required_headers::request_may_go_on(endpoint, &peer, &client, host, || {
+        req.headers()
+            .iter()
+            .map(|(name, value)| (name.as_str().as_bytes(), value.as_bytes()))
+    })
+    .then_some(client)
+}
+
+fn cloudflare_client_of_request(
+    endpoint: &crate::configurations::HttpEndpointInfo,
+    peer: ConnectionIp,
+    req: &hyper::Request<hyper::body::Incoming>,
+    host: Option<&[u8]>,
+) -> Option<crate::cloudflare::RequestClient> {
     let cf_connecting_ip = req
         .headers()
         .iter()
@@ -197,7 +214,15 @@ fn bad_request_response<B>(
         rows: req
             .headers()
             .iter()
-            .map(|(name, value)| (name.as_str().to_string(), header_value_to_string(value)))
+            .map(|(name, value)| {
+                let value = if listen_port_config.masks_header(name.as_str().as_bytes()) {
+                    crate::required_headers::MASKED.to_string()
+                } else {
+                    header_value_to_string(value)
+                };
+
+                (name.as_str().to_string(), value)
+            })
             .collect(),
     };
 
@@ -517,7 +542,10 @@ mod tests {
         let body = body_of(generate_tech_page(an_error_with_markup(), true)).await;
 
         assert!(body.contains("10.0.0.5:8000"), "{body}");
-        assert!(body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{body}");
+        assert!(
+            body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "{body}"
+        );
         assert!(!body.contains("<script>"), "{body}");
     }
 }

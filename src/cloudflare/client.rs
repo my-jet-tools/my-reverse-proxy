@@ -11,9 +11,10 @@ pub const CF_CONNECTING_IP: &str = "cf-connecting-ip";
 
 /// What is wrong with a connection, or with one of its requests, on its way to an endpoint.
 ///
-/// All but [`Deviation::CloudflarePeerWithoutFlag`] are of a `cloudflare: true` endpoint and close
-/// the connection without a word: a browser can not end up in any of them, only a request made to
-/// get around Cloudflare can - or a zone of Cloudflare told to take the header away.
+/// All but [`Deviation::CloudflarePeerWithoutFlag`] close the connection without a word: a browser
+/// can not end up in any of them, only a request made to get around Cloudflare can - or a zone of
+/// Cloudflare told to take a header away. The ones of a header of `request_with_header_only` are of
+/// an endpoint with it (see [`crate::required_headers`]), the others of a `cloudflare: true` one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Deviation {
     /// The networks of Cloudflare are not read yet, so nobody can be told to be Cloudflare.
@@ -31,6 +32,14 @@ pub enum Deviation {
     /// proxied by Cloudflare while the flag is forgotten. Served - the upstream is told the
     /// address of the Cloudflare server, which nobody can fake - and only noted.
     CloudflarePeerWithoutFlag,
+    /// A request without a header of `request_with_header_only` of its endpoint - the name, in
+    /// lowercase, as the settings write it.
+    MissingRequiredHeader(String),
+    /// A request with a header of `request_with_header_only` more than once.
+    SeveralRequiredHeader(String),
+    /// A request with a header of `request_with_header_only` of another value - which is never
+    /// written down.
+    WrongRequiredHeader(String),
 }
 
 impl Deviation {
@@ -43,6 +52,19 @@ impl Deviation {
             Self::SeveralCfConnectingIp => "several_cf_connecting_ip",
             Self::InvalidCfConnectingIp(_) => "bad_cf_connecting_ip",
             Self::CloudflarePeerWithoutFlag => "cloudflare_peer_without_flag",
+            Self::MissingRequiredHeader(_) => "no_required_header",
+            Self::SeveralRequiredHeader(_) => "several_required_header",
+            Self::WrongRequiredHeader(_) => "wrong_required_header",
+        }
+    }
+
+    /// The header of `request_with_header_only` the deviation is of.
+    pub fn required_header(&self) -> Option<&str> {
+        match self {
+            Self::MissingRequiredHeader(name)
+            | Self::SeveralRequiredHeader(name)
+            | Self::WrongRequiredHeader(name) => Some(name),
+            _ => None,
         }
     }
 

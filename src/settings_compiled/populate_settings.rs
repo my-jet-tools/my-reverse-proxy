@@ -572,6 +572,10 @@ pub fn compile_host(
             debug: host_settings.endpoint.debug,
             inject_country: host_settings.endpoint.inject_country,
             cloudflare: host_settings.endpoint.cloudflare,
+            request_with_header_only: compile_request_with_header_only(
+                host_settings.endpoint.request_with_header_only,
+                variables,
+            )?,
             whitelisted_ip: variables.apply_variables_opt(host_settings.endpoint.whitelisted_ip)?,
             whitelisted_country: variables
                 .apply_variables_opt(host_settings.endpoint.whitelisted_country)?,
@@ -589,6 +593,38 @@ pub fn compile_host(
     };
 
     Ok((host_id, host_settings))
+}
+
+/// `request_with_header_only:` with the variables put into its names and values - a value is a
+/// secret, kept best in a variable. An error never tells a value.
+fn compile_request_with_header_only(
+    settings: Option<RequestWithHeaderOnlySettings>,
+    variables: &VariablesCompiled,
+) -> Result<Option<RequestWithHeaderOnlySettings>, String> {
+    let Some(settings) = settings else {
+        return Ok(None);
+    };
+
+    let mut result = Vec::with_capacity(settings.0.len());
+
+    for item in settings.0 {
+        let mut compiled = std::collections::BTreeMap::new();
+
+        for (name, value) in item {
+            let name = variables.apply_variables(name)?;
+            let value = variables
+                .apply_variables(value)
+                .map_err(|err| format!("request_with_header_only: the value of '{name}': {err}"))?;
+
+            if compiled.insert(name.clone(), value).is_some() {
+                return Err(format!("request_with_header_only: '{name}' is named twice"));
+            }
+        }
+
+        result.push(compiled);
+    }
+
+    Ok(Some(RequestWithHeaderOnlySettings(result)))
 }
 
 fn compile_locations(
@@ -752,6 +788,55 @@ mod tests {
                 .apply_variables("${env}".to_string())
                 .unwrap(),
             "dev"
+        );
+    }
+
+    /// The value of a header of `request_with_header_only` is a secret, kept best in a variable:
+    /// the variable is put in - and one which is not there refuses the host, without a value.
+    #[test]
+    fn request_with_header_only_takes_the_secret_from_a_variable() {
+        let host = |value: &str| {
+            format!(
+                "hosts:\n  localhost:8001:\n    endpoint:\n      type: https2\n      request_with_header_only:\n      - X-Zone-Secret: {value}\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9000\n"
+            )
+        };
+
+        let compiled = compile_files(
+            "request-with-header-only",
+            &format!(
+                "variables:\n  zone_secret: s3cr3t-of-the-zone\n{}",
+                host("${zone_secret}")
+            ),
+            &[],
+        )
+        .unwrap();
+
+        let headers: Vec<(String, String)> = compiled.hosts["localhost:8001"]
+            .endpoint
+            .request_with_header_only
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect();
+
+        assert_eq!(
+            headers,
+            vec![(
+                "X-Zone-Secret".to_string(),
+                "s3cr3t-of-the-zone".to_string()
+            )]
+        );
+
+        let err = compile_files(
+            "request-with-header-only-no-variable",
+            &host("${zone_secret_which_is_not_there}"),
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("request_with_header_only: the value of 'X-Zone-Secret'"),
+            "{err}"
         );
     }
 

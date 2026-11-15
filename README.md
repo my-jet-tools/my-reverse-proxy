@@ -1452,8 +1452,8 @@ Some access settings can not be applied by a type of endpoint:
 
 | Endpoint type | Can not apply |
 |---|---|
-| `mcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users`, `cloudflare` |
-| `tcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users`, `cloudflare` |
+| `mcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users`, `cloudflare`, `request_with_header_only` |
+| `tcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users`, `cloudflare`, `request_with_header_only` |
 | `http`, `http2` | `google_auth` - it works on `https` and `https2` endpoints |
 
 Settings with one of these load: an endpoint written wrong does not take the others down with it. But the endpoint **serves nobody** until the setting is removed - otherwise it would be open to everybody while its settings say it is guarded.
@@ -1528,6 +1528,28 @@ hosts:
 * Every connection it closes is written to `$HOME/logs/cloudflare-deviations-<date>-<hour>.log`
   (files are kept 24 hours).
 * `mcp` and `tcp` endpoints read no HTTP: with `cloudflare: true` they serve nobody.
+
+### Required headers (`request_with_header_only`)
+
+Every request to the endpoint has to come with these headers, each with exactly this value.
+A request without one of them, with one of them twice or with another value is closed without
+a response and written to the same journal (the header's name, never its value). The headers
+never reach the upstream, and their values are shown as `***` in logs and in `get_settings`.
+
+```yaml
+hosts:
+  api.example.com:443:
+    endpoint:
+      type: https
+      cloudflare: true
+      request_with_header_only:
+      - X-Zone-Secret: ${zone_secret}
+```
+
+Behind Cloudflare it shuts out requests that reach the origin through Cloudflare but not through
+your zone (a Worker of another account can name any `Host`). In the zone add a Transform Rule
+that modifies the request header with **Set static**: `X-Zone-Secret` = the same long random
+string. Keep the value in a variable; variable names are lower_cased.
 
 ## Settings up SSH tunnels.
 

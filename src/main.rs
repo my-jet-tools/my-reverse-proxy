@@ -12,6 +12,7 @@ mod app;
 mod cloudflare;
 mod flows;
 mod forwarded_user;
+mod required_headers;
 //mod http2_executor;
 
 mod configurations;

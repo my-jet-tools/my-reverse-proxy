@@ -13,6 +13,9 @@
 //! On every other endpoint the client is the peer of the connection, and `X-Forwarded-For` is its
 //! address alone - what the client sent under that name, or under any other one which tells who it
 //! is, never reaches the upstream (see [`RequestClient::takes_away_header`]).
+//!
+//! The journal also takes every request closed for a header of `request_with_header_only` (see
+//! [`crate::required_headers`]) - on an endpoint with or without the flag.
 
 mod client;
 pub use client::*;
@@ -30,7 +33,28 @@ use crate::types::ConnectionIp;
 pub fn journal(endpoint: &str, peer: &ConnectionIp, host: Option<&[u8]>, deviation: Deviation) {
     crate::app::APP_CTX
         .cloudflare_deviations
-        .write(endpoint, peer, host, deviation);
+        .write(endpoint, peer, None, host, deviation);
+}
+
+/// Writes `deviation` of a request of `client`, on a connection from `peer`, to the journal - with
+/// the client, when it is not the peer: the address of `CF-Connecting-IP` of a request through
+/// Cloudflare. `host`: what the request named, by its uri or by `Host`.
+pub fn journal_request(
+    endpoint: &str,
+    peer: &ConnectionIp,
+    client: &RequestClient,
+    host: Option<&[u8]>,
+    deviation: Deviation,
+) {
+    let client = if client.is_via_cloudflare() {
+        client.ip.get_ip_addr()
+    } else {
+        None
+    };
+
+    crate::app::APP_CTX
+        .cloudflare_deviations
+        .write(endpoint, peer, client, host, deviation);
 }
 
 /// [`peer_deviation`] against the networks the proxy read, journaled. Whether the connection goes

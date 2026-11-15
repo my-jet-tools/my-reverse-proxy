@@ -17,6 +17,8 @@ mod host_settings;
 pub use host_settings::*;
 mod end_point_settings;
 pub use end_point_settings::*;
+mod request_with_header_only_settings;
+pub use request_with_header_only_settings::*;
 mod location_settings;
 pub use location_settings::*;
 

@@ -287,7 +287,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
     // `CF-Connecting-IP`, on a connection from Cloudflare - anything else closes the connection
     // without a word. On any other endpoint: the peer (and a Cloudflare server which reached it is
     // noted - once, by the request which named the endpoint of a plain-http connection; a TLS
-    // connection was noted at its handshake).
+    // connection was noted at its handshake). Then the headers of `request_with_header_only`.
     let client = {
         let buf = h1_reader.loop_buffer.get_data();
         let host = request_headers
@@ -307,17 +307,29 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             Vec::new()
         };
 
-        crate::cloudflare::client_of_request(
+        let Some(client) = crate::cloudflare::client_of_request(
             end_point_info.as_str(),
             end_point_info.cloudflare,
             peer_ip,
             cf_connecting_ip.into_iter(),
             host,
-        )
-    };
+        ) else {
+            return ReaderStep::Close;
+        };
 
-    let Some(client) = client else {
-        return ReaderStep::Close;
+        // A request without the headers of `request_with_header_only` is taken for a break-in:
+        // it closes the connection without a word as well.
+        if !crate::required_headers::request_may_go_on(
+            &end_point_info,
+            &peer_ip,
+            &client,
+            host,
+            || request_headers.headers_of(buf),
+        ) {
+            return ReaderStep::Close;
+        }
+
+        client
     };
 
     http_connection_info.set_request_client(client);

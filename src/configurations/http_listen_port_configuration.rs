@@ -20,6 +20,15 @@ impl HttpListenPortConfiguration {
         }
     }
 
+    /// Whether the value of a request header named `name` is logged as `***` while it is not
+    /// known which endpoint the request is of: it is a header of `request_with_header_only` of an
+    /// endpoint of the port.
+    pub fn masks_header(&self, name: &[u8]) -> bool {
+        self.endpoints
+            .iter()
+            .any(|endpoint| endpoint.request_with_header_only.covers(name))
+    }
+
     /// Puts the endpoint of a host in place of the one it had, or next to the others. The
     /// endpoints of the names of `additional_hosts` of the one replaced go with it: they are
     /// copies of it, and are put next to the new one anew (`with_additional_hosts`).

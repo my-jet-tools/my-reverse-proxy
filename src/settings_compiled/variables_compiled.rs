@@ -4,17 +4,41 @@ use rust_common::placeholders::*;
 
 use crate::settings::SettingsModel;
 
-#[derive(Debug, Default, Clone)]
+/// The variables of the settings files. A value may be a secret - the value of a header of
+/// `request_with_header_only`, a password -, so none is ever written out: `{:?}` shows the names
+/// alone.
+#[derive(Default, Clone)]
 pub struct VariablesCompiled {
     data: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for VariablesCompiled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut names: Vec<&String> = self.data.keys().collect();
+        names.sort();
+
+        f.debug_map()
+            .entries(
+                names
+                    .into_iter()
+                    .map(|name| (name, crate::required_headers::MASKED)),
+            )
+            .finish()
+    }
+}
+
+/// What is told of a variable a later settings file writes over: its name, the values as `***`.
+fn overriding_message(key: &str) -> String {
+    let masked = crate::required_headers::MASKED;
+    format!("Overriding variable '{masked}' to '{masked}' for key '{key}'")
 }
 
 impl VariablesCompiled {
     pub fn merge(&mut self, settings: &mut SettingsModel) {
         if let Some(variables) = mem::take(&mut settings.variables) {
             for (key, value) in variables {
-                if let Some(old_value) = self.data.get(&key) {
-                    println!("Overriding variable '{old_value}' to '{value}' for key '{key}'");
+                if self.data.contains_key(&key) {
+                    println!("{}", overriding_message(&key));
                 }
                 self.data.insert(key, value);
             }
@@ -110,6 +134,38 @@ fn name_characteristics(src: &str) -> Result<VariableNameType, String> {
 #[cfg(test)]
 mod tests {
     use super::VariablesCompiled;
+
+    /// A value may be a secret: neither the message of a variable written over nor `{:?}` has it.
+    #[test]
+    fn a_value_of_a_variable_is_never_written_out() {
+        let mut variables = VariablesCompiled::default();
+
+        for value in ["first-s3cr3t", "second-s3cr3t"] {
+            let mut settings: crate::settings::SettingsModel =
+                my_settings_reader::serde_yaml::from_str(&format!(
+                    "variables:\n  zone_secret: {value}\n  env: dev\n"
+                ))
+                .unwrap();
+            variables.merge(&mut settings);
+        }
+
+        // The later file wins, as it always has.
+        assert_eq!(
+            variables
+                .apply_variables("${zone_secret}".to_string())
+                .unwrap(),
+            "second-s3cr3t"
+        );
+
+        let message = super::overriding_message("zone_secret");
+        assert_eq!(
+            message,
+            "Overriding variable '***' to '***' for key 'zone_secret'"
+        );
+
+        let debug = format!("{variables:?}");
+        assert_eq!(debug, "{\"env\": \"***\", \"zone_secret\": \"***\"}");
+    }
 
     #[test]
     fn test_variables_in_domain_at_ip_url() {

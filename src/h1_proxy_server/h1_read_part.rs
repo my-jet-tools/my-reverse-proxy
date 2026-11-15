@@ -334,6 +334,10 @@ pub fn compile_head(
     // words, taken away, and the `X-Forwarded-For` written in their place.
     let client = is_request.then(|| http_connection_info.request_client());
     let inject_country_enabled = request_endpoint.map(|e| e.inject_country).unwrap_or(false);
+    // The headers of `request_with_header_only` are the proxy's alone: never sent on.
+    let required_headers = request_endpoint
+        .map(|endpoint| &endpoint.request_with_header_only)
+        .filter(|required| !required.is_empty());
 
     loop {
         let next_pos = data
@@ -375,10 +379,14 @@ pub fn compile_head(
             .as_ref()
             .is_some_and(|client| client.takes_away_header(header_name.as_bytes()));
 
+        let is_required_header =
+            required_headers.is_some_and(|required| required.covers(header_name.as_bytes()));
+
         if !skip_for_dynamic_proxy
             && !has_to_be_removed
             && !is_forwarded_user
             && !tells_who_the_client_is
+            && !is_required_header
         {
             if inject_country_enabled && header_name.eq_ignore_ascii_case("cf-ipcountry") {
                 // drop client-supplied value; we'll write our own below

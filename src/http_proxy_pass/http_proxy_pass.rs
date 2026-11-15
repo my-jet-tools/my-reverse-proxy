@@ -62,7 +62,13 @@ impl HttpProxyPass {
                 endpoint,
                 None,
                 ip.clone(),
-                format!("Request. Uri: [{}] Headers: {:?}", req.uri(), req.headers()),
+                format!(
+                    "Request. Uri: [{}] Headers: {:?}",
+                    req.uri(),
+                    crate::required_headers::HeadersForLog::new(req.headers(), |name| {
+                        self.endpoint_info.request_with_header_only.covers(name)
+                    })
+                ),
             );
         }
 

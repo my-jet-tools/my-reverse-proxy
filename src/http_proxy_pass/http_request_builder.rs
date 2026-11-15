@@ -732,8 +732,13 @@ impl HttpRequestBuilder {
         identity: Option<&HttpProxyPassIdentity>,
     ) {
         // What the client sent to tell who it is goes first: a header the settings add under
-        // such a name (`X-Real-IP: ${ENDPOINT_IP}`) is the proxy's own.
+        // such a name (`X-Real-IP: ${ENDPOINT_IP}`) is the proxy's own. So do the headers of
+        // `request_with_header_only`, which are the proxy's alone.
         take_away_client_ip_headers(&mut self.parts, &self.client);
+        take_away_required_headers(
+            &mut self.parts,
+            &proxy_pass.endpoint_info.request_with_header_only,
+        );
 
         modify_headers(
             inner,
@@ -790,6 +795,28 @@ fn take_away_client_ip_headers(parts: &mut Parts, client: &crate::cloudflare::Re
         .headers
         .keys()
         .filter(|name| client.takes_away_header(name.as_str().as_bytes()))
+        .cloned()
+        .collect();
+
+    for name in sent_by_the_client {
+        parts.headers.remove(name);
+    }
+}
+
+/// Takes away the headers of `request_with_header_only`, in every spelling an upstream could read
+/// as one of them - see [`crate::required_headers::RequiredHeaders::covers`].
+fn take_away_required_headers(
+    parts: &mut Parts,
+    required: &crate::required_headers::RequiredHeaders,
+) {
+    if required.is_empty() {
+        return;
+    }
+
+    let sent_by_the_client: Vec<HeaderName> = parts
+        .headers
+        .keys()
+        .filter(|name| required.covers(name.as_str().as_bytes()))
         .cloned()
         .collect();
 

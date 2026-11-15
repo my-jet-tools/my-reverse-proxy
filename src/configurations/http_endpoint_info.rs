@@ -19,6 +19,10 @@ pub struct HttpEndpointInfo {
     /// `cloudflare: true`: the endpoint takes connections from Cloudflare only, and the client of
     /// each request is its `CF-Connecting-IP`. See [`crate::cloudflare`].
     pub cloudflare: bool,
+    /// `request_with_header_only:` - the headers every request to the endpoint has to come with;
+    /// a request without them closes its connection without a word. See
+    /// [`crate::required_headers`].
+    pub request_with_header_only: crate::required_headers::RequiredHeaders,
     pub listen_endpoint_type: ListenHttpEndpointType,
     pub g_auth: Option<String>,
     /// Name of the `oauth:` block gating this endpoint, when it has one. The
@@ -70,6 +74,7 @@ pub struct HttpEndpointInfoParams {
     pub debug: bool,
     pub inject_country: bool,
     pub cloudflare: bool,
+    pub request_with_header_only: crate::required_headers::RequiredHeaders,
     pub g_auth: Option<String>,
     pub oauth: Option<String>,
     pub ssl_certificate_id: Option<SslCertificateId>,
@@ -98,6 +103,7 @@ impl HttpEndpointInfo {
             debug,
             inject_country,
             cloudflare,
+            request_with_header_only,
             g_auth,
             oauth,
             ssl_certificate_id,
@@ -138,6 +144,7 @@ impl HttpEndpointInfo {
             debug,
             inject_country,
             cloudflare,
+            request_with_header_only,
             listen_endpoint_type,
             g_auth,
             oauth,

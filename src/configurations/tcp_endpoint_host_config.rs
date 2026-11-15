@@ -165,6 +165,10 @@ fn access_settings_a_tcp_endpoint_can_not_apply(
         settings.push("cloudflare");
     }
 
+    if host_settings.endpoint.request_with_header_only.is_some() {
+        settings.push("request_with_header_only");
+    }
+
     Ok(NotServedReason::new(
         host_endpoint.as_str(),
         "tcp",

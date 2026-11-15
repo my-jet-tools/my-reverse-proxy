@@ -1,5 +1,7 @@
 //! The journal of deviations: a line of text for every connection a `cloudflare: true` endpoint
-//! closed, and for every Cloudflare server which reached an endpoint without the flag.
+//! closed, for every request closed for a header of `request_with_header_only` (with the name of
+//! the header - never a value), and for every Cloudflare server which reached an endpoint without
+//! the flag.
 //!
 //! Whoever is turned away decides how many deviations there are and part of what they say, so the
 //! journal is bounded every way: a deviation is put in a queue of [`QUEUE_CAPACITY`] and the
@@ -37,6 +39,8 @@ pub struct DeviationEvent {
     pub at_unix_micros: i64,
     pub endpoint: String,
     pub peer: Option<IpAddr>,
+    /// The client of the request, when it is not the peer: the address of its `CF-Connecting-IP`.
+    pub client: Option<IpAddr>,
     /// Of the request or of the TLS handshake - as the client sent it, made printable.
     pub host: Option<String>,
     pub deviation: Deviation,
@@ -55,10 +59,21 @@ impl DeviationEvent {
             }
         );
 
+        if let Some(client) = self.client {
+            line.push_str(" client=");
+            line.push_str(&client.to_string());
+        }
+
         if let Some(host) = self.host.as_ref() {
             line.push_str(" host=\"");
             line.push_str(host);
             line.push('"');
+        }
+
+        // A name of the settings: a header name, nothing to make printable.
+        if let Some(header) = self.deviation.required_header() {
+            line.push_str(" header=");
+            line.push_str(header);
         }
 
         if let Deviation::InvalidCfConnectingIp(value) = &self.deviation {
@@ -93,6 +108,7 @@ impl DeviationJournal {
         &self,
         endpoint: &str,
         peer: &ConnectionIp,
+        client: Option<IpAddr>,
         host: Option<&[u8]>,
         deviation: Deviation,
     ) {
@@ -101,6 +117,7 @@ impl DeviationJournal {
                 .unix_microseconds,
             endpoint: endpoint.to_string(),
             peer: peer.get_ip_addr(),
+            client,
             host: host.map(printable),
             deviation,
         });
@@ -375,6 +392,7 @@ mod tests {
             at_unix_micros,
             endpoint: "api.example.com:443".to_string(),
             peer: Some("203.0.113.7".parse().unwrap()),
+            client: None,
             host: Some("api.example.com".to_string()),
             deviation,
         }
@@ -428,6 +446,33 @@ mod tests {
             event(AT, Deviation::InvalidCfConnectingIp(printable(b"x\ny"))).to_line(),
             "2026-11-15T14:03:21.512Z endpoint=api.example.com:443 reason=bad_cf_connecting_ip \
              peer=203.0.113.7 host=\"api.example.com\" value=\"x\\x0ay\"\n"
+        );
+    }
+
+    /// A request closed for a header of `request_with_header_only`: the name of the header, and
+    /// the client Cloudflare told, when it came through Cloudflare - never a value.
+    #[test]
+    fn a_line_of_a_required_header_names_it_and_the_client() {
+        let mut through_cloudflare = event(
+            AT,
+            Deviation::WrongRequiredHeader("x-zone-secret".to_string()),
+        );
+        through_cloudflare.client = Some("198.51.100.4".parse().unwrap());
+
+        assert_eq!(
+            through_cloudflare.to_line(),
+            "2026-11-15T14:03:21.512Z endpoint=api.example.com:443 reason=wrong_required_header \
+             peer=203.0.113.7 client=198.51.100.4 host=\"api.example.com\" header=x-zone-secret\n"
+        );
+
+        assert_eq!(
+            event(
+                AT,
+                Deviation::MissingRequiredHeader("x-zone-secret".to_string())
+            )
+            .to_line(),
+            "2026-11-15T14:03:21.512Z endpoint=api.example.com:443 reason=no_required_header \
+             peer=203.0.113.7 host=\"api.example.com\" header=x-zone-secret\n"
         );
     }
 
@@ -531,6 +576,7 @@ mod tests {
             journal.write(
                 "api.example.com:443",
                 &peer,
+                None,
                 None,
                 Deviation::NotCloudflarePeer,
             );

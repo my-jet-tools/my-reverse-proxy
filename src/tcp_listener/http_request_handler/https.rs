@@ -70,7 +70,9 @@ impl HttpsRequestsHandler {
                 format!(
                     "Rejected request: can not detect host. Uri:{}. Headers: {:?}",
                     req.uri(),
-                    req.headers()
+                    crate::required_headers::HeadersForLog::new(req.headers(), |name| {
+                        listen_port_config.masks_header(name)
+                    })
                 ),
             );
             return Err(create_bad_request_response(
@@ -206,7 +208,8 @@ impl HttpsRequestsHandler {
         };
 
         // Who the request is of. A `cloudflare: true` endpoint reached otherwise than through
-        // Cloudflare cuts the connection without a word - every request of it with it.
+        // Cloudflare, or a request without the headers of `request_with_header_only`, cuts the
+        // connection without a word - every request of it with it.
         let Some(client) =
             super::utils::client_of_request(&proxy_pass.endpoint_info, self.connection_ip, &req)
         else {
