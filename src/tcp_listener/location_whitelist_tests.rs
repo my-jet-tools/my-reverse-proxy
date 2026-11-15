@@ -65,6 +65,15 @@ const CLIENT_COUNTRY_IS_NOT_LISTED: &[&str] = &["DE", "USA"];
 /// The loopback's country of the tests, among others - written as a code of three letters too.
 const CLIENT_COUNTRY_IS_LISTED: &[&str] = &["DE", "ukr"];
 
+/// A list with no entry: nobody is let in.
+const EMPTY_LIST: &[&str] = &[];
+
+/// `*` among the entries: everybody is let in - the client being in none of the others.
+const EVERYBODY: &[&str] = &["10.0.0.5", "*"];
+
+/// A country list of `*` and countries the client is not of: everybody is let in.
+const EVERY_COUNTRY: &[&str] = &["DE", "*"];
+
 /// The key the location of `location_api_keys_auth` takes in `X-Api-Key`.
 const LOCATION_TOKEN: &str = "location-secret-key";
 
@@ -173,10 +182,16 @@ struct Setup {
     another_endpoint_uses_the_list: bool,
     /// `whitelisted_ip` of the ENDPOINT: what the list it names holds.
     endpoint_list: Option<&'static [&'static str]>,
+    /// The endpoint names a list which `ip_white_lists` does not declare.
+    endpoint_list_is_not_declared: bool,
     /// `whitelisted_country` of the LOCATION: the countries of the list it names.
     location_countries: Option<&'static [&'static str]>,
+    /// The location names a list which `country_white_lists` does not declare.
+    location_countries_are_not_declared: bool,
     /// `whitelisted_country` of the ENDPOINT: the countries of the list it names.
     endpoint_countries: Option<&'static [&'static str]>,
+    /// The endpoint names a list which `country_white_lists` does not declare.
+    endpoint_countries_are_not_declared: bool,
     /// `api_keys_auth` of the location, with a set of `api_keys:` it names.
     location_api_keys_auth: bool,
     /// `google_auth` of the endpoint.
@@ -279,6 +294,47 @@ const TABLE: &[(Setup, [Option<Expected>; 7])] = &[
              location_countries: Some(CLIENT_COUNTRY_IS_NOT_LISTED), ..NO_SETUP },
         [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
 
+    // --- an empty list, `*`, a list which is not declared -------------------------------------
+    //
+    // An empty list lets nobody in, and so does a list which is not declared - the host loads
+    // all the same. `*` among the entries lets everybody in.
+    (Setup { name: "LOCATION whitelisted_ip, the list is empty",
+             location_list: Some(EMPTY_LIST), ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "LOCATION whitelisted_ip, the list is not declared",
+             location_list_is_not_declared: true, ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "LOCATION whitelisted_ip, * among the entries",
+             location_list: Some(EVERYBODY), ..NO_SETUP },
+        [SERVED, SERVED, SERVED, SERVED, SERVED, SERVED, SERVED]),
+    (Setup { name: "ENDPOINT whitelisted_ip, the list is empty",
+             endpoint_list: Some(EMPTY_LIST), ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "ENDPOINT whitelisted_ip, the list is not declared",
+             endpoint_list_is_not_declared: true, ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "ENDPOINT whitelisted_ip, * among the entries",
+             endpoint_list: Some(EVERYBODY), ..NO_SETUP },
+        [SERVED, SERVED, SERVED, SERVED, SERVED, SERVED, SERVED]),
+    (Setup { name: "LOCATION whitelisted_country, the list is empty",
+             location_countries: Some(EMPTY_LIST), ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "LOCATION whitelisted_country, the list is not declared",
+             location_countries_are_not_declared: true, ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "LOCATION whitelisted_country, * among the entries",
+             location_countries: Some(EVERY_COUNTRY), ..NO_SETUP },
+        [SERVED, SERVED, SERVED, SERVED, SERVED, SERVED, SERVED]),
+    (Setup { name: "ENDPOINT whitelisted_country, the list is empty",
+             endpoint_countries: Some(EMPTY_LIST), ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "ENDPOINT whitelisted_country, the list is not declared",
+             endpoint_countries_are_not_declared: true, ..NO_SETUP },
+        [REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED, REFUSED]),
+    (Setup { name: "ENDPOINT whitelisted_country, * among the entries",
+             endpoint_countries: Some(EVERY_COUNTRY), ..NO_SETUP },
+        [SERVED, SERVED, SERVED, SERVED, SERVED, SERVED, SERVED]),
+
     // --- the other access settings -----------------------------------------------------------
     //
     // `mcp` and `tcp` forward bytes: they read no request, so they can check neither a header
@@ -304,77 +360,74 @@ const NO_SETUP: Setup = Setup {
     location_list_is_not_declared: false,
     another_endpoint_uses_the_list: false,
     endpoint_list: None,
+    endpoint_list_is_not_declared: false,
     location_countries: None,
+    location_countries_are_not_declared: false,
     endpoint_countries: None,
+    endpoint_countries_are_not_declared: false,
     location_api_keys_auth: false,
     endpoint_google_auth: false,
     endpoint_allowed_users: false,
     request_is_authorized: false,
 };
 
-/// A list a location names has to be declared, as one an endpoint names has to be.
+/// A country list with a code which is not a country does not load: a typo must not quietly
+/// keep a country out. (A list which is not declared loads, and lets nobody in: see [`TABLE`].)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_location_whitelist_which_is_not_declared_does_not_compile() {
-    for endpoint in [
-        Endpoint::Http,
-        Endpoint::Https,
-        Endpoint::Http2,
-        Endpoint::Https2OverH2,
-        Endpoint::Mcp,
-    ] {
-        let setup = Setup {
-            location_list_is_not_declared: true,
-            ..NO_SETUP
-        };
-
-        let yaml = settings_yaml(endpoint, &setup, free_port().await, free_port().await, 1);
-
-        let err = try_apply_settings(&yaml)
-            .await
-            .expect_err("the settings compile");
-
-        assert!(
-            err.contains("Ip list with id") && err.contains("not found"),
-            "{err}"
-        );
-    }
-}
-
-/// A country list an endpoint or a location names has to be declared, and has to name
-/// countries: such a host does not load, rather than serve everybody or nobody.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_country_list_which_is_not_declared_or_not_of_countries_does_not_compile() {
+async fn a_country_list_with_a_code_which_is_not_a_country_does_not_compile() {
     for endpoint in [Endpoint::Http, Endpoint::Https2OverH2, Endpoint::Tcp] {
         let port = free_port().await;
         let proxy_pass_to = endpoint.proxy_pass_to(free_port().await);
         let endpoint_type = endpoint.type_name();
-        let host = format!(
-            "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {endpoint_type}\n"
+
+        let yaml = format!(
+            "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {endpoint_type}\n      whitelisted_country: typo\n    locations:\n    - proxy_pass_to: {proxy_pass_to}\ncountry_white_lists:\n  typo:\n  - UA\n  - XX\n"
         );
 
-        let cases = [
-            (
-                format!("{host}      whitelisted_country: nowhere\n    locations:\n    - proxy_pass_to: {proxy_pass_to}\n"),
-                "whitelisted_country: 'nowhere' is not in country_white_lists",
-            ),
-            (
-                format!("{host}    locations:\n    - proxy_pass_to: {proxy_pass_to}\n      whitelisted_country: nowhere\n"),
-                "whitelisted_country: 'nowhere' is not in country_white_lists",
-            ),
-            (
-                format!("{host}      whitelisted_country: typo\n    locations:\n    - proxy_pass_to: {proxy_pass_to}\ncountry_white_lists:\n  typo:\n  - UA\n  - XX\n"),
-                "country_white_lists.typo: 'XX' is not a country code",
-            ),
-        ];
+        let err = try_apply_settings(&yaml)
+            .await
+            .expect_err(&format!("the settings compile:\n{yaml}"));
 
-        for (yaml, expected) in cases {
-            let err = try_apply_settings(&yaml)
-                .await
-                .expect_err(&format!("the settings compile:\n{yaml}"));
-
-            assert!(err.contains(expected), "{endpoint_type}: {err}\n{yaml}");
-        }
+        assert!(
+            err.contains("country_white_lists.typo: 'XX' is not a country code"),
+            "{endpoint_type}: {err}\n{yaml}"
+        );
     }
+}
+
+/// A list which was declared, and is not any more after a reload, lets nobody in: what it held
+/// does not stay in the live configuration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_list_taken_out_of_the_settings_lets_nobody_in_any_more() {
+    let port = free_port().await;
+    let list_id = unique_id("taken_out");
+    let host_header = format!("localhost:{port}");
+
+    // Each step with an upstream of its own: what one counts is of that step alone.
+    let host = |upstream_port: u16| {
+        format!(
+            "hosts:\n  localhost:{port}:\n    endpoint:\n      type: http\n      whitelisted_ip: {list_id}\n    locations:\n    - proxy_pass_to: http://127.0.0.1:{upstream_port}\n"
+        )
+    };
+
+    let upstream = Upstream::start().await;
+    apply_settings(&format!(
+        "{}ip_white_lists:\n  {list_id}:\n  - \"127.0.0.1\"\n",
+        host(upstream.port)
+    ))
+    .await;
+    serve(port);
+
+    let reply = send(Client::PlainHttp1, port, "localhost", &host_header, &[]).await;
+    let outcome = Outcome::new(reply, &upstream).await;
+    assert!(outcome.served(), "declared: {}", outcome.verdict());
+
+    let upstream = Upstream::start().await;
+    apply_settings(&host(upstream.port)).await;
+
+    let reply = send(Client::PlainHttp1, port, "localhost", &host_header, &[]).await;
+    let outcome = Outcome::new(reply, &upstream).await;
+    assert!(outcome.refused(), "taken out: {}", outcome.verdict());
 }
 
 /// Probes every cell of [`TABLE`], prints what happened and then compares.
@@ -1551,7 +1604,7 @@ fn settings_yaml(
 
     if let Some(list) = setup.location_list {
         location_lines.push_str(&format!("      whitelisted_ip: {location_list_id}\n"));
-        ip_white_lists.push_str(&format!("  {location_list_id}:\n{}", yaml_list(list)));
+        ip_white_lists.push_str(&format!("  {location_list_id}:{}", yaml_list_value(list)));
 
         if setup.another_endpoint_uses_the_list {
             other_hosts.push_str(&format!(
@@ -1566,19 +1619,31 @@ fn settings_yaml(
 
     if let Some(list) = setup.endpoint_list {
         endpoint_lines.push_str(&format!("      whitelisted_ip: {endpoint_list_id}\n"));
-        ip_white_lists.push_str(&format!("  {endpoint_list_id}:\n{}", yaml_list(list)));
+        ip_white_lists.push_str(&format!("  {endpoint_list_id}:{}", yaml_list_value(list)));
+    }
+
+    if setup.endpoint_list_is_not_declared {
+        endpoint_lines.push_str(&format!("      whitelisted_ip: {endpoint_list_id}\n"));
     }
 
     if let Some(countries) = setup.location_countries {
         let list_id = format!("{id}_location_countries");
         location_lines.push_str(&format!("      whitelisted_country: {list_id}\n"));
-        country_white_lists.push_str(&format!("  {list_id}:\n{}", yaml_list(countries)));
+        country_white_lists.push_str(&format!("  {list_id}:{}", yaml_list_value(countries)));
+    }
+
+    if setup.location_countries_are_not_declared {
+        location_lines.push_str(&format!("      whitelisted_country: {id}_location_countries\n"));
     }
 
     if let Some(countries) = setup.endpoint_countries {
         let list_id = format!("{id}_endpoint_countries");
         endpoint_lines.push_str(&format!("      whitelisted_country: {list_id}\n"));
-        country_white_lists.push_str(&format!("  {list_id}:\n{}", yaml_list(countries)));
+        country_white_lists.push_str(&format!("  {list_id}:{}", yaml_list_value(countries)));
+    }
+
+    if setup.endpoint_countries_are_not_declared {
+        endpoint_lines.push_str(&format!("      whitelisted_country: {id}_endpoint_countries\n"));
     }
 
     if setup.location_api_keys_auth {
@@ -1614,6 +1679,16 @@ fn settings_yaml(
         "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {endpoint_type}\n{endpoint_lines}    locations:\n    - proxy_pass_to: {proxy_pass_to}\n{location_lines}{other_hosts}{sections}",
         endpoint_type = endpoint.type_name(),
     )
+}
+
+/// The value of a key holding the list: on the lines after the key - or `[]` on its line, when
+/// there are no items (a key with nothing under it is `null`, not a list).
+fn yaml_list_value(items: &[&str]) -> String {
+    if items.is_empty() {
+        " []\n".to_string()
+    } else {
+        format!("\n{}", yaml_list(items))
+    }
 }
 
 fn yaml_list(items: &[&str]) -> String {

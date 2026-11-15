@@ -1798,6 +1798,19 @@ hosts:
       whitelisted_ip: id_of_ip_list 
 ```
 
+* `"*"` among the entries lets every address in.
+* A list with no entry (`id_of_ip_list: []`) lets nobody in.
+* A `whitelisted_ip` naming a list which `ip_white_lists` does not declare lets nobody in as well.
+  The host loads all the same; the proxy prints that the list is not declared. A list taken out
+  of the settings stops letting in whom it let in at the next reload.
+
+```yaml
+ip_white_lists:
+  everybody:
+    - "*"
+  nobody: []
+```
+
 
 ## Country whitelisting
 
@@ -1828,14 +1841,21 @@ country_white_lists:
 ```
 
 * A country is the ISO 3166 code of two letters (`UA`) or of three (`UKR`), in any letter case.
-  A code which is not a country, a list with no country, or a `whitelisted_country` naming a list
-  which is not declared - the host does not load, and says why.
+  A code which is not a country - the host does not load, and says why: a typo must not quietly
+  keep a country out.
+* `"*"` among the entries lets every client in, whatever its country - and with no country at
+  all.
+* A list with no entry (`[]`) lets nobody in, and so does a `whitelisted_country` naming a list
+  which `country_white_lists` does not declare: the host loads, and the proxy prints that the list
+  is not declared.
 * The country of a client is looked up by the address of its connection, in the country
   database the proxy carries (the same one `inject_country` uses: IPv4 built in, IPv6 from
   `ip_v6/` next to the binary). An address it has no country for - a private one (`10.x`,
   `172.16-31.x`, `192.168.x`), the loopback, one it does not know - is in no list: such a client
-  is refused by every country list. A client which comes through another proxy or a NAT has the
-  country of that proxy's address.
+  is refused by every country list but `"*"`. A client which comes through another proxy or a NAT
+  has the country of that proxy's address - except on a `cloudflare: true` endpoint, where the
+  client is the address of `CF-Connecting-IP` (see
+  [Behind Cloudflare](#behind-cloudflare-cloudflare-true)).
 * `whitelisted_country` can be set on the endpoint, on an endpoint template, and on a location.
   A location's list applies on top of its endpoint's: a client has to be in both.
 * With `whitelisted_ip` and `whitelisted_country` both set, a client has to pass both: adding a

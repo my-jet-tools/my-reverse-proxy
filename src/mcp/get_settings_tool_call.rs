@@ -197,12 +197,12 @@ pub struct CountryWhiteListSummary {
     pub id: String,
 
     #[property(
-        description = "The countries of the list as ISO 3166 codes of two letters, sorted - what a client's country (by its IP) is compared with. Empty when the list does not compile"
+        description = "The countries of the list as ISO 3166 codes of two letters, sorted - what a client's country (by its IP) is compared with. [\"*\"]: every client is let in. Empty: nobody is let in (or the list does not compile - see error)"
     )]
     pub countries: Vec<String>,
 
     #[property(
-        description = "Why the list does not compile (a code which is not a country, no country at all); empty if it does. A host naming such a list does not load"
+        description = "Why the list does not compile (a code which is not a country); empty if it does. A host naming such a list does not load"
     )]
     pub error: String,
 }
@@ -513,7 +513,7 @@ fn summarize_country_white_lists(settings: &SettingsCompiled) -> Vec<CountryWhit
 
             match compiled {
                 Ok(list) => CountryWhiteListSummary {
-                    countries: list.countries().map(|code| code.to_string()).collect(),
+                    countries: list.countries().into_iter().map(String::from).collect(),
                     error: String::new(),
                     id,
                 },

@@ -3,26 +3,44 @@ use std::net::IpAddr;
 /// A list of `country_white_lists`: the countries a client may come from. The country of a client
 /// is the one the country database of [`crate::ip_db`] gives for the address of its connection -
 /// an address it has no country for (a private one, the loopback, one it does not know) is in no
-/// list, and is refused by every one.
+/// list but `*`.
 #[derive(Debug)]
 pub struct CountryWhiteList {
     id: String,
+    rule: Rule,
+}
+
+#[derive(Debug)]
+enum Rule {
+    /// `*` is one of the entries: every client, whatever its country - or none.
+    Everybody,
     /// ISO 3166 codes of two letters, upper case - as `ip_db` gives them. Sorted, no repeats.
-    countries: Vec<[u8; 2]>,
+    /// Empty: nobody.
+    Countries(Vec<[u8; 2]>),
+    /// The settings do not declare the list: nobody.
+    NotDeclared,
 }
 
 impl CountryWhiteList {
     /// `countries`: as written in the settings - codes of two letters (`UA`) or of three (`UKR`),
-    /// any letter case. A code which is not a country refuses the list, and so does a list with
-    /// no country at all: it would let nobody in, which is not what anybody writes it for.
+    /// any letter case, or `*` for every client. A list with no entry lets nobody in. A code which
+    /// is not a country refuses the list: a typo must not quietly keep a country out.
     pub fn new(id: &str, countries: &[String]) -> Result<Self, String> {
         let mut codes = Vec::with_capacity(countries.len());
+        let mut everybody = false;
 
         for country in countries {
-            let code = rust_common::country_code::CountryCode::parse(country.trim()).map_err(|_| {
+            let country = country.trim();
+
+            if country == super::WHITE_LIST_EVERYBODY {
+                everybody = true;
+                continue;
+            }
+
+            let code = rust_common::country_code::CountryCode::parse(country).map_err(|_| {
                 format!(
                     "country_white_lists.{id}: '{country}' is not a country code. Write the ISO \
-                     3166 code of two letters (UA) or of three (UKR)"
+                     3166 code of two letters (UA) or of three (UKR), or * for every client"
                 )
             })?;
 
@@ -30,39 +48,65 @@ impl CountryWhiteList {
             codes.push([iso2[0], iso2[1]]);
         }
 
-        if codes.is_empty() {
-            return Err(format!(
-                "country_white_lists.{id} names no country: it would let nobody in"
-            ));
-        }
-
-        codes.sort_unstable();
-        codes.dedup();
+        let rule = if everybody {
+            Rule::Everybody
+        } else {
+            codes.sort_unstable();
+            codes.dedup();
+            Rule::Countries(codes)
+        };
 
         Ok(Self {
             id: id.to_string(),
-            countries: codes,
+            rule,
         })
     }
 
-    /// The codes of two letters, sorted.
-    pub fn countries(&self) -> impl Iterator<Item = &str> {
-        self.countries
-            .iter()
-            .map(|code| std::str::from_utf8(code).unwrap_or_default())
+    /// The list a `whitelisted_country` names and the settings do not declare: it lets nobody in.
+    pub fn not_declared(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            rule: Rule::NotDeclared,
+        }
+    }
+
+    /// The codes of two letters, sorted - or `*` alone. Nothing for a list which lets nobody in.
+    pub fn countries(&self) -> Vec<&str> {
+        match &self.rule {
+            Rule::Everybody => vec![super::WHITE_LIST_EVERYBODY],
+            Rule::Countries(codes) => codes
+                .iter()
+                .map(|code| std::str::from_utf8(code).unwrap_or_default())
+                .collect(),
+            Rule::NotDeclared => Vec::new(),
+        }
     }
 
     pub fn allows(&self, ip: IpAddr) -> bool {
-        match country_of(ip) {
-            Some(country) => self.countries.binary_search(&country).is_ok(),
-            None => false,
-        }
+        self.refusal(ip).is_none()
     }
 
     /// Why the client at `ip` is refused, for a log - `None`: it is not.
     pub fn refusal(&self, ip: IpAddr) -> Option<String> {
+        let codes = match &self.rule {
+            Rule::Everybody => return None,
+            Rule::NotDeclared => {
+                return Some(format!(
+                    "country list '{}' is not in country_white_lists, so nobody is let in",
+                    self.id
+                ));
+            }
+            Rule::Countries(codes) if codes.is_empty() => {
+                return Some(format!(
+                    "country list '{}' is empty, so nobody is let in",
+                    self.id
+                ));
+            }
+            Rule::Countries(codes) => codes,
+        };
+
         match country_of(ip) {
-            Some(country) if self.countries.binary_search(&country).is_ok() => None,
+            Some(country) if codes.binary_search(&country).is_ok() => None,
             Some(country) => Some(format!(
                 "client country {} is not in country list '{}'",
                 std::str::from_utf8(&country).unwrap_or_default(),
@@ -113,7 +157,7 @@ mod tests {
     fn a_code_of_two_letters_or_of_three_in_any_case_is_the_same_country() {
         let list = list(&["ua", "UKR", "Us", " DE "]).unwrap();
 
-        assert_eq!(list.countries().collect::<Vec<_>>(), ["DE", "UA", "US"]);
+        assert_eq!(list.countries(), ["DE", "UA", "US"]);
     }
 
     #[test]
@@ -125,10 +169,43 @@ mod tests {
     }
 
     #[test]
-    fn a_list_with_no_country_is_refused() {
-        let err = list(&[]).unwrap_err();
+    fn an_empty_list_lets_nobody_in() {
+        let list = list(&[]).unwrap();
 
-        assert!(err.contains("names no country"), "{err}");
+        assert!(!list.allows(GOOGLE_DNS));
+        assert_eq!(
+            list.refusal(GOOGLE_DNS).unwrap(),
+            "country list 'the_list' is empty, so nobody is let in"
+        );
+        assert!(list.countries().is_empty());
+    }
+
+    #[test]
+    fn a_list_which_is_not_declared_lets_nobody_in() {
+        let list = CountryWhiteList::not_declared("nowhere");
+
+        assert!(!list.allows(GOOGLE_DNS));
+        assert_eq!(
+            list.refusal(GOOGLE_DNS).unwrap(),
+            "country list 'nowhere' is not in country_white_lists, so nobody is let in"
+        );
+    }
+
+    /// Whatever the country - and with no country at all.
+    #[test]
+    fn a_star_among_the_entries_lets_everybody_in() {
+        let list = list(&["DE", "*"]).unwrap();
+
+        for ip in [
+            GOOGLE_DNS,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+            IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)),
+            "2001:4860:4860::8888".parse().unwrap(),
+        ] {
+            assert!(list.allows(ip), "{ip}");
+        }
+
+        assert_eq!(list.countries(), ["*"]);
     }
 
     #[test]

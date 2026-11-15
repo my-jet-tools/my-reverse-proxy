@@ -56,7 +56,8 @@ impl GatewayServerSettings {
     /// `allowed_ip` as a whitelist, `None` when it is not set. Entries are IPv4 addresses or
     /// `from-to` ranges, the same as in `ip_white_lists`; an empty list restricts nothing.
     pub fn get_allowed_ip_list(&self) -> Result<Option<WhiteListedIpList>, String> {
-        let Some(items) = self.allowed_ip.as_ref() else {
+        // Unlike a list of `ip_white_lists`, which lets nobody in when it is empty.
+        let Some(items) = self.allowed_ip.as_ref().filter(|items| !items.is_empty()) else {
             return Ok(None);
         };
 

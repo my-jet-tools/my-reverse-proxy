@@ -20,6 +20,12 @@ impl WhiteListedIpListConfigurations {
         self.data.insert(id, Arc::new(white_list_ip));
     }
 
+    /// The list is not declared any more: what it held before must not go on letting anybody in.
+    pub fn remove(&mut self, id: &str) {
+        self.data.remove(id);
+    }
+
+    /// A list which is not here - not declared in the settings - lets nobody in.
     pub fn is_white_listed(&self, id: &str, ip: &impl IntoIp) -> bool {
         if let Some(white_list) = self.data.get(id) {
             return white_list.is_whitelisted(ip);

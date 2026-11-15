@@ -2,16 +2,15 @@ use std::sync::Arc;
 
 use crate::{settings::*, settings_compiled::SettingsCompiled, types::CountryWhiteList};
 
-/// The list of `country_white_lists` a `whitelisted_country` names. It has to be declared, as a
-/// list of `ip_white_lists` has to be - a host which names one that is not does not load.
+/// The list of `country_white_lists` a `whitelisted_country` names. One the settings do not
+/// declare lets nobody in - the host loads all the same, as with a list of `ip_white_lists`.
 pub fn get_country_white_list(
     settings_model: &SettingsCompiled,
     id: &str,
 ) -> Result<Arc<CountryWhiteList>, String> {
     let Some(countries) = settings_model.country_white_lists.get(id) else {
-        return Err(format!(
-            "whitelisted_country: '{id}' is not in country_white_lists"
-        ));
+        println!("whitelisted_country: '{id}' is not in country_white_lists - nobody is let in by it");
+        return Ok(Arc::new(CountryWhiteList::not_declared(id)));
     };
 
     Ok(Arc::new(CountryWhiteList::new(id, countries)?))
