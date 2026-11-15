@@ -287,9 +287,13 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
 }
 
 /// Writes `head` - parsed, in the buffer it was parsed from - to `out` the way it goes on: with
-/// the `modify_http_headers` of `kind` applied, `X-Forwarded-For` and `CF-IPCountry` on a request,
-/// `Connection: close` and HSTS on a response. Returns whether the head asks for a websocket
-/// upgrade.
+/// the `modify_http_headers` of `kind` applied, `X-Forwarded-For`, `CF-IPCountry` and
+/// `X-Forwarded-User` (of `identity`) on a request, `Connection: close` and HSTS on a response.
+/// Returns whether the head asks for a websocket upgrade.
+///
+/// The headers of a request which tell who its client is are the proxy's word: what the client
+/// sent under such a name is taken away, and `X-Forwarded-For` is written anew for the client of
+/// the request (see [`crate::cloudflare::RequestClient`]).
 ///
 /// The head of an h1 upstream's response is compiled where it was read - in the loop buffer of
 /// its reader. The head of an h2 upstream's response is first written as h1 and compiled from
@@ -326,13 +330,10 @@ pub fn compile_head(
     let mut pos = http_headers.first_line_end + crate::consts::HTTP_CR_LF.len();
 
     let is_request = request_endpoint.is_some();
-    let client_ip = if is_request {
-        http_connection_info.connection_ip.get_ip_addr()
-    } else {
-        None
-    };
+    // Who the request is of - and with it which of the headers telling so are the client's own
+    // words, taken away, and the `X-Forwarded-For` written in their place.
+    let client = is_request.then(|| http_connection_info.request_client());
     let inject_country_enabled = request_endpoint.map(|e| e.inject_country).unwrap_or(false);
-    let mut xff_written = false;
 
     loop {
         let next_pos = data
@@ -366,20 +367,20 @@ pub fn compile_head(
             .iter()
             .any(|rules| rules.has_to_be_removed(header_name));
 
-        if !skip_for_dynamic_proxy && !has_to_be_removed {
-            if header_name.eq_ignore_ascii_case("x-forwarded-for") {
-                if let Some(ip) = client_ip {
-                    let value_bytes = &header[header_name_end_pos + 1..];
-                    let value_str = std::str::from_utf8(value_bytes).unwrap_or("").trim();
-                    let new_value = format!("{},{}", value_str, ip);
-                    out.push_header("X-Forwarded-For", &new_value);
-                    xff_written = true;
-                } else {
-                    out.push_raw_payload(header);
-                    out.push_raw_payload(crate::consts::HTTP_CR_LF);
-                    xff_written = true;
-                }
-            } else if inject_country_enabled && header_name.eq_ignore_ascii_case("cf-ipcountry") {
+        // Who the request is of is the proxy's word, written below - never the client's.
+        let is_forwarded_user =
+            is_request && crate::forwarded_user::is_header_name(header_name.as_bytes());
+
+        let tells_who_the_client_is = client
+            .as_ref()
+            .is_some_and(|client| client.takes_away_header(header_name.as_bytes()));
+
+        if !skip_for_dynamic_proxy
+            && !has_to_be_removed
+            && !is_forwarded_user
+            && !tells_who_the_client_is
+        {
+            if inject_country_enabled && header_name.eq_ignore_ascii_case("cf-ipcountry") {
                 // drop client-supplied value; we'll write our own below
             } else {
                 out.push_raw_payload(header);
@@ -390,10 +391,8 @@ pub fn compile_head(
         pos = next_pos + crate::consts::HTTP_CR_LF.len();
     }
 
-    if !xff_written {
-        if let Some(ip) = client_ip {
-            out.push_header("X-Forwarded-For", &ip.to_string());
-        }
+    if let Some(x_forwarded_for) = client.and_then(|client| client.x_forwarded_for()) {
+        out.push_header("X-Forwarded-For", &x_forwarded_for);
     }
 
     if inject_country_enabled {
@@ -402,6 +401,12 @@ pub fn compile_head(
                 let code_str = std::str::from_utf8(&code).unwrap();
                 out.push_header("CF-IPCountry", code_str);
             }
+        }
+    }
+
+    if is_request {
+        if let Some(user) = identity.as_ref().and_then(crate::forwarded_user::value_of) {
+            out.push_header(crate::forwarded_user::HEADER, user);
         }
     }
 

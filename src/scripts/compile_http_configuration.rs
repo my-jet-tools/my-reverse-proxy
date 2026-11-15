@@ -198,6 +198,7 @@ pub async fn compile_http_configuration(
         listen_endpoint_type: http_type,
         debug: host_settings.endpoint.get_debug(),
         inject_country: host_settings.endpoint.get_inject_country(),
+        cloudflare: host_settings.endpoint.get_cloudflare(),
         g_auth,
         oauth,
         ssl_certificate_id: ssl_cert_id,
@@ -270,8 +271,9 @@ fn strip_path_has_no_meaning(
 ///
 /// - `type: mcp` is a TLS termination and a byte bridge to the first location. It parses no
 ///   HTTP, so it can check neither a header nor a session: `api_keys_auth` (of the endpoint or of
-///   a location), `google_auth` and `allowed_users`. (`whitelisted_ip` it can check, and does -
-///   by the address of the connection.)
+///   a location), `google_auth` and `allowed_users` - nor read the client of a request through
+///   Cloudflare (`cloudflare`). (`whitelisted_ip` it can check, and does - by the address of the
+///   connection.)
 /// - `google_auth` is resolved for `https` and `https2` endpoints only: on `http` and `http2`
 ///   it is not there, and the endpoint would serve everybody.
 fn access_settings_the_endpoint_can_not_apply(
@@ -296,6 +298,12 @@ fn access_settings_the_endpoint_can_not_apply(
 
             if has_allowed_users {
                 settings.push("allowed_users");
+            }
+
+            // The client of a request through Cloudflare is in its `CF-Connecting-IP`, and the
+            // bridge reads no header: the allow-lists would be checked against Cloudflare.
+            if host_settings.endpoint.get_cloudflare() {
+                settings.push("cloudflare");
             }
 
             NotServedReason::new(

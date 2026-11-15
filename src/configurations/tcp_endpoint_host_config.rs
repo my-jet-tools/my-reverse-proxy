@@ -160,6 +160,11 @@ fn access_settings_a_tcp_endpoint_can_not_apply(
         settings.push("allowed_users");
     }
 
+    // Cloudflare proxies HTTP: the client of a request through it is told in a header.
+    if host_settings.endpoint.get_cloudflare() {
+        settings.push("cloudflare");
+    }
+
     Ok(NotServedReason::new(
         host_endpoint.as_str(),
         "tcp",

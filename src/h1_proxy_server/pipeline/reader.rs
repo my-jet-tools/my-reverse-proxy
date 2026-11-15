@@ -193,6 +193,11 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         Err(_) => return ReaderStep::Close,
     };
 
+    // Until the endpoint of this request tells otherwise, the request is of the peer - not of
+    // the client of the request before it.
+    let peer_ip = http_connection_info.peer_ip;
+    http_connection_info.set_request_client(crate::cloudflare::RequestClient::direct(peer_ip));
+
     let request_host_for_metric: Option<String> =
         request_headers.host_value.as_ref().and_then(|host_pos| {
             let buf = h1_reader.loop_buffer.get_data();
@@ -226,6 +231,10 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             },
         };
 
+    // The connection got its first endpoint with this request: a plain-http one, which had no
+    // TLS handshake to tell the endpoint by.
+    let mut first_endpoint_of_connection = false;
+
     if needs_endpoint_resolve {
         let was_none = http_connection_info.endpoint_info.is_none();
         // Only relevant on the reload path: a request with no `Host` keeps the
@@ -243,7 +252,8 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             accepted_server_name.as_deref(),
         );
         if was_none && http_connection_info.endpoint_info.is_some() {
-            if let Some(ip) = http_connection_info.connection_ip.get_ip_addr() {
+            first_endpoint_of_connection = true;
+            if let Some(ip) = peer_ip.get_ip_addr() {
                 crate::app::APP_CTX.ip_blocklist.register_success(&ip);
             }
         }
@@ -272,6 +282,45 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         )
         .await;
     };
+
+    // Who the request is of. On a `cloudflare: true` endpoint: the address of its one
+    // `CF-Connecting-IP`, on a connection from Cloudflare - anything else closes the connection
+    // without a word. On any other endpoint: the peer (and a Cloudflare server which reached it is
+    // noted - once, by the request which named the endpoint of a plain-http connection; a TLS
+    // connection was noted at its handshake).
+    let client = {
+        let buf = h1_reader.loop_buffer.get_data();
+        let host = request_headers
+            .host_value
+            .as_ref()
+            .filter(|host| host.end <= buf.len())
+            .map(|host| &buf[host.start..host.end]);
+
+        if first_endpoint_of_connection && !end_point_info.cloudflare {
+            crate::cloudflare::connection_may_go_on(end_point_info.as_str(), false, &peer_ip, host);
+        }
+
+        // Read only where it is the client: no other endpoint looks at it.
+        let cf_connecting_ip = if end_point_info.cloudflare {
+            request_headers.header_values_read_as(buf, crate::cloudflare::CF_CONNECTING_IP)
+        } else {
+            Vec::new()
+        };
+
+        crate::cloudflare::client_of_request(
+            end_point_info.as_str(),
+            end_point_info.cloudflare,
+            peer_ip,
+            cf_connecting_ip.into_iter(),
+            host,
+        )
+    };
+
+    let Some(client) = client else {
+        return ReaderStep::Close;
+    };
+
+    http_connection_info.set_request_client(client);
 
     h1_reader.timeouts = end_point_info.timeouts;
     let write_timeout = end_point_info.timeouts.write_timeout;

@@ -8,7 +8,9 @@ use hyper_tungstenite::{tungstenite::http::request::Parts, HyperWebsocket};
 
 use crate::{configurations::*, types::*};
 
-use super::{HttpProxyPass, HttpProxyPassInner, ProxyPassError, ProxyPassLocation};
+use super::{
+    HttpProxyPass, HttpProxyPassIdentity, HttpProxyPassInner, ProxyPassError, ProxyPassLocation,
+};
 
 pub enum WebSocketUpgrade {
     H1 {
@@ -73,6 +75,9 @@ impl BuiltBody {
 pub struct HttpRequestBuilder {
     pub parts: Parts,
     body: Incoming,
+    /// Who the request is of: its `X-Forwarded-For`, `CF-IPCountry` and `${ENDPOINT_IP}`, and
+    /// the address its log lines are written with.
+    client: crate::cloudflare::RequestClient,
     /// How long the client may go silent while it sends a body the proxy holds whole before it
     /// sends it on: the endpoint's `read_timeout`, set by [`Self::into_request`].
     body_idle_timeout: std::time::Duration,
@@ -176,12 +181,16 @@ fn apply_upstream_path(uri: &mut Uri, upstream_path: &str, location_id: &str) {
 }
 
 impl HttpRequestBuilder {
-    pub fn new(src: hyper::Request<hyper::body::Incoming>) -> Self {
+    pub fn new(
+        src: hyper::Request<hyper::body::Incoming>,
+        client: crate::cloudflare::RequestClient,
+    ) -> Self {
         let (parts, body) = src.into_parts();
 
         Self {
             parts,
             body,
+            client,
             body_idle_timeout: crate::consts::DEFAULT_READ_TIMEOUT,
         }
     }
@@ -218,12 +227,8 @@ impl HttpRequestBuilder {
         //let location_index = inner.locations.find_location_index(self.uri())?;
 
         let dest_http1 = location.is_http1();
-        // Client source IP for log attribution (every endpoint/location event
-        // is initiated by a TCP connection, so the IP is available via inner).
-        let ip = proxy_pass
-            .inner
-            .load_full()
-            .and_then(|inner| inner.connection_ip.get_ip_log());
+        // The client's address for log attribution.
+        let ip = self.client.ip.get_ip_log();
 
         if is_h2_websocket_connect(&self.parts) {
             if matches!(dest_http1, Some(true)) {
@@ -718,54 +723,104 @@ impl HttpRequestBuilder {
         Ok((parts, body))
     }
 
+    /// `identity`: who the request is of.
     pub fn process_headers(
         &mut self,
         proxy_pass: &HttpProxyPass,
         inner: &HttpProxyPassInner,
         location: &ProxyPassLocation,
+        identity: Option<&HttpProxyPassIdentity>,
     ) {
+        // What the client sent to tell who it is goes first: a header the settings add under
+        // such a name (`X-Real-IP: ${ENDPOINT_IP}`) is the proxy's own.
+        take_away_client_ip_headers(&mut self.parts, &self.client);
+
         modify_headers(
             inner,
             &mut self.parts,
             &location.config.modify_request_headers,
+            identity,
+            &self.client.ip,
         );
 
         modify_headers(
             inner,
             &mut self.parts,
             &proxy_pass.endpoint_info.modify_request_headers,
+            identity,
+            &self.client.ip,
         );
 
-        apply_auto_x_forwarded_for(&mut self.parts, inner);
-        apply_cf_ip_country(&mut self.parts, inner, &proxy_pass.endpoint_info);
+        apply_x_forwarded_for(&mut self.parts, &self.client);
+        apply_cf_ip_country(&mut self.parts, &self.client, &proxy_pass.endpoint_info);
+        apply_forwarded_user(&mut self.parts, identity);
     }
 }
 
-fn apply_auto_x_forwarded_for(parts: &mut Parts, inner: &HttpProxyPassInner) {
-    let Some(ip) = inner.connection_ip.get_ip_addr() else {
+/// `X-Forwarded-User`: who the request is of, or nothing - never what the client sent under
+/// that name, in any spelling an upstream could read as it.
+fn apply_forwarded_user(parts: &mut Parts, identity: Option<&HttpProxyPassIdentity>) {
+    let sent_by_the_client: Vec<HeaderName> = parts
+        .headers
+        .keys()
+        .filter(|name| crate::forwarded_user::is_header_name(name.as_str().as_bytes()))
+        .cloned()
+        .collect();
+
+    for name in sent_by_the_client {
+        parts.headers.remove(name);
+    }
+
+    let Some(user) = identity.and_then(crate::forwarded_user::value_of) else {
         return;
     };
-    let ip_str = ip.to_string();
 
-    let new_value = match parts.headers.get("x-forwarded-for") {
-        Some(existing) => match existing.to_str() {
-            Ok(s) => format!("{},{}", s, ip_str),
-            Err(_) => ip_str,
-        },
-        None => ip_str,
-    };
-
-    parts.headers.insert(
-        HeaderName::from_static("x-forwarded-for"),
-        new_value.parse().unwrap(),
-    );
+    if let Ok(value) = HeaderValue::from_str(user) {
+        parts.headers.insert(
+            HeaderName::from_static(crate::forwarded_user::HEADER),
+            value,
+        );
+    }
 }
 
-fn apply_cf_ip_country(parts: &mut Parts, inner: &HttpProxyPassInner, endpoint: &HttpEndpointInfo) {
+/// Takes away every header the client sent which tells who it is and is not the proxy's to pass
+/// on - see [`crate::cloudflare::RequestClient::takes_away_header`].
+fn take_away_client_ip_headers(parts: &mut Parts, client: &crate::cloudflare::RequestClient) {
+    let sent_by_the_client: Vec<HeaderName> = parts
+        .headers
+        .keys()
+        .filter(|name| client.takes_away_header(name.as_str().as_bytes()))
+        .cloned()
+        .collect();
+
+    for name in sent_by_the_client {
+        parts.headers.remove(name);
+    }
+}
+
+/// `X-Forwarded-For` of the client - the proxy's own: what the client sent under the name is
+/// taken away before. Nothing on a unix socket, where the header goes on as it came.
+fn apply_x_forwarded_for(parts: &mut Parts, client: &crate::cloudflare::RequestClient) {
+    let Some(value) = client.x_forwarded_for() else {
+        return;
+    };
+
+    if let Ok(value) = HeaderValue::from_str(&value) {
+        parts
+            .headers
+            .insert(HeaderName::from_static("x-forwarded-for"), value);
+    }
+}
+
+fn apply_cf_ip_country(
+    parts: &mut Parts,
+    client: &crate::cloudflare::RequestClient,
+    endpoint: &HttpEndpointInfo,
+) {
     if !endpoint.inject_country {
         return;
     }
-    let Some(ip) = inner.connection_ip.get_ip_addr() else {
+    let Some(ip) = client.ip.get_ip_addr() else {
         return;
     };
     let Some(code) = crate::ip_db::lookup_country(ip) else {
@@ -817,16 +872,25 @@ fn modify_headers(
     inner: &HttpProxyPassInner,
     parts: &mut Parts,
     modify_headers: &ModifyHeadersConfig,
+    identity: Option<&HttpProxyPassIdentity>,
+    client_ip: &ConnectionIp,
 ) {
     for remove_header in modify_headers.iter_remove() {
         parts.headers.remove(remove_header.as_str());
     }
 
     for (header, value) in modify_headers.iter_add() {
+        // A header the settings add is never taken from the client, even when there is
+        // nothing to write in it: `${CLIENT_CERT_CN}` of a request with no user is empty,
+        // and a client-sent header of that name would otherwise reach the upstream as a
+        // user the proxy vouched for. The h1 path drops every header named in `add` the
+        // same way (`has_to_be_removed`).
+        parts.headers.remove(header.as_str());
+
         if value.as_str().is_empty() {
             continue;
         }
-        let value = inner.populate_value(value, parts);
+        let value = inner.populate_value(value, parts, identity, client_ip);
         if value.as_str().is_empty() {
             continue;
         }

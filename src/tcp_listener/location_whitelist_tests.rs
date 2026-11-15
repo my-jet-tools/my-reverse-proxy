@@ -33,13 +33,13 @@ use my_tls::tokio_rustls::{
     rustls::{
         self,
         client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-        pki_types::{CertificateDer, ServerName, UnixTime},
+        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime},
         DigitallySignedStruct, SignatureScheme,
     },
     TlsConnector,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 
@@ -855,6 +855,394 @@ async fn location_modify_http_headers_by_endpoint_type() {
     );
 }
 
+/// A header `modify_http_headers` adds is the proxy's word, never the client's. With no client
+/// certificate and no Google cookie `${CLIENT_CERT_CN}` is empty: the header is not written,
+/// and the one of that name the client sent is dropped too - otherwise the upstream would read
+/// a user name the client made up. A header with a value replaces the client's, not joins it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_header_the_settings_add_is_never_taken_from_the_client() {
+    my_tls::install_default_crypto_providers();
+
+    let mut seen = Vec::new();
+
+    for endpoint in [
+        Endpoint::Http,
+        Endpoint::Https,
+        Endpoint::Http2,
+        Endpoint::Https2OverH2,
+        Endpoint::Https2OverHttp1,
+    ] {
+        let upstream = Upstream::start().await;
+        let port = free_port().await;
+
+        let yaml = format!(
+            r#"hosts:
+  localhost:{port}:
+    endpoint:
+      type: {endpoint_type}
+    locations:
+    - proxy_pass_to: http://127.0.0.1:{upstream_port}
+      modify_http_headers:
+        add:
+          request:
+          - name: x-user
+            value: ${{CLIENT_CERT_CN}}
+          - name: x-proxy-says
+            value: "the proxy"
+"#,
+            endpoint_type = endpoint.type_name(),
+            upstream_port = upstream.port,
+        );
+
+        apply_settings(&yaml).await;
+        serve(port);
+
+        let reply = send(
+            endpoint.client(),
+            port,
+            "localhost",
+            &format!("localhost:{port}"),
+            &[("x-user", "admin"), ("x-proxy-says", "the client")],
+        )
+        .await;
+        let outcome = Outcome::new(reply, &upstream).await;
+        assert!(outcome.served(), "{outcome:#?}");
+
+        let request = outcome.upstream_requests[0].to_ascii_lowercase();
+        let user_dropped = !request.contains("x-user") && !request.contains("admin");
+        let value_replaced = request.matches("x-proxy-says").count() == 1
+            && request.contains("x-proxy-says: the proxy");
+
+        println!(
+            "  {:<24} client x-user dropped: {:<5} client header replaced: {}",
+            endpoint.column(),
+            user_dropped,
+            value_replaced
+        );
+
+        seen.push((endpoint, user_dropped, value_replaced));
+    }
+
+    assert_eq!(
+        seen,
+        vec![
+            (Endpoint::Http, true, true),
+            (Endpoint::Https, true, true),
+            (Endpoint::Http2, true, true),
+            (Endpoint::Https2OverH2, true, true),
+            (Endpoint::Https2OverHttp1, true, true),
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// X-Forwarded-User
+// ---------------------------------------------------------------------------------------------
+
+/// What a client sends to pass itself off as somebody: the header, and the spelling of it a
+/// CGI-style server (PHP, WSGI, Rack) reads as the same `HTTP_X_FORWARDED_USER`.
+const FORGED_BY_THE_CLIENT: &[(&str, &str)] = &[
+    ("x-forwarded-user", "forged-by-the-client"),
+    ("x_forwarded_user", "forged-by-the-client"),
+];
+
+/// A request of nobody - no client certificate, no Google sign-in - reaches the upstream with no
+/// `X-Forwarded-User`, whatever the client or the settings put under that name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn x_forwarded_user_of_a_request_of_nobody_is_not_sent() {
+    my_tls::install_default_crypto_providers();
+
+    let endpoints = [
+        Endpoint::Http,
+        Endpoint::Https,
+        Endpoint::Http2,
+        Endpoint::Https2OverH2,
+        Endpoint::Https2OverHttp1,
+    ];
+
+    let mut seen = Vec::new();
+
+    for endpoint in endpoints {
+        let sent = forwarded_user_probe(endpoint, "", "", &[], None).await;
+        println!("  {:<24} {sent:?}", endpoint.column());
+        seen.push((endpoint, sent));
+    }
+
+    assert_eq!(
+        seen,
+        endpoints.map(|endpoint| (endpoint, Vec::new())).to_vec()
+    );
+}
+
+/// On an endpoint with `google_auth` the header is the email of the request's sign-in - the only
+/// one, whatever the client or the settings put under that name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn x_forwarded_user_is_the_email_of_a_google_sign_in() {
+    my_tls::install_default_crypto_providers();
+
+    const EMAIL: &str = "someone@example.com";
+
+    let cookie = format!(
+        "{}={}",
+        crate::consts::AUTHORIZED_COOKIE_NAME,
+        crate::google_auth::token::generate(EMAIL)
+    );
+
+    let endpoints = [
+        Endpoint::Https,
+        Endpoint::Https2OverH2,
+        Endpoint::Https2OverHttp1,
+    ];
+
+    let mut seen = Vec::new();
+
+    for endpoint in endpoints {
+        let id = unique_id("forwarded_user");
+
+        let sent = forwarded_user_probe(
+            endpoint,
+            &format!("      google_auth: {id}_g_auth\n"),
+            &format!(
+                "g_auth:\n  {id}_g_auth:\n    client_id: test-client-id\n    client_secret: test-client-secret\n    whitelisted_domains: example.com\n"
+            ),
+            &[("cookie", cookie.as_str())],
+            None,
+        )
+        .await;
+
+        println!("  {:<24} {sent:?}", endpoint.column());
+        seen.push((endpoint, sent));
+    }
+
+    let expected = vec![format!("x-forwarded-user: {EMAIL}")];
+
+    assert_eq!(
+        seen,
+        endpoints
+            .map(|endpoint| (endpoint, expected.clone()))
+            .to_vec()
+    );
+}
+
+/// On an endpoint with `client_certificate_ca` the header is the CN of the certificate its ca
+/// verified - the only one, whatever the client or the settings put under that name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn x_forwarded_user_is_the_cn_of_a_client_certificate() {
+    my_tls::install_default_crypto_providers();
+
+    const CN: &str = "forwarded-user-test-client";
+
+    let certificate = ClientCertificate::issue(CN).await;
+
+    let endpoints = [
+        Endpoint::Https,
+        Endpoint::Https2OverH2,
+        Endpoint::Https2OverHttp1,
+    ];
+
+    let mut seen = Vec::new();
+
+    for endpoint in endpoints {
+        let sent = forwarded_user_probe(
+            endpoint,
+            &format!("      client_certificate_ca: {}\n", certificate.ca_id),
+            &format!("client_certificate_ca:\n- id: {}\n", certificate.ca_id),
+            &[],
+            Some(&certificate),
+        )
+        .await;
+
+        println!("  {:<24} {sent:?}", endpoint.column());
+        seen.push((endpoint, sent));
+    }
+
+    let expected = vec![format!("x-forwarded-user: {CN}")];
+
+    assert_eq!(
+        seen,
+        endpoints
+            .map(|endpoint| (endpoint, expected.clone()))
+            .to_vec()
+    );
+}
+
+/// The h1 pipeline passes a head on as the client wrote it, so a client can spell the header in
+/// ways a lenient upstream still reads as it: whitespace before the colon, a folded line, `_` for
+/// `-`. None of them gets through. (hyper refuses such a head itself, so only this path is
+/// probed.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn x_forwarded_user_spelled_to_slip_through_does_not_reach_the_upstream() {
+    let upstream = Upstream::start().await;
+    let port = free_port().await;
+
+    apply_settings(&forwarded_user_yaml(
+        Endpoint::Http,
+        port,
+        upstream.port,
+        "",
+        "",
+    ))
+    .await;
+    serve(port);
+
+    let mut stream = connect(port).await;
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: localhost:{port}\r\nX-Forwarded-User : spaced\r\nX-Forwarded-User\t: tabbed\r\nX-Other: kept\r\n X-Forwarded-User: folded\r\nX_Forwarded_User: underscored\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = Vec::new();
+    let read_until_the_body = async {
+        let mut buffer = [0u8; 4096];
+        while !String::from_utf8_lossy(&response).contains(UPSTREAM_BODY) {
+            let read = stream.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&buffer[..read]);
+        }
+    };
+    let _ = tokio::time::timeout(TIMEOUT, read_until_the_body).await;
+
+    let response = String::from_utf8_lossy(&response).to_string();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+    let requests = upstream.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+
+    for spelling in ["spaced", "tabbed", "folded", "underscored"] {
+        assert!(!requests[0].contains(spelling), "{}", requests[0]);
+    }
+    assert_eq!(forwarded_user_lines(&requests[0]), Vec::<String>::new());
+    assert!(requests[0].contains("x-other: kept"), "{}", requests[0]);
+}
+
+/// An endpoint of `endpoint`'s type in front of the upstream, with `endpoint_lines` added to it,
+/// whose location tries to set `X-Forwarded-User` from the settings; `sections` go after `hosts`.
+fn forwarded_user_yaml(
+    endpoint: Endpoint,
+    port: u16,
+    upstream_port: u16,
+    endpoint_lines: &str,
+    sections: &str,
+) -> String {
+    format!(
+        "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {endpoint_type}\n{endpoint_lines}    locations:\n    - proxy_pass_to: http://127.0.0.1:{upstream_port}\n      modify_http_headers:\n        add:\n          request:\n          - name: X-Forwarded-User\n            value: forged-by-the-settings\n{sections}",
+        endpoint_type = endpoint.type_name(),
+    )
+}
+
+/// One request to an endpoint set up by [`forwarded_user_yaml`]: `headers` and
+/// [`FORGED_BY_THE_CLIENT`] in it, `certificate` presented in the TLS handshake. Returns the
+/// `X-Forwarded-User` headers the upstream got.
+async fn forwarded_user_probe(
+    endpoint: Endpoint,
+    endpoint_lines: &str,
+    sections: &str,
+    headers: &[(&str, &str)],
+    certificate: Option<&ClientCertificate>,
+) -> Vec<String> {
+    let upstream = Upstream::start().await;
+    let port = free_port().await;
+
+    let yaml = forwarded_user_yaml(endpoint, port, upstream.port, endpoint_lines, sections);
+
+    apply_settings(&yaml).await;
+    serve(port);
+
+    let mut headers = headers.to_vec();
+    headers.extend_from_slice(FORGED_BY_THE_CLIENT);
+
+    let reply = send_with_certificate(
+        endpoint.client(),
+        port,
+        "localhost",
+        &format!("localhost:{port}"),
+        &headers,
+        certificate,
+    )
+    .await;
+
+    let outcome = Outcome::new(reply, &upstream).await;
+    assert!(outcome.served(), "{endpoint:?}: {outcome:#?}\n{yaml}");
+
+    forwarded_user_lines(&outcome.upstream_requests[0])
+}
+
+/// The lines of an upstream request's head which an upstream could read as `X-Forwarded-User`.
+fn forwarded_user_lines(upstream_request: &str) -> Vec<String> {
+    upstream_request
+        .lines()
+        .skip(1)
+        .filter(|line| {
+            line.starts_with("x-forwarded-user:") || line.starts_with("x_forwarded_user:")
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// A client-certificate ca made for one test - loaded into the proxy under an id of its own,
+/// since the certificate cache is shared by every test - and a certificate it issued.
+struct ClientCertificate {
+    ca_id: String,
+    cert: CertificateDer<'static>,
+    key: Vec<u8>,
+}
+
+impl ClientCertificate {
+    async fn issue(cn: &str) -> Self {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+            KeyPair, KeyUsagePurpose,
+        };
+
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "location tests ca");
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::new(ca_params, ca_key);
+
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name.push(DnType::CommonName, cn);
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let cert = params.signed_by(&key, &issuer).unwrap();
+
+        let ca_id = unique_id("location_tests_ca");
+
+        let ca = Arc::new(
+            crate::tcp_listener::https::ClientCertificateCa::new(
+                vec![ca_cert.der().clone()],
+                None,
+                vec![],
+                None,
+            )
+            .unwrap(),
+        );
+
+        let id = ca_id.clone();
+        crate::app::APP_CTX
+            .ssl_certificates_cache
+            .write(move |cache| {
+                cache.client_ca.insert(
+                    crate::configurations::SslCertificateIdRef::new(id.as_str()),
+                    ca,
+                );
+            })
+            .await;
+
+        Self {
+            ca_id,
+            cert: cert.der().clone(),
+            key: key.serialize_der(),
+        }
+    }
+}
+
 /// "Example of serving redirect to the same url but with https schema" - under `hosts:`.
 const README_REDIRECT_EXAMPLE: &str = "  7700:\n    endpoint:\n      type: http\n\n    locations:\n    - type: static\n      status_code: 302\n      modify_http_headers:\n        add:\n          response:\n          - name: Location\n            value: https://${HOST_PORT}${PATH_AND_QUERY}\n";
 
@@ -1275,6 +1663,7 @@ async fn try_apply_settings(yaml: &str) -> Result<(), String> {
         country_white_lists: model.country_white_lists.unwrap_or_default(),
         allowed_users: model.allowed_users.unwrap_or_default(),
         g_auth: model.g_auth.unwrap_or_default(),
+        client_certificate_ca: model.client_certificate_ca.unwrap_or_default(),
         ..Default::default()
     };
 
@@ -1432,14 +1821,26 @@ async fn send(
     host: &str,
     headers: &[(&str, &str)],
 ) -> Reply {
+    send_with_certificate(client, port, server_name, host, headers, None).await
+}
+
+/// [`send`], presenting `certificate` in the TLS handshake.
+async fn send_with_certificate(
+    client: Client,
+    port: u16,
+    server_name: &str,
+    host: &str,
+    headers: &[(&str, &str)],
+    certificate: Option<&ClientCertificate>,
+) -> Reply {
     match client {
         Client::PlainHttp1 => get_over_http1(connect(port).await, host, headers).await,
         Client::PlainH2 => get_over_h2(connect(port).await, "http", host, headers).await,
-        Client::TlsHttp1 => match connect_tls(port, server_name, b"http/1.1").await {
+        Client::TlsHttp1 => match connect_tls(port, server_name, b"http/1.1", certificate).await {
             Ok(stream) => get_over_http1(stream, host, headers).await,
             Err(err) => Reply::none(err),
         },
-        Client::TlsH2 => match connect_tls(port, server_name, b"h2").await {
+        Client::TlsH2 => match connect_tls(port, server_name, b"h2", certificate).await {
             Ok(stream) => get_over_h2(stream, "https", host, headers).await,
             Err(err) => Reply::none(err),
         },
@@ -1468,11 +1869,21 @@ async fn connect_tls(
     port: u16,
     server_name: &str,
     alpn: &[u8],
+    certificate: Option<&ClientCertificate>,
 ) -> Result<TlsStream<TcpStream>, String> {
-    let mut client_config = rustls::ClientConfig::builder()
+    let builder = rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
-        .with_no_client_auth();
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert));
+
+    let mut client_config = match certificate {
+        Some(certificate) => builder
+            .with_client_auth_cert(
+                vec![certificate.cert.clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certificate.key.clone())),
+            )
+            .unwrap(),
+        None => builder.with_no_client_auth(),
+    };
     client_config.alpn_protocols = vec![alpn.to_vec()];
 
     let tcp_stream = connect(port).await;
@@ -1706,5 +2117,340 @@ impl ServerCertVerifier for AcceptAnyServerCert {
         rustls::crypto::ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Who the client is: `X-Forwarded-For`, and `cloudflare: true`
+// ---------------------------------------------------------------------------------------------
+
+/// The endpoint types which read the request: the ones `cloudflare: true` is served on.
+const HTTP_ENDPOINTS: [Endpoint; 5] = [
+    Endpoint::Http,
+    Endpoint::Https,
+    Endpoint::Http2,
+    Endpoint::Https2OverH2,
+    Endpoint::Https2OverHttp1,
+];
+
+/// What a client sends to pass itself off as another address - and the spelling of the first a
+/// CGI-style server reads as the same `HTTP_X_FORWARDED_FOR`.
+const CLIENT_IP_FORGED: &[(&str, &str)] = &[
+    ("x-forwarded-for", "8.8.8.8"),
+    ("x_forwarded_for", "8.8.8.8"),
+    ("x-real-ip", "8.8.8.8"),
+    ("true-client-ip", "8.8.8.8"),
+];
+
+/// An endpoint of `endpoint`'s type in front of the upstream, with `endpoint_lines` added to it,
+/// whose location tells the upstream `${ENDPOINT_IP}` in `X-Client`; `sections` go after `hosts`.
+fn client_ip_yaml(
+    endpoint: Endpoint,
+    port: u16,
+    upstream_port: u16,
+    endpoint_lines: &str,
+    sections: &str,
+) -> String {
+    format!(
+        "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {endpoint_type}\n{endpoint_lines}    locations:\n    - proxy_pass_to: http://127.0.0.1:{upstream_port}\n      modify_http_headers:\n        add:\n          request:\n          - name: X-Client\n            value: ${{ENDPOINT_IP}}\n{sections}",
+        endpoint_type = endpoint.type_name(),
+    )
+}
+
+/// One request with `headers` to an endpoint set up by [`client_ip_yaml`].
+async fn client_ip_probe(
+    endpoint: Endpoint,
+    endpoint_lines: &str,
+    sections: &str,
+    headers: &[(&str, &str)],
+) -> Outcome {
+    let upstream = Upstream::start().await;
+    let port = free_port().await;
+
+    let yaml = client_ip_yaml(endpoint, port, upstream.port, endpoint_lines, sections);
+
+    apply_settings(&yaml).await;
+    serve(port);
+
+    let reply = send(
+        endpoint.client(),
+        port,
+        "localhost",
+        &format!("localhost:{port}"),
+        headers,
+    )
+    .await;
+
+    let mut outcome = Outcome::new(reply, &upstream).await;
+    outcome.settings = yaml;
+    outcome
+}
+
+/// The lines of an upstream request's head which tell who the client is, sorted.
+fn client_ip_lines(upstream_request: &str) -> Vec<String> {
+    const NAMES: [&str; 8] = [
+        "x-forwarded-for:",
+        "x_forwarded_for:",
+        "x-real-ip:",
+        "true-client-ip:",
+        "cf-connecting-ip:",
+        "cf_connecting_ip:",
+        "cf-ipcountry:",
+        "x-client:",
+    ];
+
+    let mut lines: Vec<String> = upstream_request
+        .lines()
+        .skip(1)
+        .filter(|line| NAMES.iter().any(|name| line.starts_with(name)))
+        .map(str::to_string)
+        .collect();
+
+    lines.sort();
+    lines
+}
+
+/// Without `cloudflare: true` the client is the peer of the connection. The upstream is told its
+/// address alone - in `X-Forwarded-For` and in `${ENDPOINT_IP}` - and nothing the client sent to
+/// say otherwise, Cloudflare's headers included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_the_flag_the_upstream_is_told_the_peer_alone() {
+    my_tls::install_default_crypto_providers();
+
+    let mut headers = CLIENT_IP_FORGED.to_vec();
+    headers.extend_from_slice(&[("cf-connecting-ip", "8.8.8.8"), ("cf-ipcountry", "XX")]);
+
+    for endpoint in HTTP_ENDPOINTS {
+        let outcome = client_ip_probe(endpoint, "", "", &headers).await;
+        assert!(outcome.served(), "{endpoint:?}: {outcome:#?}");
+
+        assert_eq!(
+            client_ip_lines(&outcome.upstream_requests[0]),
+            vec!["x-client: 127.0.0.1", "x-forwarded-for: 127.0.0.1"],
+            "{endpoint:?}: {}",
+            outcome.upstream_requests[0]
+        );
+    }
+}
+
+/// Through Cloudflare to a `cloudflare: true` endpoint the client is the address of
+/// `CF-Connecting-IP`: `X-Forwarded-For` is the client, then the Cloudflare server it came
+/// through, and `${ENDPOINT_IP}` is the client. What Cloudflare wrote goes on; what the client
+/// forged does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn through_cloudflare_the_client_is_of_cf_connecting_ip() {
+    my_tls::install_default_crypto_providers();
+    crate::cloudflare::the_loopback_is_cloudflare_in_tests();
+
+    let mut headers = CLIENT_IP_FORGED.to_vec();
+    headers.extend_from_slice(&[("cf-connecting-ip", "198.51.100.4"), ("cf-ipcountry", "UA")]);
+
+    for endpoint in HTTP_ENDPOINTS {
+        let outcome = client_ip_probe(endpoint, "      cloudflare: true\n", "", &headers).await;
+        assert!(outcome.served(), "{endpoint:?}: {outcome:#?}");
+
+        assert_eq!(
+            client_ip_lines(&outcome.upstream_requests[0]),
+            vec![
+                "cf-connecting-ip: 198.51.100.4",
+                "cf-ipcountry: UA",
+                "x-client: 198.51.100.4",
+                "x-forwarded-for: 198.51.100.4, 127.0.0.1",
+            ],
+            "{endpoint:?}: {}",
+            outcome.upstream_requests[0]
+        );
+    }
+}
+
+/// A request from Cloudflare without one `CF-Connecting-IP` which is an address can only be one
+/// made to get around Cloudflare: the connection is closed without a word, and the upstream sees
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cloudflare_endpoint_closes_the_connection_without_a_word() {
+    my_tls::install_default_crypto_providers();
+    crate::cloudflare::the_loopback_is_cloudflare_in_tests();
+
+    let cases: [(&str, &[(&str, &str)]); 4] = [
+        ("no CF-Connecting-IP", &[]),
+        (
+            "two CF-Connecting-IP",
+            &[
+                ("cf-connecting-ip", "198.51.100.4"),
+                ("cf-connecting-ip", "198.51.100.5"),
+            ],
+        ),
+        (
+            "a list in CF-Connecting-IP",
+            &[("cf-connecting-ip", "198.51.100.4, 8.8.8.8")],
+        ),
+        (
+            "a second one spelled with _",
+            &[
+                ("cf-connecting-ip", "198.51.100.4"),
+                ("cf_connecting_ip", "8.8.8.8"),
+            ],
+        ),
+    ];
+
+    for (case, headers) in cases {
+        for endpoint in HTTP_ENDPOINTS {
+            let outcome = client_ip_probe(endpoint, "      cloudflare: true\n", "", headers).await;
+
+            assert!(
+                outcome.status.is_none() && outcome.upstream_requests.is_empty(),
+                "{case}, {endpoint:?}: {outcome:#?}"
+            );
+        }
+    }
+}
+
+/// The allow-lists of a `cloudflare: true` endpoint are of the client of `CF-Connecting-IP`, not
+/// of the Cloudflare server the request came through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_allow_list_of_a_cloudflare_endpoint_is_of_cf_connecting_ip() {
+    my_tls::install_default_crypto_providers();
+    crate::cloudflare::the_loopback_is_cloudflare_in_tests();
+
+    for endpoint in HTTP_ENDPOINTS {
+        let list_id = unique_id("cloudflare");
+        let endpoint_lines = format!("      cloudflare: true\n      whitelisted_ip: {list_id}\n");
+        let sections = format!("ip_white_lists:\n  {list_id}:\n    - \"198.51.100.4\"\n");
+
+        let listed = client_ip_probe(
+            endpoint,
+            &endpoint_lines,
+            &sections,
+            &[("cf-connecting-ip", "198.51.100.4")],
+        )
+        .await;
+        assert!(listed.served(), "{endpoint:?}: {listed:#?}");
+
+        let not_listed = client_ip_probe(
+            endpoint,
+            &endpoint_lines,
+            &sections,
+            &[("cf-connecting-ip", "198.51.100.5")],
+        )
+        .await;
+        assert!(
+            not_listed.refused() && not_listed.status.is_some(),
+            "{endpoint:?}: {not_listed:#?}"
+        );
+    }
+}
+
+/// A connection which is not from Cloudflare is closed without a word, whatever it sends: on a
+/// plain connection by its request, on a TLS one right after the handshake. The loopback is
+/// Cloudflare in the tests, so the stranger connects over `::1` - where there is no IPv6 loopback,
+/// there is nothing to probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cloudflare_endpoint_takes_no_connection_from_elsewhere() {
+    my_tls::install_default_crypto_providers();
+    crate::cloudflare::the_loopback_is_cloudflare_in_tests();
+
+    if std::net::TcpListener::bind("[::1]:0").is_err() {
+        println!("no IPv6 loopback here - nothing to probe");
+        return;
+    }
+
+    for endpoint in [Endpoint::Http, Endpoint::Https] {
+        let upstream = Upstream::start().await;
+        let port = free_port().await;
+
+        apply_settings(&client_ip_yaml(
+            endpoint,
+            port,
+            upstream.port,
+            "      cloudflare: true\n",
+            "",
+        ))
+        .await;
+        super::start_listen_tcp_server(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)));
+
+        let mut stream = None;
+        for _ in 0..500 {
+            if let Ok(connected) = TcpStream::connect(("::1", port)).await {
+                stream = Some(connected);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let stream = stream.expect("nothing listens on [::1]");
+
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: localhost:{port}\r\nCF-Connecting-IP: 198.51.100.4\r\n\r\n"
+        );
+
+        let answer = match endpoint {
+            Endpoint::Http => read_answer(stream, request.as_bytes()).await,
+            _ => {
+                let mut client_config = rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+                    .with_no_client_auth();
+                client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+                match TlsConnector::from(Arc::new(client_config))
+                    .connect(ServerName::try_from("localhost").unwrap(), stream)
+                    .await
+                {
+                    Ok(tls_stream) => read_answer(tls_stream, request.as_bytes()).await,
+                    // Closed before the handshake was over: no answer either.
+                    Err(_) => Vec::new(),
+                }
+            }
+        };
+
+        assert!(
+            answer.is_empty(),
+            "{endpoint:?} answered: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        assert!(upstream.requests().is_empty(), "{endpoint:?}");
+    }
+}
+
+/// Writes `request` and reads what comes back until the connection is closed.
+async fn read_answer<S: AsyncRead + AsyncWrite + Unpin>(mut stream: S, request: &[u8]) -> Vec<u8> {
+    let _ = stream.write_all(request).await;
+
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(TIMEOUT, stream.read_to_end(&mut answer)).await;
+    answer
+}
+
+/// An endpoint which reads no HTTP - a byte bridge - can not read `CF-Connecting-IP`: with
+/// `cloudflare: true` it serves nobody, rather than check its allow-lists against Cloudflare.
+#[tokio::test]
+async fn a_byte_bridge_with_the_flag_serves_nobody() {
+    for endpoint in [Endpoint::Mcp, Endpoint::Tcp] {
+        let port = free_port().await;
+        let yaml = format!(
+            "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {}\n      cloudflare: true\n    locations:\n    - proxy_pass_to: {}\n",
+            endpoint.type_name(),
+            endpoint.proxy_pass_to(9),
+        );
+
+        apply_settings(&yaml).await;
+
+        let reason = crate::app::APP_CTX
+            .current_configuration
+            .get(|config| match config.listen_tcp_endpoints.get(&port) {
+                Some(crate::configurations::ListenConfiguration::Mcp(config)) => config.endpoints
+                    [0]
+                .not_served_reason
+                .as_ref()
+                .map(|reason| reason.as_str().to_string()),
+                Some(crate::configurations::ListenConfiguration::Tcp(config)) => config
+                    .not_served_reason
+                    .as_ref()
+                    .map(|reason| reason.as_str().to_string()),
+                _ => None,
+            })
+            .await;
+
+        let reason = reason.unwrap_or_else(|| panic!("{endpoint:?} is served\n{yaml}"));
+        assert!(reason.contains("'cloudflare'"), "{endpoint:?}: {reason}");
     }
 }

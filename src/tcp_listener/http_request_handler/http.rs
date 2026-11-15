@@ -3,7 +3,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 
-use crate::{configurations::HttpListenPortConfiguration, http_proxy_pass::*, types::ConnectionIp};
+use crate::{
+    configurations::HttpListenPortConfiguration, http_proxy_pass::*, tcp_listener::ConnectionCut,
+    types::ConnectionIp,
+};
 
 use super::{
     utils::{create_bad_request_response, BadRequestReason, RejectedRequest},
@@ -12,7 +15,10 @@ use super::{
 
 pub struct HttpRequestHandler {
     endpoints: LiveEndpointCache,
+    /// The peer of the connection.
     connection_ip: ConnectionIp,
+    /// What a request cuts the connection with: see [`ConnectionCut`].
+    pub cut: Arc<ConnectionCut>,
 }
 
 impl HttpRequestHandler {
@@ -23,6 +29,7 @@ impl HttpRequestHandler {
         Self {
             endpoints: LiveEndpointCache::new(listen_port_config),
             connection_ip,
+            cut: ConnectionCut::new(),
         }
     }
 
@@ -91,6 +98,17 @@ impl HttpRequestHandler {
 
         let http_endpoint_info = http_endpoint_info.unwrap();
 
+        // A Cloudflare server reaching an endpoint without `cloudflare: true` is noted - once for
+        // the host of the connection: there was no TLS handshake to note it at.
+        if !http_endpoint_info.cloudflare {
+            crate::cloudflare::connection_may_go_on(
+                http_endpoint_info.as_str(),
+                false,
+                &self.connection_ip,
+                Some(host.as_bytes()),
+            );
+        }
+
         if crate::app::APP_CTX
             .debug_flags
             .is_endpoint_debug(http_endpoint_info.host_endpoint.as_str())
@@ -108,13 +126,8 @@ impl HttpRequestHandler {
             listen_host: listen_port_config.listen_host.clone(),
         };
 
-        let http_proxy_pass = HttpProxyPass::new(
-            self.connection_ip,
-            http_endpoint_info,
-            listening_port_info,
-            None,
-        )
-        .await;
+        let http_proxy_pass =
+            HttpProxyPass::new(http_endpoint_info, listening_port_info, None).await;
 
         Ok(self
             .endpoints
@@ -125,12 +138,21 @@ impl HttpRequestHandler {
         &self,
         req: hyper::Request<hyper::body::Incoming>,
     ) -> hyper::Result<hyper::Response<BoxBody<Bytes, String>>> {
-        match self.get_http_proxy_pass(&req).await {
-            Ok(proxy_pass) => {
-                super::handle_requests::handle_requests(req, &proxy_pass, self.connection_ip).await
-            }
-            Err(rejected) => Ok(*rejected),
-        }
+        let proxy_pass = match self.get_http_proxy_pass(&req).await {
+            Ok(proxy_pass) => proxy_pass,
+            Err(rejected) => return Ok(*rejected),
+        };
+
+        // Who the request is of. A `cloudflare: true` endpoint reached otherwise than through
+        // Cloudflare cuts the connection without a word - every request of it with it.
+        let Some(client) =
+            super::utils::client_of_request(&proxy_pass.endpoint_info, self.connection_ip, &req)
+        else {
+            self.cut.cut_now().await;
+            return Ok(super::utils::answer_of_a_cut_connection());
+        };
+
+        super::handle_requests::handle_requests(req, &proxy_pass, client).await
     }
 
     pub async fn dispose(&self) {

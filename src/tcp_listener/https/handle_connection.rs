@@ -74,10 +74,35 @@ pub fn handle_connection(
 
         let (mut tls_stream, endpoint_info, cn_user_name) = result;
 
+        // A `cloudflare: true` endpoint takes a connection from Cloudflare only: anything else is
+        // closed without a word - and journaled, as a Cloudflare server reaching an endpoint
+        // without the flag is.
+        let server_name = tls_stream
+            .get_ref()
+            .1
+            .server_name()
+            .map(|server_name| server_name.as_bytes().to_vec());
+        if !crate::cloudflare::connection_may_go_on(
+            endpoint_info.as_str(),
+            endpoint_info.cloudflare,
+            &connection_ip,
+            server_name.as_deref(),
+        ) {
+            drop(tls_stream);
+            return;
+        }
+
         // The endpoint's IP and country allow-lists, by the CLIENT's IP, not the proxy's own
         // listening address. Skipped when the client IP is unknown (unix socket), matching the
-        // location-level allow-list check in HttpProxyPass::send_payload.
-        if let Some(refusal) = endpoint_info.address_refusal(&connection_ip).await {
+        // location-level allow-list check in HttpProxyPass::send_payload. The client of a
+        // `cloudflare: true` endpoint is known only from each of its requests: they are checked
+        // one by one.
+        let refusal = if endpoint_info.cloudflare {
+            None
+        } else {
+            endpoint_info.address_refusal(&connection_ip).await
+        };
+        if let Some(refusal) = refusal {
             // Endpoint-level rejection (endpoint resolved, client not allowed) — surface it in
             // the endpoint's debug log when the endpoint is being debugged.
             if crate::app::APP_CTX
@@ -205,6 +230,7 @@ async fn serve_https2(
     let https_requests_handler = Arc::new(https_requests_handler);
 
     let https_requests_handler_dispose = https_requests_handler.clone();
+    let cut = https_requests_handler.cut.clone();
 
     // `with_upgrades` is what lets an HTTP/1.1 client on this endpoint open a
     // websocket: Cloudflare reaches an origin this way even with "HTTP/2 to
@@ -225,8 +251,9 @@ async fn serve_https2(
         }),
     );
 
-    let _ = first_request
-        .serve(connection, client_timeouts.header_read_timeout)
+    // A request which finds the connection must not go on cuts it: see `ConnectionCut`.
+    let _ = cut
+        .serve(first_request.serve(connection, client_timeouts.header_read_timeout))
         .await;
 
     crate::app::APP_CTX

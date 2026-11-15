@@ -1,37 +1,46 @@
-use arc_swap::ArcSwapOption;
+use std::sync::Arc;
+
 use rust_common::placeholders::*;
 use rust_extensions::StrOrString;
 
-use crate::types::{ConnectionIp, HttpRequestReader};
+use crate::{
+    tcp_listener::https::ClientCertificateData,
+    types::{ConnectionIp, HttpRequestReader},
+};
 
 use super::{HttpListenPortInfo, HttpProxyPassIdentity, ProxyPassLocations};
 
 pub struct HttpProxyPassInner {
-    pub identity: ArcSwapOption<HttpProxyPassIdentity>,
+    /// The client certificate of the connection, when the ca of this endpoint verified it. Only
+    /// the certificate is kept on the connection: a Google sign-in belongs to the one request
+    /// whose cookie carries it, since an h2 connection can carry the requests of several people.
+    pub client_cert: Option<Arc<ClientCertificateData>>,
     pub locations: ProxyPassLocations,
     pub http_listen_port_info: HttpListenPortInfo,
-    pub connection_ip: ConnectionIp,
 }
 
 impl HttpProxyPassInner {
     pub fn new(
-        identity: Option<HttpProxyPassIdentity>,
+        client_cert: Option<Arc<ClientCertificateData>>,
         locations: ProxyPassLocations,
         http_listen_port_info: HttpListenPortInfo,
-        connection_ip: ConnectionIp,
     ) -> Self {
         Self {
-            identity: ArcSwapOption::from(identity.map(std::sync::Arc::new)),
+            client_cert,
             locations,
             http_listen_port_info,
-            connection_ip,
         }
     }
 
+    /// `identity`: who the request is of - what `${CLIENT_CERT_CN}` gives. `client_ip`: the client
+    /// of the request - what `${ENDPOINT_IP}` gives (of a request through Cloudflare to a
+    /// `cloudflare: true` endpoint, the address of its `CF-Connecting-IP`).
     pub fn populate_value<'s>(
         &'s self,
         value: &'s str,
         req: &impl HttpRequestReader,
+        identity: Option<&HttpProxyPassIdentity>,
+        client_ip: &ConnectionIp,
     ) -> StrOrString<'s> {
         if !value.contains("${") {
             return value.into();
@@ -44,7 +53,7 @@ impl HttpProxyPassInner {
                 ContentToken::Text(text) => result.push_str(text),
                 ContentToken::Placeholder(placeholder) => match placeholder {
                     "ENDPOINT_IP" => {
-                        if let Some(ip) = self.connection_ip.get_ip_addr() {
+                        if let Some(ip) = client_ip.get_ip_addr() {
                             result.push_str(format!("{}", ip).as_str());
                         }
                     }
@@ -62,7 +71,7 @@ impl HttpProxyPassInner {
                     }
 
                     "CLIENT_CERT_CN" => {
-                        if let Some(identity) = self.identity.load_full() {
+                        if let Some(identity) = identity {
                             result.push_str(identity.as_str());
                         }
                     }

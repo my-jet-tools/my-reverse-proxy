@@ -136,6 +136,14 @@ pub struct AppContext {
     pub traffic: TrafficAccumulator,
 
     pub resolved_domain_ips: ResolvedDomainIps,
+
+    /// The networks Cloudflare connects to origins from: who a `cloudflare: true` endpoint takes
+    /// connections from. See [`crate::cloudflare`].
+    pub cloudflare_ip_ranges: crate::cloudflare::CloudflareIpRanges,
+
+    /// Every connection a `cloudflare: true` endpoint closed, and every Cloudflare server which
+    /// reached an endpoint without the flag - written to `$HOME/logs`.
+    pub cloudflare_deviations: crate::cloudflare::DeviationJournal,
 }
 
 impl AppContext {
@@ -257,6 +265,8 @@ impl AppContext {
             ip_blocklist,
             traffic: TrafficAccumulator::new(),
             resolved_domain_ips: ResolvedDomainIps::new(),
+            cloudflare_ip_ranges: crate::cloudflare::CloudflareIpRanges::new(),
+            cloudflare_deviations: crate::cloudflare::DeviationJournal::new(),
         }
     }
 

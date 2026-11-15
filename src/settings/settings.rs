@@ -144,6 +144,7 @@ mod tests {
                     modify_http_headers: None,
                     debug: None,
                     inject_country: None,
+                    cloudflare: None,
                     google_auth: None,
                     oauth: None,
                     whitelisted_ip: None,

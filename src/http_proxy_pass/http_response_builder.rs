@@ -3,16 +3,22 @@ use hyper::{
     HeaderMap,
 };
 
-use crate::{configurations::ModifyHeadersConfig, types::HttpRequestReader};
+use crate::{
+    configurations::ModifyHeadersConfig,
+    types::{ConnectionIp, HttpRequestReader},
+};
 
-use super::{HttpProxyPass, HttpProxyPassInner, LocationIndex};
+use super::{HttpProxyPass, HttpProxyPassIdentity, HttpProxyPassInner, LocationIndex};
 
+/// `identity`: who the request is of - what `${CLIENT_CERT_CN}` gives.
 pub fn modify_resp_headers(
     proxy_pass: &HttpProxyPass,
     inner: &HttpProxyPassInner,
     req_parts: &hyper::http::request::Parts,
     headers: &mut HeaderMap<HeaderValue>,
     location_index: &LocationIndex,
+    identity: Option<&HttpProxyPassIdentity>,
+    client_ip: &ConnectionIp,
 ) {
     let proxy_pass_location = inner.locations.find(location_index);
 
@@ -34,6 +40,8 @@ pub fn modify_resp_headers(
         req_parts,
         headers,
         &proxy_pass.endpoint_info.modify_response_headers,
+        identity,
+        client_ip,
     );
 
     modify_headers(
@@ -41,6 +49,8 @@ pub fn modify_resp_headers(
         req_parts,
         headers,
         &proxy_pass_location.config.modify_response_headers,
+        identity,
+        client_ip,
     );
 
     // `hsts` of the endpoint - the same header, on the same condition, as the h1
@@ -59,6 +69,8 @@ fn modify_headers(
     req_host_port: &impl HttpRequestReader,
     headers: &mut HeaderMap<hyper::header::HeaderValue>,
     headers_settings: &ModifyHeadersConfig,
+    identity: Option<&HttpProxyPassIdentity>,
+    client_ip: &ConnectionIp,
 ) {
     for remove in headers_settings.iter_remove() {
         headers.remove(remove);
@@ -68,7 +80,7 @@ fn modify_headers(
         headers.insert(
             HeaderName::from_bytes(header.as_bytes()).unwrap(),
             inner
-                .populate_value(value, req_host_port)
+                .populate_value(value, req_host_port, identity, client_ip)
                 .as_str()
                 .parse()
                 .unwrap(),

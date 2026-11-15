@@ -69,6 +69,8 @@ pub async fn handle_connection(
         let http_request_handler = Arc::new(http_request_handler);
 
         let http_request_handler_to_dispose = http_request_handler.clone();
+        // A request which finds the connection must not go on cuts it: see `ConnectionCut`.
+        let cut = http_request_handler.cut.clone();
 
         match io {
             TcpOrUnixSocket::Tcp(io) => {
@@ -86,9 +88,10 @@ pub async fn handle_connection(
                     }),
                 );
 
-                let result = first_request
-                    .serve(connection, client_timeouts.header_read_timeout)
-                    .await;
+                let result = cut
+                    .serve(first_request.serve(connection, client_timeouts.header_read_timeout))
+                    .await
+                    .flatten();
 
                 if let Some(Err(err)) = result {
                     println!(
@@ -113,9 +116,10 @@ pub async fn handle_connection(
                     }),
                 );
 
-                let result = first_request
-                    .serve(connection, client_timeouts.header_read_timeout)
-                    .await;
+                let result = cut
+                    .serve(first_request.serve(connection, client_timeouts.header_read_timeout))
+                    .await
+                    .flatten();
 
                 if let Some(Err(err)) = result {
                     println!(

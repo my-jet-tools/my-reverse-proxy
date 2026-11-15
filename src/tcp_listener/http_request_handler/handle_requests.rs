@@ -5,15 +5,17 @@ use http_body_util::Full;
 use rust_extensions::StopWatch;
 
 use crate::{
+    cloudflare::RequestClient,
     http_proxy_pass::{HttpProxyPass, ProxyPassError},
-    types::ConnectionIp,
 };
 
+/// `client`: who the request is of - see [`RequestClient`].
 pub async fn handle_requests(
     req: hyper::Request<hyper::body::Incoming>,
     proxy_pass: &HttpProxyPass,
-    connection_ip: ConnectionIp,
+    client: RequestClient,
 ) -> hyper::Result<hyper::Response<BoxBody<Bytes, String>>> {
+    let connection_ip = client.ip;
     let request_host_for_metric: Option<String> = req
         .headers()
         .get("host")
@@ -50,7 +52,7 @@ pub async fn handle_requests(
     }
 
     match proxy_pass
-        .send_payload(req, connection_ip, proxy_pass.endpoint_info.debug)
+        .send_payload(req, client, proxy_pass.endpoint_info.debug)
         .await
     {
         Ok(response) => {

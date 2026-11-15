@@ -750,9 +750,9 @@ Example of serving redirect to the same url but with https schema
 
 ### System Variables which can be used to populate headers or content
 
-* ${ENDPOINT_IP} - ip of server listen endpoint;
+* ${ENDPOINT_IP} - ip of the client: the address the connection came from, or, on a `cloudflare: true` endpoint, the address of the request's `CF-Connecting-IP` (see "Behind Cloudflare");
 * ${ENDPOINT_SCHEMA} - http or https schema of listen endpoint;
-* ${CLIENT_CERT_CN} - Common name of client certificate if endpoint is protected by client certificate;
+* ${CLIENT_CERT_CN} - Common name of client certificate if endpoint is protected by client certificate, or the email of the Google sign-in on an endpoint with `google_auth` - the same user `X-Forwarded-User` carries (see "Auto-injected request headers");
 * ${PATH_AND_QUERY} - path and query of request;
 * ${HOST_PORT} - host and port of request;
 
@@ -1452,8 +1452,8 @@ Some access settings can not be applied by a type of endpoint:
 
 | Endpoint type | Can not apply |
 |---|---|
-| `mcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users` |
-| `tcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users` |
+| `mcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users`, `cloudflare` |
+| `tcp` | `api_keys_auth` (of the endpoint or of a location), `google_auth`, `allowed_users`, `cloudflare` |
 | `http`, `http2` | `google_auth` - it works on `https` and `https2` endpoints |
 
 Settings with one of these load: an endpoint written wrong does not take the others down with it. But the endpoint **serves nobody** until the setting is removed - otherwise it would be open to everybody while its settings say it is guarded.
@@ -1468,16 +1468,39 @@ Settings with one of these load: an endpoint written wrong does not take the oth
 Regardless of `modify_http_headers` configuration, the reverse-proxy always injects
 the following headers into proxied HTTP/1.1 and HTTP/2 requests:
 
-* **`X-Forwarded-For`** — appends the incoming client IP per RFC 7239. If the
-  request already carries `X-Forwarded-For`, the client IP is appended to the
-  existing value (`{existing},{client_ip}`). No header is added for Unix socket
-  clients. This cannot be disabled.
+* **`X-Forwarded-For`** — the address of the client, and nothing the client
+  sent: the header is always the proxy's own. On an endpoint without
+  `cloudflare: true` it is the address the connection came from
+  (`X-Forwarded-For: 203.0.113.7`); on one with it, the client of
+  `CF-Connecting-IP`, then the Cloudflare server the request came through
+  (`X-Forwarded-For: 198.51.100.4, 172.68.1.2`) - see "Behind Cloudflare". So the
+  first address is always the client, and a client can not put an address of its
+  choice in front of it. What the client sent under the name is removed, also
+  spelled with `_` for `-` or with whitespace around it; so are `X-Real-IP` and
+  `True-Client-IP`, and, unless the request came through Cloudflare to a
+  `cloudflare: true` endpoint, `CF-Connecting-IP`, `CF-Connecting-IPv6` and
+  `CF-IPCountry` - on any other request they are the client's own word. A header
+  `modify_http_headers` adds under one of these names (`X-Real-IP: ${ENDPOINT_IP}`)
+  is the proxy's, and goes on. On a unix socket nothing is removed and no header
+  is added: the local process which connected is not the internet. This cannot be
+  disabled.
+
+* **`X-Forwarded-User`** — who the request is of: the email of the Google sign-in
+  on an endpoint with `google_auth`, else the CN of the client certificate on an
+  endpoint with `client_certificate_ca` (the certificate that endpoint's ca
+  verified). A request with no such user gets no header - on `http` and `http2`
+  endpoints there never is one. The header is always the proxy's own: a
+  client-supplied `X-Forwarded-User` is removed, also when spelled with `_` for
+  `-` or with whitespace around the name, which some servers read as the same
+  header; `modify_http_headers` can neither add nor remove it. A name that cannot
+  travel in a header as it is (a control character, a space at either end) is
+  not sent.
 
 * **`CF-IPCountry`** — only when `inject_country: true` is set on the endpoint.
   The 2-letter ISO country code of the client IP is looked up from the bundled
-  IPv4 geolocation database and written as `CF-IPCountry: XX`. Any client-supplied
-  `CF-IPCountry` header is overwritten. If the IP cannot be resolved to a
-  country, the header is not added.
+  IPv4 geolocation database and written as `CF-IPCountry: XX`. Any `CF-IPCountry`
+  the request came with is overwritten - Cloudflare's own too. If the IP cannot be
+  resolved to a country, the header is not added.
 
 ```yaml
 hosts:
@@ -1493,6 +1516,91 @@ table. IPv6 lookups use an IP2Location LITE DB1 `.BIN` file
 is shipped alongside the binary in the Docker image. If the `.BIN` file is
 missing, IPv6 clients simply do not receive the header.
 
+
+## Behind Cloudflare (`cloudflare: true`)
+
+A hostname is reached one of two ways: proxied by Cloudflare (the orange cloud), or
+straight by its DNS record (the grey cloud). `cloudflare: true` on the endpoint says it
+is the first - set it, and switch it, together with the cloud in Cloudflare. It holds
+for every name of the endpoint, its `additional_hosts` too: all of them have to go the
+same way.
+
+```yaml
+hosts:
+  api.example.com:443:
+    endpoint:
+      type: https
+      cloudflare: true
+```
+
+On such an endpoint:
+
+* **Only Cloudflare connects.** A connection is taken from the networks Cloudflare
+  publishes (`https://api.cloudflare.com/client/v4/ips`, read over https at startup and
+  then every hour; a failed read keeps the list read before). Until the list is read for
+  the first time - it is tried again in a few seconds, then up to every 5 minutes - the
+  endpoint takes no connection at all.
+* **The client of a request is its `CF-Connecting-IP`**, which Cloudflare always writes
+  itself, whatever the visitor sent. It is taken for every request, not for the
+  connection: Cloudflare sends the requests of all its visitors through the connections
+  it keeps to the origin. `whitelisted_ip`, `whitelisted_country`, `inject_country`, the
+  logs, the IP block-list and `${ENDPOINT_IP}` are of it, and `X-Forwarded-For` is
+  `<client>, <Cloudflare server>`. `CF-Connecting-IP` and `CF-IPCountry` go on as
+  Cloudflare wrote them.
+* **Anything else is closed without a word** - no response, the connection is dropped:
+  a connection from anywhere but Cloudflare (by its TLS handshake, or by the `Host` of a
+  request on a connection opened for another name), a request from Cloudflare without
+  exactly one `CF-Connecting-IP` which is an address (only a rule of a zone takes it
+  away - "Remove visitor IP headers", or somebody else's zone pointed at this origin),
+  and any connection before the networks of Cloudflare are read. A browser ends up in
+  none of these. On an `https2` / `http2` endpoint the whole connection is dropped, with
+  the other requests it carries.
+
+`mcp` and `tcp` endpoints read no HTTP, so they can not read `CF-Connecting-IP`: with
+`cloudflare: true` they serve nobody (see "An endpoint which can not apply an access
+setting").
+
+A server of Cloudflare is never counted by the IP block-list nor blocked by it: it brings
+the requests of many clients at once.
+
+What `cloudflare: true` proves is that a connection came from Cloudflare and that the
+client's address is true - not that it came through *your* zone: anybody can point a
+zone of theirs at the origin. Their address is still true then, but your zone's WAF and
+rate limits are not applied. Cloudflare's Authenticated Origin Pulls with a certificate
+of your own (`client_certificate_ca` on the endpoint) closes that too.
+
+### The journal of deviations
+
+Every connection such an endpoint closes, and every Cloudflare server which reaches an
+endpoint *without* `cloudflare: true` (likely a hostname proxied by Cloudflare whose flag
+was forgotten: it is served, and its upstream is told the address of the Cloudflare
+server), is written to a file of `$HOME/logs` - one file per hour (UTC):
+
+```
+$HOME/logs/cloudflare-deviations-2026-11-15-14.log
+
+2026-11-15T14:03:21.512Z endpoint=api.example.com:443 reason=not_cloudflare_peer peer=203.0.113.7 host="api.example.com"
+2026-11-15T14:03:22.004Z endpoint=api.example.com:443 reason=bad_cf_connecting_ip peer=172.68.1.2 host="api.example.com" value="1.2.3.4, 5.6.7.8"
+2026-11-15T14:07:10.330Z endpoint=web.example.com:443 reason=cloudflare_peer_without_flag peer=172.68.1.2 host="web.example.com"
+```
+
+| `reason` | What happened |
+|---|---|
+| `not_cloudflare_peer` | a connection to a `cloudflare: true` endpoint not from Cloudflare - closed |
+| `cloudflare_ranges_not_loaded` | the networks of Cloudflare are not read yet - closed |
+| `no_cf_connecting_ip` | from Cloudflare, no `CF-Connecting-IP` - closed |
+| `several_cf_connecting_ip` | from Cloudflare, more than one `CF-Connecting-IP` - closed |
+| `bad_cf_connecting_ip` | from Cloudflare, a `CF-Connecting-IP` which is not an address - closed |
+| `cloudflare_peer_without_flag` | a Cloudflare server reached an endpoint without `cloudflare: true` - served, noted once per connection |
+
+Whoever is turned away decides how many lines there are, so the journal is bounded: a
+deviation goes to a queue of 10 000 and the connection goes on (past that, deviations are
+not written); a file is written up to 10 MB (past that, the rest of the hour is not
+written, and the console says so once); a file older than 24 hours is deleted (only the
+journal's own files - other logs may share the folder). What a client sent (`host`,
+`value`) is cut to 64 bytes, and anything but printable text in it is written as `\xNN`.
+The journal never holds up a connection: a folder which can not be written is told of in
+the console.
 
 ## Settings up SSH tunnels.
 

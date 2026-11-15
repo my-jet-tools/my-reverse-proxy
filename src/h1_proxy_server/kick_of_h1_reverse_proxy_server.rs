@@ -9,7 +9,16 @@ use crate::{
 #[derive(Clone)]
 pub struct HttpConnectionInfo {
     pub cn_user_name: Option<Arc<ClientCertificateData>>,
+    /// The client of the request being served: the peer of the connection - or, on a request
+    /// through Cloudflare to a `cloudflare: true` endpoint, the address of its `CF-Connecting-IP`.
+    /// Set for every request ([`Self::set_request_client`]): Cloudflare sends the requests of
+    /// all its visitors through the connections it keeps.
     pub connection_ip: ConnectionIp,
+    /// The Cloudflare server the request being served came through, when `connection_ip` is of
+    /// its `CF-Connecting-IP`.
+    pub cloudflare_edge: Option<std::net::IpAddr>,
+    /// The peer of the connection - what it was accepted from.
+    pub peer_ip: ConnectionIp,
     pub endpoint_info: Option<Arc<HttpEndpointInfo>>,
     pub listen_config: Arc<HttpListenPortConfiguration>,
     /// `AppConfiguration::generation` at the moment `listen_config` was taken.
@@ -25,11 +34,25 @@ impl HttpConnectionInfo {
     ) -> Self {
         Self {
             connection_ip,
+            cloudflare_edge: None,
+            peer_ip: connection_ip,
             cn_user_name,
             endpoint_info,
             listen_config,
             config_generation: crate::app::APP_CTX.current_configuration.generation(),
         }
+    }
+
+    pub fn request_client(&self) -> crate::cloudflare::RequestClient {
+        crate::cloudflare::RequestClient {
+            ip: self.connection_ip,
+            cloudflare_edge: self.cloudflare_edge,
+        }
+    }
+
+    pub fn set_request_client(&mut self, client: crate::cloudflare::RequestClient) {
+        self.connection_ip = client.ip;
+        self.cloudflare_edge = client.cloudflare_edge;
     }
 
     /// A keep-alive connection keeps serving the port configuration it was

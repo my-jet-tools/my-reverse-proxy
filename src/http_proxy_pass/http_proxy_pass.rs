@@ -8,11 +8,9 @@ use my_http_client::utils::into_full_body_response;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    configurations::*,
-    http_proxy_pass::GoogleAuthResult,
+    cloudflare::RequestClient, configurations::*, http_proxy_pass::GoogleAuthResult,
     tcp_gateway::forwarded_connection::ProxyConnectionAbort,
-    tcp_listener::https::ClientCertificateData,
-    types::{ConnectionIp, HttpTimeouts},
+    tcp_listener::https::ClientCertificateData, types::HttpTimeouts,
 };
 
 use super::{
@@ -28,7 +26,6 @@ pub struct HttpProxyPass {
 
 impl HttpProxyPass {
     pub async fn new(
-        connection_ip: ConnectionIp,
         endpoint_info: Arc<HttpEndpointInfo>,
         listening_port_info: HttpListenPortInfo,
         client_cert: Option<Arc<ClientCertificateData>>,
@@ -36,10 +33,9 @@ impl HttpProxyPass {
         let locations = ProxyPassLocations::new(&endpoint_info).await;
         Self {
             inner: ArcSwapOption::from(Some(Arc::new(HttpProxyPassInner::new(
-                client_cert.map(HttpProxyPassIdentity::ClientCert),
+                client_cert,
                 locations,
                 listening_port_info.clone(),
-                connection_ip,
             )))),
 
             listening_port_info,
@@ -47,12 +43,16 @@ impl HttpProxyPass {
         }
     }
 
+    /// `client`: who the request is of - the peer of the connection, or, through Cloudflare to a
+    /// `cloudflare: true` endpoint, the address of the request's `CF-Connecting-IP`. Every check
+    /// and every header of the request is of it.
     pub async fn send_payload(
         &self,
         req: hyper::Request<hyper::body::Incoming>,
-        connection_ip: ConnectionIp,
+        client: RequestClient,
         _debug: bool,
     ) -> Result<hyper::Result<hyper::Response<BoxBody<Bytes, String>>>, ProxyPassError> {
+        let connection_ip = client.ip;
         let endpoint = self.endpoint_info.host_endpoint.as_str();
         let endpoint_debug = crate::app::APP_CTX.debug_flags.is_endpoint_debug(endpoint);
         let ip = connection_ip.get_ip_log();
@@ -110,32 +110,37 @@ impl HttpProxyPass {
             super::OAuthGateH2Outcome::Answered(response) => return Ok(Ok(response)),
         };
 
-        let mut req = HttpRequestBuilder::new(req);
+        let mut req = HttpRequestBuilder::new(req, client);
 
-        let (request, content_source, location_index, location_debug) = {
+        let (request, content_source, location_index, location_debug, identity) = {
             let Some(inner) = self.inner.load_full() else {
                 return Err(ProxyPassError::Disposed);
             };
 
-            match self.handle_auth_with_g_auth(&req).await {
-                GoogleAuthResult::Passed(user) => {
-                    if let Some(email) = user {
-                        inner
-                            .identity
-                            .store(Some(Arc::new(HttpProxyPassIdentity::GoogleUser(email))));
-                    }
+            // Who this request is of: the Google sign-in of its own cookie, else the client
+            // certificate of the connection. It stays with the request and is never put on the
+            // connection: an h2 connection can carry the requests of several people at once (a
+            // front proxy multiplexes them), and one person's email must not reach another's
+            // request - in `allowed_users`, `X-Forwarded-User` or `${CLIENT_CERT_CN}`.
+            let identity = match self.handle_auth_with_g_auth(&req).await {
+                GoogleAuthResult::Passed(Some(email)) => {
+                    Some(HttpProxyPassIdentity::GoogleUser(email))
                 }
+                GoogleAuthResult::Passed(None) => inner
+                    .client_cert
+                    .clone()
+                    .map(HttpProxyPassIdentity::ClientCert),
                 GoogleAuthResult::Content(content) => return Ok(content),
                 GoogleAuthResult::DomainIsNotAuthorized => {
                     return Err(ProxyPassError::Unauthorized);
                 }
-            }
+            };
 
             if let Some(allowed_user_list_id) = self.endpoint_info.allowed_user_list_id.as_ref() {
                 // No identity means NOT allowed — an anonymous request must not
                 // bypass the allow-list. Same fail-closed rule as the h1 path's
                 // user_is_allowed (that one answers 401, this path 403).
-                let allowed = match inner.identity.load_full() {
+                let allowed = match identity.as_ref() {
                     Some(identity) => {
                         crate::app::APP_CTX
                             .allowed_users_list
@@ -199,7 +204,7 @@ impl HttpProxyPass {
                 .debug_flags
                 .is_location_debug(location_index.id);
 
-            req.process_headers(self, &inner, proxy_pass_location);
+            req.process_headers(self, &inner, proxy_pass_location, identity.as_ref());
 
             let request = req.into_request(self, proxy_pass_location).await?;
 
@@ -217,6 +222,7 @@ impl HttpProxyPass {
                 proxy_pass_location.content_source.clone(),
                 location_index,
                 location_debug,
+                identity,
             )
         };
 
@@ -384,6 +390,8 @@ impl HttpProxyPass {
             &request.req_parts,
             response.headers_mut(),
             &location_index,
+            identity.as_ref(),
+            &connection_ip,
         );
 
         Ok(Ok(response))

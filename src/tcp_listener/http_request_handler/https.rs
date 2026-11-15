@@ -7,7 +7,7 @@ use http_body_util::combinators::BoxBody;
 use crate::{
     configurations::HttpListenPortConfiguration,
     http_proxy_pass::{HttpListenPortInfo, HttpProxyPass},
-    tcp_listener::https::ClientCertificateData,
+    tcp_listener::{https::ClientCertificateData, ConnectionCut},
     types::ConnectionIp,
 };
 
@@ -18,8 +18,11 @@ use super::{
 
 pub struct HttpsRequestsHandler {
     endpoints: LiveEndpointCache,
+    /// The peer of the connection.
     connection_ip: ConnectionIp,
     client_certificate: Option<Arc<ClientCertificateData>>,
+    /// What a request cuts the connection with: see [`ConnectionCut`].
+    pub cut: Arc<ConnectionCut>,
 }
 
 impl HttpsRequestsHandler {
@@ -32,6 +35,7 @@ impl HttpsRequestsHandler {
             endpoints: LiveEndpointCache::new(listen_port_config),
             connection_ip,
             client_certificate,
+            cut: ConnectionCut::new(),
         }
     }
 
@@ -135,11 +139,17 @@ impl HttpsRequestsHandler {
         // SNI endpoint; a coalesced / cross-`Host` request (RFC 7540 §9.1.1) must
         // still satisfy the allow-lists of the vhost it actually targets. Skipped
         // when the client IP is unknown (unix socket), matching the
-        // location-level check in HttpProxyPass::send_payload.
-        if let Some(refusal) = http_endpoint_info
-            .address_refusal(&self.connection_ip)
-            .await
-        {
+        // location-level check in HttpProxyPass::send_payload. The client of a
+        // `cloudflare: true` endpoint is not the peer: its requests are checked
+        // one by one, by `send_payload`.
+        let refusal = if http_endpoint_info.cloudflare {
+            None
+        } else {
+            http_endpoint_info
+                .address_refusal(&self.connection_ip)
+                .await
+        };
+        if let Some(refusal) = refusal {
             crate::app::APP_CTX.proxy_logs.write_port(
                 listen_port_config.listen_host.get_log_key().as_str(),
                 self.connection_ip.get_ip_log(),
@@ -178,13 +188,8 @@ impl HttpsRequestsHandler {
             .filter(|cert| http_endpoint_info.client_cert_identity_applies(cert))
             .cloned();
 
-        let http_proxy_pass = HttpProxyPass::new(
-            self.connection_ip,
-            http_endpoint_info,
-            listening_port_info,
-            client_certificate,
-        )
-        .await;
+        let http_proxy_pass =
+            HttpProxyPass::new(http_endpoint_info, listening_port_info, client_certificate).await;
 
         Ok(self
             .endpoints
@@ -195,12 +200,21 @@ impl HttpsRequestsHandler {
         &self,
         req: hyper::Request<hyper::body::Incoming>,
     ) -> hyper::Result<hyper::Response<BoxBody<Bytes, String>>> {
-        match self.get_http_proxy_pass(&req).await {
-            Ok(proxy_pass) => {
-                super::handle_requests::handle_requests(req, &proxy_pass, self.connection_ip).await
-            }
-            Err(rejected) => Ok(*rejected),
-        }
+        let proxy_pass = match self.get_http_proxy_pass(&req).await {
+            Ok(proxy_pass) => proxy_pass,
+            Err(rejected) => return Ok(*rejected),
+        };
+
+        // Who the request is of. A `cloudflare: true` endpoint reached otherwise than through
+        // Cloudflare cuts the connection without a word - every request of it with it.
+        let Some(client) =
+            super::utils::client_of_request(&proxy_pass.endpoint_info, self.connection_ip, &req)
+        else {
+            self.cut.cut_now().await;
+            return Ok(super::utils::answer_of_a_cut_connection());
+        };
+
+        super::handle_requests::handle_requests(req, &proxy_pass, client).await
     }
 
     pub async fn dispose(&self) {

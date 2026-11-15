@@ -7,6 +7,45 @@ use crate::error_templates::DebugPageSection;
 use crate::http_proxy_pass::ProxyPassError;
 use crate::types::ConnectionIp;
 
+/// Who `req`, on a connection from `peer`, is of - see [`crate::cloudflare::client_of_request`].
+/// `None`: the connection is to be cut without a word.
+pub fn client_of_request(
+    endpoint: &crate::configurations::HttpEndpointInfo,
+    peer: ConnectionIp,
+    req: &hyper::Request<hyper::body::Incoming>,
+) -> Option<crate::cloudflare::RequestClient> {
+    let host = req.uri().host().map(str::as_bytes).or_else(|| {
+        req.headers()
+            .get(hyper::header::HOST)
+            .map(|value| value.as_bytes())
+    });
+
+    let cf_connecting_ip = req
+        .headers()
+        .iter()
+        .filter(|(name, _)| {
+            crate::cloudflare::header_name_is(
+                name.as_str().as_bytes(),
+                crate::cloudflare::CF_CONNECTING_IP,
+            )
+        })
+        .map(|(_, value)| value.as_bytes());
+
+    crate::cloudflare::client_of_request(
+        endpoint.as_str(),
+        endpoint.cloudflare,
+        peer,
+        cf_connecting_ip,
+        host,
+    )
+}
+
+/// What a request which cut its connection answers - to nobody: see
+/// [`crate::tcp_listener::ConnectionCut`].
+pub fn answer_of_a_cut_connection() -> hyper::Response<BoxBody<Bytes, String>> {
+    *create_err_response(hyper::StatusCode::BAD_REQUEST, Bytes::new())
+}
+
 /// A request refused before it reached a location: the response to answer with.
 /// Boxed, because the lookup it comes from runs for every request and its `Ok`
 /// is a single `Arc`.

@@ -16,6 +16,9 @@ pub struct HttpEndpointInfo {
     pub host_endpoint: EndpointHttpHostString,
     pub debug: bool,
     pub inject_country: bool,
+    /// `cloudflare: true`: the endpoint takes connections from Cloudflare only, and the client of
+    /// each request is its `CF-Connecting-IP`. See [`crate::cloudflare`].
+    pub cloudflare: bool,
     pub listen_endpoint_type: ListenHttpEndpointType,
     pub g_auth: Option<String>,
     /// Name of the `oauth:` block gating this endpoint, when it has one. The
@@ -66,6 +69,7 @@ pub struct HttpEndpointInfoParams {
     pub listen_endpoint_type: ListenHttpEndpointType,
     pub debug: bool,
     pub inject_country: bool,
+    pub cloudflare: bool,
     pub g_auth: Option<String>,
     pub oauth: Option<String>,
     pub ssl_certificate_id: Option<SslCertificateId>,
@@ -93,6 +97,7 @@ impl HttpEndpointInfo {
             listen_endpoint_type,
             debug,
             inject_country,
+            cloudflare,
             g_auth,
             oauth,
             ssl_certificate_id,
@@ -132,6 +137,7 @@ impl HttpEndpointInfo {
             host_endpoint,
             debug,
             inject_country,
+            cloudflare,
             listen_endpoint_type,
             g_auth,
             oauth,

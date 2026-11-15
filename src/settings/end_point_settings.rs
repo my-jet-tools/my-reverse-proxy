@@ -26,6 +26,10 @@ pub struct EndpointSettings {
     pub modify_http_headers: Option<ModifyHttpHeadersSettings>,
     pub debug: Option<bool>,
     pub inject_country: Option<bool>,
+    /// `true`: the hostname is proxied by Cloudflare, and nothing else may reach it - a
+    /// connection is taken from the networks of Cloudflare only, and the client of a request is
+    /// its `CF-Connecting-IP`. See [`crate::cloudflare`].
+    pub cloudflare: Option<bool>,
     pub whitelisted_ip: Option<String>,
     /// The id of a list of `country_white_lists`: a client is served only from a country of it.
     /// Together with `whitelisted_ip` a client has to pass both.
@@ -51,6 +55,10 @@ impl EndpointSettings {
 
     pub fn get_inject_country(&self) -> bool {
         self.inject_country.unwrap_or(false)
+    }
+
+    pub fn get_cloudflare(&self) -> bool {
+        self.cloudflare.unwrap_or(false)
     }
 
     pub fn get_mcp_buffer_size(&self) -> usize {

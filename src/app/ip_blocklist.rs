@@ -68,8 +68,17 @@ impl IpBlocklist {
         }
     }
 
+    /// Never counted and never blocked: an address of the global allow-list, and a server of
+    /// Cloudflare - it brings the requests of many clients at once, and blocking it would turn
+    /// away every one of them. The client of a request through Cloudflare to a
+    /// `cloudflare: true` endpoint is counted by its own address.
+    fn is_exempt(&self, ip: &IpAddr) -> bool {
+        self.is_white_listed(ip)
+            || crate::app::APP_CTX.cloudflare_ip_ranges.contains(*ip) == Some(true)
+    }
+
     pub fn is_blocked(&self, ip: &IpAddr) -> bool {
-        if self.is_white_listed(ip) {
+        if self.is_exempt(ip) {
             return false;
         }
         let map = self.map.lock();
@@ -107,7 +116,7 @@ impl IpBlocklist {
     }
 
     pub fn register_failure(&self, ip: IpAddr, severity: FailureSeverity) {
-        if self.is_white_listed(&ip) {
+        if self.is_exempt(&ip) {
             return;
         }
 

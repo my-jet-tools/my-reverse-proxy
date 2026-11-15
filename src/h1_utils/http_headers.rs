@@ -144,6 +144,32 @@ impl Http1Headers {
         }
     }
 
+    /// Every value of the headers an upstream could read as `header` (written in lowercase - see
+    /// [`crate::cloudflare::header_name_is`]), in the order they came. A name sent twice, or once
+    /// as `CF-Connecting-IP` and once as `CF_Connecting_IP`, gives two values.
+    pub fn header_values_read_as<'s>(&self, src: &'s [u8], header: &str) -> Vec<&'s [u8]> {
+        let mut result = Vec::new();
+        let mut pos = self.first_line_end + crate::consts::HTTP_CR_LF.len();
+
+        while let Some(end) = src.find_sequence_pos(crate::consts::HTTP_CR_LF, pos) {
+            if end == pos {
+                break;
+            }
+
+            let line = &src[pos..end];
+
+            if let Some(colon) = line.iter().position(|&byte| byte == b':') {
+                if crate::cloudflare::header_name_is(&line[..colon], header) {
+                    result.push(&line[colon + 1..]);
+                }
+            }
+
+            pos = end + crate::consts::HTTP_CR_LF.len();
+        }
+
+        result
+    }
+
     pub fn push_first_line_with_other_path(
         &self,
         data: &[u8],

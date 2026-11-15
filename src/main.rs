@@ -2,14 +2,16 @@ use std::{sync::Arc, time::Duration};
 
 use rust_extensions::MyTimer;
 use timers::{
-    CrlRefresherTimer, EndpointRpsTimer, GatewaySyncCertsTimer, GcConnectionsTimer, GcPoolsTimer,
-    IpBlocklistGcTimer, MetricsTimer, PoolSupervisorTimer, ResolveDomainsIpTimer,
-    SslCertsRefreshTimer, TrafficTimer,
+    CloudflareIpRangesTimer, CrlRefresherTimer, EndpointRpsTimer, GatewaySyncCertsTimer,
+    GcConnectionsTimer, GcPoolsTimer, IpBlocklistGcTimer, MetricsTimer, PoolSupervisorTimer,
+    ResolveDomainsIpTimer, SslCertsRefreshTimer, TrafficTimer,
 };
 
 mod api_keys;
 mod app;
+mod cloudflare;
 mod flows;
+mod forwarded_user;
 //mod http2_executor;
 
 mod configurations;
@@ -71,6 +73,18 @@ async fn main() {
     my_tls::install_default_crypto_providers();
     crate::http_server::start();
 
+    // The networks of Cloudflare: read right away, before the endpoints start listening - until
+    // they are read a `cloudflare: true` endpoint takes no connection.
+    crate::app::spawn_named(
+        "cloudflare_ip_ranges_on_start",
+        crate::timers::load_cloudflare_ip_ranges_on_start(),
+    );
+
+    match crate::cloudflare::journal_dir() {
+        Ok(dir) => crate::app::APP_CTX.cloudflare_deviations.start(dir),
+        Err(err) => println!("Cloudflare deviations are not journaled: {err}"),
+    }
+
     crate::flows::load_everything_from_settings()
         .await
         .expect("Failed to load initial settings");
@@ -87,6 +101,9 @@ async fn main() {
     my_timer.register_timer("CRL Refresh", Arc::new(CrlRefresherTimer));
 
     my_timer.register_timer("SSL Certs Refresh", Arc::new(SslCertsRefreshTimer));
+
+    // The networks of Cloudflare, read again every hour (the first read is at startup, above).
+    my_timer.register_timer("Cloudflare IP ranges", Arc::new(CloudflareIpRangesTimer));
 
     my_timer.start();
 
