@@ -205,6 +205,7 @@ pub async fn compile_http_configuration(
         inject_country: host_settings.endpoint.get_inject_country(),
         cloudflare: host_settings.endpoint.get_cloudflare(),
         request_with_header_only,
+        api_keys_auth: crate::api_keys::resolve_api_keys_auth(None, endpoint_api_keys_auth),
         g_auth,
         oauth,
         ssl_certificate_id: ssl_cert_id,

@@ -139,6 +139,11 @@ impl RequiredHeaders {
         self.headers.is_empty()
     }
 
+    /// The names of the headers, lowercase, in the order of the settings - never their values.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.headers.iter().map(|header| header.name.as_str())
+    }
+
     /// What is wrong with a request - `None`: nothing. `headers` gives the headers of the request,
     /// each as its name and its value, as they came.
     pub fn deviation<'h, I>(&self, headers: impl Fn() -> I) -> Option<Deviation>

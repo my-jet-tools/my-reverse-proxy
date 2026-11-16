@@ -979,3 +979,86 @@ table.locations.gateway-routes thead th {
     font-size: 11px;
     line-height: 1.4;
 }
+
+/* ---------- Access chips: Cloudflare-only, keys, country whitelist ---------- */
+
+/* Cloudflare-only — orange accent */
+.meta-chip.cloudflare .label {
+    background: #dd6b20;
+}
+.meta-chip.cloudflare .value {
+    background: #feebc8;
+    color: #7b341e;
+}
+
+/* cloudflare: true, but the networks of Cloudflare are not read yet — red warning */
+.meta-chip.cloudflare.missing .label {
+    background: #c53030;
+}
+.meta-chip.cloudflare.missing .value {
+    background: #fed7d7;
+    color: #742a2a;
+}
+.meta-chip.cloudflare.missing .value.state {
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+    font-weight: 700;
+    border-left: 1px solid #fc8181;
+}
+
+/* Keys (X-Api-Key set, required header) — purple accent */
+.meta-chip.key .label {
+    background: #6b46c1;
+}
+.meta-chip.key .value {
+    background: #e9d8fd;
+    color: #44337a;
+}
+.meta-chip.key .value + .value {
+    border-left: 1px solid #b794f4;
+}
+
+/* A location's key set taken from the endpoint — dimmed */
+.meta-chip.key.inherited {
+    opacity: 0.55;
+}
+
+/* api_keys_auth: none under an endpoint which requires a key — the hole must be visible */
+.meta-chip.key.open .label {
+    background: #c05621;
+}
+.meta-chip.key.open .value {
+    background: #feebc8;
+    color: #7b341e;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+/* Country whitelist — teal accent */
+.meta-chip.country .label {
+    background: #2c7a7b;
+}
+.meta-chip.country .value {
+    background: #b2f5ea;
+    color: #234e52;
+}
+.meta-chip.country .value.state {
+    border-left: 1px solid #4fd1c5;
+    font-family: inherit;
+    font-weight: 600;
+}
+
+/* Access cell of a location row */
+.loc-access {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+}
+
+.loc-access .access-none {
+    color: var(--text-dim);
+}

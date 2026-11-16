@@ -73,6 +73,26 @@ pub struct HttpEndpointInfoModel {
     pub client_cert_unlimited_expiration: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub g_auth: Option<String>,
+    /// `cloudflare: true` — the endpoint takes connections from Cloudflare only.
+    #[serde(default)]
+    pub cloudflare: bool,
+    /// `cloudflare: true`, and the networks of Cloudflare are not read yet — the endpoint takes
+    /// no connection until they are.
+    #[serde(default)]
+    pub cloudflare_ranges_missing: bool,
+    /// `request_with_header_only` — the names of the headers every request has to come with.
+    /// Their values are secrets and never come here.
+    #[serde(default)]
+    pub request_with_header_only: Vec<String>,
+    /// `api_keys_auth` of the endpoint — the set of keys every location requires in `X-Api-Key`,
+    /// unless the location names its own set or `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_keys_auth: Option<String>,
+    /// `whitelisted_country` of the endpoint, and the countries of the list (empty — nobody).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_list: Option<String>,
+    #[serde(default)]
+    pub country_list_countries: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -97,6 +117,18 @@ pub struct HttpProxyPassLocationModel {
     /// The location has `strip_path`: its path is cut off the request before it goes upstream.
     #[serde(default)]
     pub strip_path: bool,
+    /// `whitelisted_ip` of the location — on top of the endpoint's list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_list: Option<String>,
+    /// `whitelisted_country` of the location — on top of the endpoint's list — and its countries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_list: Option<String>,
+    #[serde(default)]
+    pub country_list_countries: Vec<String>,
+    /// The set of keys a request has to carry one of in `X-Api-Key`: the location's own, or the
+    /// endpoint's. `None` — open: nothing is set, or `none` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_keys_auth: Option<String>,
 }
 
 /// Mirror of `GatewayServerStatus` — the local server-side gateway endpoint and

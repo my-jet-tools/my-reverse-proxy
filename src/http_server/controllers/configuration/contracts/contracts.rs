@@ -286,6 +286,21 @@ pub struct HttpEndpointInfoModel {
     // validity dates of client certificates are not enforced on this endpoint.
     pub client_cert_unlimited_expiration: bool,
     pub g_auth: Option<String>,
+    // `cloudflare: true`: the endpoint takes connections from Cloudflare only.
+    pub cloudflare: bool,
+    // `cloudflare: true`, and the networks of Cloudflare are not read yet: the endpoint takes no
+    // connection until they are.
+    pub cloudflare_ranges_missing: bool,
+    // `request_with_header_only`: the names of the headers every request has to come with -
+    // never their values.
+    pub request_with_header_only: Vec<String>,
+    // `api_keys_auth` of the endpoint (or of its template): the set of keys every location of it
+    // requires in `X-Api-Key`, unless the location names its own set or `none`.
+    pub api_keys_auth: Option<String>,
+    // `whitelisted_country` of the endpoint (or of its template), and the countries of that list:
+    // two-letter codes, `*` for every client - empty when the list lets nobody in.
+    pub country_list: Option<String>,
+    pub country_list_countries: Vec<String>,
 }
 
 impl HttpEndpointInfoModel {
@@ -302,6 +317,9 @@ impl HttpEndpointInfoModel {
             .host_endpoint
             .get_server_name()
             .and_then(|domain| crate::app::APP_CTX.resolved_domain_ips.get_display(domain));
+
+        let (country_list, country_list_countries) =
+            country_list_of(endpoint.whitelisted_country.as_deref());
 
         Self {
             host: host_key,
@@ -325,6 +343,17 @@ impl HttpEndpointInfoModel {
             client_cert_missing: false,
             client_cert_unlimited_expiration: endpoint.client_certificate_unlimited_expiration,
             g_auth: endpoint.g_auth.clone(),
+            cloudflare: endpoint.cloudflare,
+            cloudflare_ranges_missing: endpoint.cloudflare
+                && !crate::app::APP_CTX.cloudflare_ip_ranges.is_loaded(),
+            request_with_header_only: endpoint
+                .request_with_header_only
+                .names()
+                .map(|name| name.to_string())
+                .collect(),
+            api_keys_auth: endpoint.api_keys_auth.clone(),
+            country_list,
+            country_list_countries,
             inbound_connections,
             locations: endpoint
                 .locations
@@ -339,6 +368,12 @@ impl HttpEndpointInfoModel {
             .host_endpoint
             .get_server_name()
             .and_then(|domain| crate::app::APP_CTX.resolved_domain_ips.get_display(domain));
+
+        let (country_list, country_list_countries) =
+            country_list_of(config.country_white_list.as_deref());
+
+        let (location_country_list, location_country_list_countries) =
+            country_list_of(config.location_country_white_list.as_deref());
 
         Self {
             host: config.host_endpoint.as_str().to_string(),
@@ -359,6 +394,10 @@ impl HttpEndpointInfoModel {
                 pool_total: None,
                 last_status: None,
                 strip_path: false,
+                ip_list: config.location_ip_white_list_id.clone(),
+                country_list: location_country_list,
+                country_list_countries: location_country_list_countries,
+                api_keys_auth: None,
             }],
             allowed_user_list_id: None,
             ssl_cert_id: None,
@@ -367,6 +406,12 @@ impl HttpEndpointInfoModel {
             client_cert_missing: false,
             client_cert_unlimited_expiration: false,
             g_auth: None,
+            cloudflare: false,
+            cloudflare_ranges_missing: false,
+            request_with_header_only: Vec::new(),
+            api_keys_auth: None,
+            country_list,
+            country_list_countries,
         }
     }
 
@@ -406,6 +451,15 @@ pub struct HttpProxyPassLocationModel {
     pub last_status: Option<i64>,
     // The location has `strip_path`: its path is cut off the request before it goes upstream.
     pub strip_path: bool,
+    // `whitelisted_ip` of the location: applied on top of the endpoint's list.
+    pub ip_list: Option<String>,
+    // `whitelisted_country` of the location (on top of the endpoint's list), and its countries.
+    pub country_list: Option<String>,
+    pub country_list_countries: Vec<String>,
+    // The set of keys a request to the location has to carry one of in `X-Api-Key`: its own
+    // `api_keys_auth`, or else the endpoint's. `None`: the location is open - nothing is set, or
+    // `none` is (with the endpoint's set given, `none` is what opened it).
+    pub api_keys_auth: Option<String>,
 }
 
 impl HttpProxyPassLocationModel {
@@ -414,6 +468,9 @@ impl HttpProxyPassLocationModel {
             Some((a, t, s)) => (Some(a), Some(t), Some(s.as_u8() as i64)),
             None => (None, None, None),
         };
+
+        let (country_list, country_list_countries) =
+            country_list_of(src.whitelisted_country.as_deref());
 
         Self {
             path: src.path.to_string(),
@@ -430,7 +487,27 @@ impl HttpProxyPassLocationModel {
             pool_total,
             last_status,
             strip_path: src.strip_path,
+            ip_list: src.ip_white_list_id.clone(),
+            country_list,
+            country_list_countries,
+            api_keys_auth: src.api_keys_auth.clone(),
         }
+    }
+}
+
+/// The id of a `whitelisted_country` list and its countries, as the dashboard shows them.
+fn country_list_of(
+    list: Option<&crate::types::CountryWhiteList>,
+) -> (Option<String>, Vec<String>) {
+    match list {
+        Some(list) => (
+            Some(list.id().to_string()),
+            list.countries()
+                .into_iter()
+                .map(|country| country.to_string())
+                .collect(),
+        ),
+        None => (None, Vec::new()),
     }
 }
 
@@ -503,5 +580,137 @@ mod tests {
         // The field as the UI reads it.
         let json = serde_json::to_value(&locations[0]).unwrap();
         assert_eq!(json["strip_path"], serde_json::Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn the_models_show_how_the_endpoint_and_each_location_are_guarded() {
+        let host_settings: HostSettings = serde_yaml::from_str(
+            [
+                "endpoint:",
+                "  type: http",
+                "  cloudflare: true",
+                "  request_with_header_only:",
+                "  - X-Zone-Secret: the-zone-secret-value",
+                "  api_keys_auth: dashboard_model_clients",
+                "  whitelisted_country: dashboard_model_ua_de",
+                "locations:",
+                "- path: /health",
+                "  proxy_pass_to: http://127.0.0.1:9000",
+                "  api_keys_auth: none",
+                "- path: /admin",
+                "  proxy_pass_to: http://127.0.0.1:9001",
+                "  api_keys_auth: dashboard_model_admins",
+                "  whitelisted_ip: dashboard_model_office",
+                "  whitelisted_country: dashboard_model_ua",
+                "- path: /",
+                "  proxy_pass_to: http://127.0.0.1:9002",
+            ]
+            .join("\n")
+            .as_str(),
+        )
+        .unwrap();
+
+        let settings = SettingsCompiled {
+            ip_white_lists: [(
+                "dashboard_model_office".to_string(),
+                vec!["10.0.0.5".to_string()],
+            )]
+            .into(),
+            country_white_lists: [
+                (
+                    "dashboard_model_ua_de".to_string(),
+                    vec!["UKR".to_string(), "de".to_string()],
+                ),
+                ("dashboard_model_ua".to_string(), vec!["UA".to_string()]),
+            ]
+            .into(),
+            ..Default::default()
+        };
+
+        let endpoint_info = crate::scripts::compile_http_configuration(
+            &settings,
+            EndpointHttpHostString::new("localhost:8000".to_string()).unwrap(),
+            &host_settings,
+            ListenHttpEndpointType::Http1,
+        )
+        .await
+        .unwrap();
+
+        let endpoint = HttpEndpointInfoModel::from_http_endpoint(&endpoint_info);
+
+        assert!(endpoint.cloudflare);
+        assert_eq!(endpoint.request_with_header_only, vec!["x-zone-secret"]);
+        assert_eq!(
+            endpoint.api_keys_auth.as_deref(),
+            Some("dashboard_model_clients")
+        );
+        assert_eq!(
+            endpoint.country_list.as_deref(),
+            Some("dashboard_model_ua_de")
+        );
+        assert_eq!(endpoint.country_list_countries, vec!["DE", "UA"]);
+
+        let [health, admin, root] = endpoint.locations.as_slice() else {
+            panic!("three locations are expected");
+        };
+
+        // `none` opened it, although the endpoint is guarded.
+        assert_eq!(health.api_keys_auth, None);
+        assert_eq!(health.ip_list, None);
+        assert_eq!(health.country_list, None);
+
+        assert_eq!(
+            admin.api_keys_auth.as_deref(),
+            Some("dashboard_model_admins")
+        );
+        assert_eq!(admin.ip_list.as_deref(), Some("dashboard_model_office"));
+        assert_eq!(admin.country_list.as_deref(), Some("dashboard_model_ua"));
+        assert_eq!(admin.country_list_countries, vec!["UA"]);
+
+        // The endpoint's set; the endpoint's country list is not repeated on the location.
+        assert_eq!(
+            root.api_keys_auth.as_deref(),
+            Some("dashboard_model_clients")
+        );
+        assert_eq!(root.country_list, None);
+
+        // The value of the required header is a secret: the json the UI gets never has it.
+        let json = serde_json::to_string(&endpoint).unwrap();
+        assert!(!json.contains("the-zone-secret-value"), "{json}");
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_open_to_everybody_shows_no_guard() {
+        let host_settings: HostSettings = serde_yaml::from_str(
+            [
+                "endpoint:",
+                "  type: http",
+                "locations:",
+                "- proxy_pass_to: http://127.0.0.1:9000",
+            ]
+            .join("\n")
+            .as_str(),
+        )
+        .unwrap();
+
+        let endpoint_info = crate::scripts::compile_http_configuration(
+            &SettingsCompiled::default(),
+            EndpointHttpHostString::new("localhost:8000".to_string()).unwrap(),
+            &host_settings,
+            ListenHttpEndpointType::Http1,
+        )
+        .await
+        .unwrap();
+
+        let endpoint = HttpEndpointInfoModel::from_http_endpoint(&endpoint_info);
+
+        assert!(!endpoint.cloudflare);
+        assert!(!endpoint.cloudflare_ranges_missing);
+        assert!(endpoint.request_with_header_only.is_empty());
+        assert_eq!(endpoint.api_keys_auth, None);
+        assert_eq!(endpoint.country_list, None);
+        assert_eq!(endpoint.locations[0].api_keys_auth, None);
+        assert_eq!(endpoint.locations[0].ip_list, None);
+        assert_eq!(endpoint.locations[0].country_list, None);
     }
 }

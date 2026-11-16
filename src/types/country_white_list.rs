@@ -70,6 +70,11 @@ impl CountryWhiteList {
         }
     }
 
+    /// The id `whitelisted_country` names the list by.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     /// The codes of two letters, sorted - or `*` alone. Nothing for a list which lets nobody in.
     pub fn countries(&self) -> Vec<&str> {
         match &self.rule {

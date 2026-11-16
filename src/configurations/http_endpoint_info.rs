@@ -23,6 +23,11 @@ pub struct HttpEndpointInfo {
     /// a request without them closes its connection without a word. See
     /// [`crate::required_headers`].
     pub request_with_header_only: crate::required_headers::RequiredHeaders,
+    /// `api_keys_auth` of the endpoint, or of its template - `None`: not set, or `none`. It is
+    /// not checked by it: each location carries the set it resolves to (its own, `none`, or this
+    /// one) in [`ProxyPassLocationConfig::api_keys_auth`]. Kept for the dashboard, which tells a
+    /// location's own set from the endpoint's.
+    pub api_keys_auth: Option<String>,
     pub listen_endpoint_type: ListenHttpEndpointType,
     pub g_auth: Option<String>,
     /// Name of the `oauth:` block gating this endpoint, when it has one. The
@@ -75,6 +80,7 @@ pub struct HttpEndpointInfoParams {
     pub inject_country: bool,
     pub cloudflare: bool,
     pub request_with_header_only: crate::required_headers::RequiredHeaders,
+    pub api_keys_auth: Option<String>,
     pub g_auth: Option<String>,
     pub oauth: Option<String>,
     pub ssl_certificate_id: Option<SslCertificateId>,
@@ -104,6 +110,7 @@ impl HttpEndpointInfo {
             inject_country,
             cloudflare,
             request_with_header_only,
+            api_keys_auth,
             g_auth,
             oauth,
             ssl_certificate_id,
@@ -145,6 +152,7 @@ impl HttpEndpointInfo {
             inject_country,
             cloudflare,
             request_with_header_only,
+            api_keys_auth,
             listen_endpoint_type,
             g_auth,
             oauth,
