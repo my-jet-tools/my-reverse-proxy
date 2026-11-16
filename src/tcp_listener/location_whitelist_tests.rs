@@ -484,6 +484,180 @@ async fn access_settings_by_endpoint_type() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// A drop location is as if nothing were here
+// ---------------------------------------------------------------------------------------------
+
+/// An access setting of the endpoint which answers a request it refuses - with a status, a
+/// sign-in page - and the endpoint types it answers on (on others it is refused by the TLS
+/// handshake, or the endpoint serves nobody).
+struct AnsweringGuard {
+    name: &'static str,
+    endpoints: &'static [Endpoint],
+}
+
+const ANSWERING_GUARDS: &[AnsweringGuard] = &[
+    AnsweringGuard {
+        name: "api_keys_auth",
+        endpoints: &HTTP_ENDPOINTS,
+    },
+    AnsweringGuard {
+        name: "allowed_users",
+        endpoints: &HTTP_ENDPOINTS,
+    },
+    AnsweringGuard {
+        name: "google_auth",
+        endpoints: &[
+            Endpoint::Https,
+            Endpoint::Https2OverH2,
+            Endpoint::Https2OverHttp1,
+        ],
+    },
+    // The endpoint's own lists refuse a TLS connection at its handshake: on a plain one they
+    // are checked by the request.
+    AnsweringGuard {
+        name: "whitelisted_ip",
+        endpoints: &[Endpoint::Http, Endpoint::Http2],
+    },
+    AnsweringGuard {
+        name: "whitelisted_country",
+        endpoints: &[Endpoint::Http, Endpoint::Http2],
+    },
+];
+
+/// `guard` on the endpoint, and a location `/` which is a drop location - or, `drop` being
+/// `false`, which proxies to the upstream.
+fn guarded_drop_yaml(
+    endpoint: Endpoint,
+    guard: &str,
+    drop: bool,
+    port: u16,
+    upstream_port: u16,
+) -> String {
+    let id = unique_id("drop");
+
+    let (endpoint_line, section) = match guard {
+        "api_keys_auth" => (
+            format!("      api_keys_auth: {id}_keys\n"),
+            format!("api_keys:\n  {id}_keys:\n  - \"{LOCATION_TOKEN}\"\n"),
+        ),
+        "allowed_users" => (
+            format!("      allowed_users: {id}_users\n"),
+            format!("allowed_users:\n  {id}_users:\n  - someone@example.com\n"),
+        ),
+        "google_auth" => (
+            format!("      google_auth: {id}_g_auth\n"),
+            format!(
+                "g_auth:\n  {id}_g_auth:\n    client_id: test-client-id\n    client_secret: test-client-secret\n    whitelisted_domains: example.com\n"
+            ),
+        ),
+        "whitelisted_ip" => (
+            format!("      whitelisted_ip: {id}_ips\n"),
+            format!("ip_white_lists:\n  {id}_ips:{}", yaml_list_value(CLIENT_IS_NOT_LISTED)),
+        ),
+        "whitelisted_country" => (
+            format!("      whitelisted_country: {id}_countries\n"),
+            format!(
+                "country_white_lists:\n  {id}_countries:{}",
+                yaml_list_value(CLIENT_COUNTRY_IS_NOT_LISTED)
+            ),
+        ),
+        other => panic!("no such guard: {other}"),
+    };
+
+    let location = if drop {
+        "      proxy_pass_to: drop\n".to_string()
+    } else {
+        format!(
+            "      proxy_pass_to: {}\n",
+            endpoint.proxy_pass_to(upstream_port)
+        )
+    };
+
+    format!(
+        "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {endpoint_type}\n{endpoint_line}    locations:\n    - path: /\n{location}{section}",
+        endpoint_type = endpoint.type_name(),
+    )
+}
+
+async fn probe_guarded(endpoint: Endpoint, guard: &str, drop: bool) -> Outcome {
+    let upstream = Upstream::start().await;
+    let port = free_port().await;
+
+    let yaml = guarded_drop_yaml(endpoint, guard, drop, port, upstream.port);
+
+    apply_settings(&yaml).await;
+    serve(port);
+
+    let reply = send(
+        endpoint.client(),
+        port,
+        "localhost",
+        &format!("localhost:{port}"),
+        &[],
+    )
+    .await;
+
+    let mut outcome = Outcome::new(reply, &upstream).await;
+    outcome.settings = yaml;
+    outcome
+}
+
+/// A request of a drop location gets nothing - no status, no sign-in page: the connection is
+/// closed, as if nothing were behind it. Whatever else guards the endpoint is not asked first: an
+/// answer of it would tell that something is here, worth breaking into. The same request to a
+/// location which is not a drop location IS answered by the guard - which is what makes the
+/// silence of the drop location mean something.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drop_location_answers_nothing_whatever_else_guards_the_endpoint() {
+    my_tls::install_default_crypto_providers();
+
+    let mut mismatches = Vec::new();
+
+    for guard in ANSWERING_GUARDS {
+        for endpoint in guard.endpoints {
+            let answered = probe_guarded(*endpoint, guard.name, false).await;
+
+            if answered.status.is_none() || !answered.upstream_requests.is_empty() {
+                mismatches.push(format!(
+                    "[{}] on {}, no drop location: the guard is expected to answer, got {}\n{:#?}",
+                    guard.name,
+                    endpoint.column(),
+                    answered.verdict(),
+                    answered
+                ));
+            }
+
+            let dropped = probe_guarded(*endpoint, guard.name, true).await;
+
+            println!(
+                "  {:<20} {:<24} guard: {}  drop: {}",
+                guard.name,
+                endpoint.column(),
+                answered.verdict(),
+                dropped.verdict()
+            );
+
+            if dropped.status.is_some() || !dropped.upstream_requests.is_empty() {
+                mismatches.push(format!(
+                    "[{}] on {}: a drop location is expected to answer nothing, got {}\n{:#?}",
+                    guard.name,
+                    endpoint.column(),
+                    dropped.verdict(),
+                    dropped
+                ));
+            }
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "{} case(s) went wrong:\n\n{}",
+        mismatches.len(),
+        mismatches.join("\n\n")
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // Which pipeline serves a request is decided by the vhost the CONNECTION was opened for
 // ---------------------------------------------------------------------------------------------
 

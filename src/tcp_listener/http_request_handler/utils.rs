@@ -63,6 +63,22 @@ pub fn answer_of_a_cut_connection() -> hyper::Response<BoxBody<Bytes, String>> {
     *create_err_response(hyper::StatusCode::BAD_REQUEST, Bytes::new())
 }
 
+/// `req` goes to a location of `type: drop` of `endpoint` (see
+/// [`crate::configurations::HttpEndpointInfo::drops`]): the connection is cut without a word, as
+/// if nothing were here. `Some`: it is cut, and this is what the request answers - to nobody.
+pub async fn drop_if_a_drop_location(
+    endpoint: &crate::configurations::HttpEndpointInfo,
+    req: &hyper::Request<hyper::body::Incoming>,
+    cut: &crate::tcp_listener::ConnectionCut,
+) -> Option<RejectedRequest> {
+    if !endpoint.drops(req.uri().path()) {
+        return None;
+    }
+
+    cut.cut_now().await;
+    Some(Box::new(answer_of_a_cut_connection()))
+}
+
 /// A request refused before it reached a location: the response to answer with.
 /// Boxed, because the lookup it comes from runs for every request and its `Ok`
 /// is a single `Arc`.

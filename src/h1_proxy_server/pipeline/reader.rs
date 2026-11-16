@@ -283,6 +283,17 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         .await;
     };
 
+    // A request of a `drop` location: as if nothing were here - the connection is closed without
+    // a word before anything else is looked at. An allow-list, mTLS, `oauth`, a sign-in or
+    // `api_keys_auth` answered first would tell that something is here.
+    {
+        let first_line = request_headers.get_first_line(h1_reader.loop_buffer.get_data());
+
+        if end_point_info.drops(first_line.get_path_and_query()) {
+            return ReaderStep::Close;
+        }
+    }
+
     // Who the request is of. On a `cloudflare: true` endpoint: the address of its one
     // `CF-Connecting-IP`, on a connection from Cloudflare - anything else closes the connection
     // without a word. On any other endpoint: the peer (and a Cloudflare server which reached it is
@@ -503,6 +514,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         }
     }
 
+    // Asked first of all already (`drops`, above); kept so a drop location never goes on.
     if location.proxy_pass_to.is_drop() {
         return ReaderStep::Close;
     }

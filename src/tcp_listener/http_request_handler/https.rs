@@ -85,7 +85,15 @@ impl HttpsRequestsHandler {
 
         let host_key = host.to_ascii_lowercase();
 
+        // A request of a `drop` location: as if nothing were here - before every check below,
+        // and before `cloudflare` and `request_with_header_only` of `handle_request`.
         if let Some(existing) = self.endpoints.get(&host_key) {
+            if let Some(dropped) =
+                super::utils::drop_if_a_drop_location(&existing.endpoint_info, req, &self.cut).await
+            {
+                return Err(dropped);
+            }
+
             return Ok(existing);
         }
 
@@ -106,6 +114,12 @@ impl HttpsRequestsHandler {
                 BadRequestReason::NoConfigurationForHost(host.as_str()),
             ));
         };
+
+        if let Some(dropped) =
+            super::utils::drop_if_a_drop_location(&http_endpoint_info, req, &self.cut).await
+        {
+            return Err(dropped);
+        }
 
         // mTLS is enforced only during the TLS handshake, which is bound to the
         // SNI used to open this connection. A browser may coalesce HTTP/2
@@ -217,7 +231,7 @@ impl HttpsRequestsHandler {
             return Ok(super::utils::answer_of_a_cut_connection());
         };
 
-        super::handle_requests::handle_requests(req, &proxy_pass, client).await
+        super::handle_requests::handle_requests(req, &proxy_pass, client, &self.cut).await
     }
 
     pub async fn dispose(&self) {

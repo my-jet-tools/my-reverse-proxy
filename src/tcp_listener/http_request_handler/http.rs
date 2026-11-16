@@ -76,7 +76,15 @@ impl HttpRequestHandler {
 
         let host_key = host.to_ascii_lowercase();
 
+        // A request of a `drop` location: as if nothing were here - before every check below,
+        // and before `cloudflare` and `request_with_header_only` of `handle_request`.
         if let Some(existing) = self.endpoints.get(&host_key) {
+            if let Some(dropped) =
+                super::utils::drop_if_a_drop_location(&existing.endpoint_info, req, &self.cut).await
+            {
+                return Err(dropped);
+            }
+
             return Ok(existing);
         }
 
@@ -99,6 +107,12 @@ impl HttpRequestHandler {
         }
 
         let http_endpoint_info = http_endpoint_info.unwrap();
+
+        if let Some(dropped) =
+            super::utils::drop_if_a_drop_location(&http_endpoint_info, req, &self.cut).await
+        {
+            return Err(dropped);
+        }
 
         // A Cloudflare server reaching an endpoint without `cloudflare: true` is noted - once for
         // the host of the connection: there was no TLS handshake to note it at.
@@ -155,7 +169,7 @@ impl HttpRequestHandler {
             return Ok(super::utils::answer_of_a_cut_connection());
         };
 
-        super::handle_requests::handle_requests(req, &proxy_pass, client).await
+        super::handle_requests::handle_requests(req, &proxy_pass, client, &self.cut).await
     }
 
     pub async fn dispose(&self) {

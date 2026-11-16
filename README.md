@@ -858,8 +858,7 @@ clients through its own path too - and these differences matter when a site move
   checked per request - client certificate (`421`), IP lists - but they are served by the `https2` request
   path even when that host is `type: https`. A host which has to stay on the `https` path needs a certificate,
   or an address, of its own.
-- `keep_alive: false` and per-domain traffic metrics are applied by `https` only; a `drop` location answers an
-  empty `403` on `https2` instead of closing the connection.
+- `keep_alive: false` and per-domain traffic metrics are applied by `https` only.
 
 `mcp` endpoints are not part of this choice: they are a byte bridge of their own type.
 
@@ -1283,20 +1282,28 @@ locations:
   type: drop
 ```
 
-Behavior per protocol:
+A drop location is as if nothing were behind it. The request head is read, its
+endpoint is picked by `Host` and its location by the path - and the connection
+is closed without a byte written back, on every endpoint type: `http`,
+`https`, `http2` and `https2` (an h2 connection is closed as a whole, with every
+request on it). The client sees a connection reset / EOF.
 
-- **HTTP/1.1** — the request is parsed, the location is matched, then the TCP
-  connection is closed without writing anything back to the client. The
-  client sees a connection reset / EOF.
-- **HTTP/2** — hyper does not allow forcing a TCP shutdown from inside a
-  request handler, so the proxy returns an empty `403 Forbidden` body with
-  `Connection: close`. Well-behaved h2 clients close the socket after that;
-  the connection itself is not torn down by the proxy.
+This is decided **before anything else** of the endpoint and of the location:
+`cloudflare`, `request_with_header_only`, `whitelisted_ip`,
+`whitelisted_country`, the mTLS check of a coalesced request (`421`), an
+endpoint which serves nobody, `oauth`, `google_auth`, `allowed_users` and
+`api_keys_auth`. A status, a sign-in page or a `WWW-Authenticate` answered first
+would tell that something is here, worth trying to break into. What can not
+wait for a request is not changed: the endpoint's own lists and its client
+certificate refuse a TLS connection at the handshake, before a path is known.
+
+The paths of the proxy's own OAuth server (`/.well-known/oauth-…`,
+`/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`), on an
+endpoint with `oauth:`, are of no location: a drop location of `/` does not take
+them, so the clients of the endpoint's other locations still sign in.
 
 Drop locations:
 - never resolve an upstream — there is no `proxy_pass_to: drop://...` form.
-- bypass `api_keys_auth`, `google_auth`, and `client_certificate_ca` checks —
-  the request is rejected before any of them runs.
 - bypass per-domain metrics (`domain_rps`, `*_traffic_*`, `ws_*_*`) when the
   endpoint also satisfies the default strict mode (`track_metrics_by_all_domains`
   unset / false on a wildcard endpoint).

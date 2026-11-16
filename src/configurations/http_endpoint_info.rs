@@ -240,6 +240,39 @@ impl HttpEndpointInfo {
             .find(|location| crate::types::is_path_of_location(path, &location.path))
     }
 
+    /// Whether a request for `target` goes to a location of `type: drop`: its connection is
+    /// closed without a word, as if nothing were behind it. Every pipeline asks this first, as
+    /// soon as the request names its endpoint - before `cloudflare`, `request_with_header_only`,
+    /// the allow-lists, mTLS, `oauth`, a sign-in and `api_keys_auth`: an answer of any of them
+    /// would tell that something is here, worth breaking into.
+    ///
+    /// The paths of the proxy's own OAuth server, on an endpoint with `oauth:`, are of no
+    /// location: a `drop` location of `/` does not take them.
+    ///
+    /// `target`: the request target as received - with its query string, if it has one.
+    pub fn drops(&self, target: &str) -> bool {
+        let Some(location) = self.find_location(target) else {
+            return false;
+        };
+
+        if !location.proxy_pass_to.is_drop() {
+            return false;
+        }
+
+        if self.oauth.is_some() {
+            let path = match target.find(['?', '#']) {
+                Some(end) => &target[..end],
+                None => target,
+            };
+
+            if crate::oauth::route_oauth_path(path).is_some() {
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Guards against HTTP/2 connection coalescing (and any cross-SNI
     /// `Host`/`:authority` reuse): mTLS is enforced only during the TLS
     /// handshake, which is bound to the SNI that opened the connection.
@@ -390,5 +423,74 @@ mod client_cert_guard_tests {
             false,
             Some(&cert("partner", true))
         ));
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use crate::{
+        configurations::{EndpointHttpHostString, ListenHttpEndpointType},
+        settings::HostSettings,
+        settings_compiled::SettingsCompiled,
+    };
+
+    async fn endpoint() -> super::HttpEndpointInfo {
+        let host_settings: HostSettings = serde_yaml::from_str(
+            [
+                "endpoint:",
+                "  type: http",
+                "locations:",
+                "- path: /api",
+                "  proxy_pass_to: http://127.0.0.1:9000",
+                "- path: /",
+                "  type: drop",
+            ]
+            .join("\n")
+            .as_str(),
+        )
+        .unwrap();
+
+        crate::scripts::compile_http_configuration(
+            &SettingsCompiled::default(),
+            EndpointHttpHostString::new("localhost:8000".to_string()).unwrap(),
+            &host_settings,
+            ListenHttpEndpointType::Http1,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_request_of_a_drop_location_is_dropped_and_no_other() {
+        let endpoint = endpoint().await;
+
+        assert!(endpoint.drops("/"));
+        assert!(endpoint.drops("/.env?x=1"));
+        assert!(endpoint.drops("/oauth/token"), "no oauth: nothing of it");
+
+        assert!(!endpoint.drops("/api"));
+        assert!(!endpoint.drops("/api/v1?drop=/"));
+    }
+
+    /// The paths of the proxy's own OAuth server are of no location: a drop location of `/` does
+    /// not take them - the clients of the endpoint's other locations sign in through them.
+    #[tokio::test]
+    async fn the_paths_of_the_oauth_server_are_not_dropped() {
+        let mut endpoint = endpoint().await;
+        endpoint.oauth = Some("mcp_oauth".to_string());
+
+        for path in [
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/oauth-protected-resource/api",
+            "/.well-known/openid-configuration",
+            "/oauth/authorize?client_id=x",
+            "/oauth/token",
+        ] {
+            assert!(!endpoint.drops(path), "{path}");
+        }
+
+        assert!(endpoint.drops("/"));
+        assert!(endpoint.drops("/oauth/tokens"));
+        assert!(endpoint.drops("/.well-known/oauth-authorization-server-evil"));
     }
 }

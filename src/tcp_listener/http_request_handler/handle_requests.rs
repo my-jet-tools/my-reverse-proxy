@@ -1,19 +1,20 @@
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
-use http_body_util::BodyExt;
-use http_body_util::Full;
 use rust_extensions::StopWatch;
 
 use crate::{
     cloudflare::RequestClient,
     http_proxy_pass::{HttpProxyPass, ProxyPassError},
+    tcp_listener::ConnectionCut,
 };
 
-/// `client`: who the request is of - see [`RequestClient`].
+/// `client`: who the request is of - see [`RequestClient`]. `cut`: what a request of a `drop`
+/// location cuts the connection with.
 pub async fn handle_requests(
     req: hyper::Request<hyper::body::Incoming>,
     proxy_pass: &HttpProxyPass,
     client: RequestClient,
+    cut: &ConnectionCut,
 ) -> hyper::Result<hyper::Response<BoxBody<Bytes, String>>> {
     let connection_ip = client.ip;
     let request_host_for_metric: Option<String> = req
@@ -120,16 +121,11 @@ pub async fn handle_requests(
                     ),
                 );
             }
+            // A `drop` location is asked for first of all (`drop_if_a_drop_location`); one which
+            // got this far is not answered either: the connection is cut without a word.
             if matches!(err, ProxyPassError::DropConnection) {
-                let body: BoxBody<Bytes, String> = Full::new(Bytes::new())
-                    .map_err(|never| match never {})
-                    .boxed();
-                let response = hyper::Response::builder()
-                    .status(hyper::StatusCode::FORBIDDEN)
-                    .header(hyper::header::CONNECTION, "close")
-                    .body(body)
-                    .unwrap();
-                return Ok(response);
+                cut.cut_now().await;
+                return Ok(super::utils::answer_of_a_cut_connection());
             }
             let err_desc = format!("{:?}", err);
             // The description tells of upstreams, files and errors inside: it is for a source of
