@@ -137,6 +137,17 @@ async fn start_endpoint(
     host_yaml: &str,
     settings: &SettingsCompiled,
 ) -> u16 {
+    start_endpoint_with_location_ids(endpoint_type, host_yaml, settings)
+        .await
+        .0
+}
+
+/// [`start_endpoint`], with the ids of the locations of the endpoint.
+async fn start_endpoint_with_location_ids(
+    endpoint_type: ListenHttpEndpointType,
+    host_yaml: &str,
+    settings: &SettingsCompiled,
+) -> (u16, Vec<i64>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let listening_addr = listener.local_addr().unwrap();
 
@@ -155,6 +166,12 @@ async fn start_endpoint(
     )
     .await
     .unwrap();
+
+    let location_ids = endpoint_info
+        .locations
+        .iter()
+        .map(|location| location.id)
+        .collect();
 
     let configuration =
         Arc::new(crate::scripts::merge_http_into_existing(None, endpoint_info).unwrap());
@@ -185,7 +202,7 @@ async fn start_endpoint(
         }
     });
 
-    listening_addr.port()
+    (listening_addr.port(), location_ids)
 }
 
 /// One request on a connection of its own: the status, and the body - what the upstream got in
@@ -523,5 +540,72 @@ async fn a_key_is_kept_from_the_upstream_with_modify_http_headers() {
             (200, NO_KEY.to_string()),
             "{name}"
         );
+    }
+}
+
+/// A key is a secret: with debug on - of the endpoint and of its location - no line the request
+/// writes to the logs has it, whatever the letter case of the name; the h2 pipeline, which writes
+/// the headers, writes `***` in its place. The upstream gets the key all the same.
+#[tokio::test]
+async fn a_key_is_masked_in_the_logs_and_goes_on_to_the_upstream() {
+    const KEY: &str = "masked-secret-key-1";
+
+    let keys = set_of_keys("masked", &[KEY]);
+
+    for endpoint_type in ENDPOINT_TYPES {
+        let upstream = Upstream::start().await;
+        let (port, location_ids) = start_endpoint_with_location_ids(
+            endpoint_type,
+            &guarded_host(&upstream, &keys),
+            &SettingsCompiled::default(),
+        )
+        .await;
+
+        let name = endpoint_type.as_str();
+        let endpoint = format!("localhost:{port}");
+
+        APP_CTX.debug_flags.set_endpoint(&endpoint, true);
+        for location_id in &location_ids {
+            APP_CTX.debug_flags.set_location(*location_id, true);
+        }
+
+        let reply = request(endpoint_type, port, "/x", &[("X-API-Key", KEY)]).await;
+
+        APP_CTX.debug_flags.set_endpoint(&endpoint, false);
+        for location_id in &location_ids {
+            APP_CTX.debug_flags.set_location(*location_id, false);
+        }
+
+        assert_eq!(reply, (200, KEY.to_string()), "{name}");
+
+        let mut log: Vec<String> = APP_CTX
+            .proxy_logs
+            .get_by_endpoint(&endpoint)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect();
+
+        for location_id in &location_ids {
+            log.extend(
+                APP_CTX
+                    .proxy_logs
+                    .get_by_location(*location_id)
+                    .into_iter()
+                    .map(|entry| entry.message),
+            );
+        }
+
+        assert!(
+            !log.iter().any(|line| line.contains(KEY)),
+            "{name}: the key is in the logs: {log:#?}"
+        );
+
+        if matches!(endpoint_type, ListenHttpEndpointType::Http2) {
+            assert!(
+                log.iter()
+                    .any(|line| line.contains("\"x-api-key\": \"***\"")),
+                "{name}: the headers are expected in the logs, with the key masked: {log:#?}"
+            );
+        }
     }
 }

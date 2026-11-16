@@ -20,13 +20,14 @@ impl HttpListenPortConfiguration {
         }
     }
 
-    /// Whether the value of a request header named `name` is logged as `***` while it is not
-    /// known which endpoint the request is of: it is a header of `request_with_header_only` of an
-    /// endpoint of the port.
-    pub fn masks_header(&self, name: &[u8]) -> bool {
+    /// The headers of `request_with_header_only` of every endpoint of the port: the secrets a
+    /// header of a request may be one of while it is not known which endpoint the request is of
+    /// (see [`crate::types::HeaderValue::new`]).
+    pub fn required_headers(&self) -> Vec<&crate::required_headers::RequiredHeaders> {
         self.endpoints
             .iter()
-            .any(|endpoint| endpoint.request_with_header_only.covers(name))
+            .map(|endpoint| &endpoint.request_with_header_only)
+            .collect()
     }
 
     /// Puts the endpoint of a host in place of the one it had, or next to the others. The

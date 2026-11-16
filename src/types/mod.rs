@@ -20,3 +20,7 @@ mod connection_addr;
 pub use connection_addr::*;
 mod request_path;
 pub use request_path::*;
+mod protected_string;
+pub use protected_string::*;
+mod header_list;
+pub use header_list::*;

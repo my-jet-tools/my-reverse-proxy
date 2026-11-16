@@ -14,6 +14,8 @@ pub use api_keys_store::*;
 
 use std::{collections::HashMap, net::IpAddr};
 
+use crate::types::ProtectedString;
+
 /// The request header a key is read from - its name is matched case-insensitively.
 pub const API_KEY_HEADER: &str = "x-api-key";
 
@@ -41,8 +43,12 @@ pub fn resolve_api_keys_auth(location: Option<&str>, endpoint: Option<&str>) -> 
 /// in - and returns them as they are compared: without the spaces around them, which the value
 /// of a header does not have either.
 ///
-/// The keys are secrets: no error says what a key is.
-pub fn check_api_keys(id: &str, keys: Vec<String>) -> Result<Vec<String>, String> {
+/// The keys are secrets - a [`ProtectedString`] each from the moment they are read: no error says
+/// what a key is.
+pub fn check_api_keys(
+    id: &str,
+    keys: Vec<ProtectedString>,
+) -> Result<Vec<ProtectedString>, String> {
     if id.trim().is_empty() {
         return Err("api_keys: an id can not be empty".to_string());
     }
@@ -56,7 +62,7 @@ pub fn check_api_keys(id: &str, keys: Vec<String>) -> Result<Vec<String>, String
     let mut result = Vec::with_capacity(keys.len());
 
     for key in keys {
-        let key = key.trim();
+        let key = key.as_str().trim();
 
         if key.is_empty() {
             return Err(format!("api_keys '{id}': a key is empty"));
@@ -77,8 +83,11 @@ pub fn check_api_keys(id: &str, keys: Vec<String>) -> Result<Vec<String>, String
             ));
         }
 
-        if !result.iter().any(|existing| existing == key) {
-            result.push(key.to_string());
+        if !result
+            .iter()
+            .any(|existing: &ProtectedString| existing.as_str() == key)
+        {
+            result.push(ProtectedString::from(key));
         }
     }
 
@@ -87,8 +96,8 @@ pub fn check_api_keys(id: &str, keys: Vec<String>) -> Result<Vec<String>, String
 
 /// Puts the keys of `from` into `into`: the keys of one id from several places make one set.
 pub fn merge_api_keys(
-    into: &mut HashMap<String, Vec<String>>,
-    from: &HashMap<String, Vec<String>>,
+    into: &mut HashMap<String, Vec<ProtectedString>>,
+    from: &HashMap<String, Vec<ProtectedString>>,
 ) {
     for (id, keys) in from {
         let set = into.entry(id.clone()).or_default();
@@ -208,9 +217,9 @@ mod tests {
         let keys = check_api_keys(
             "clients",
             vec![
-                " key-1".to_string(),
-                "key-2\t".to_string(),
-                "key-1".to_string(),
+                " key-1".into(),
+                "key-2\t".into(),
+                "key-1".into(),
             ],
         )
         .unwrap();
@@ -231,7 +240,7 @@ mod tests {
             ("clients", vec!["line\nbreak"]),
             ("clients", vec!["nul\0"]),
         ] {
-            let keys: Vec<String> = keys.into_iter().map(|key| key.to_string()).collect();
+            let keys: Vec<ProtectedString> = keys.into_iter().map(|key| key.into()).collect();
             assert!(check_api_keys(id, keys.clone()).is_err(), "{id} {keys:?}");
         }
 
@@ -243,7 +252,7 @@ mod tests {
     fn no_error_tells_a_key() {
         let err = check_api_keys(
             "clients",
-            vec!["very-secret".to_string(), "${SECRET_PART}".to_string()],
+            vec!["very-secret".into(), "${SECRET_PART}".into()],
         )
         .unwrap_err();
 
@@ -253,23 +262,23 @@ mod tests {
 
     #[test]
     fn the_keys_of_one_id_from_several_places_make_one_set() {
-        let mut sets: HashMap<String, Vec<String>> = HashMap::new();
+        let mut sets: HashMap<String, Vec<ProtectedString>> = HashMap::new();
 
         merge_api_keys(
             &mut sets,
             &HashMap::from([
                 (
                     "clients".to_string(),
-                    vec!["a".to_string(), "b".to_string()],
+                    vec!["a".into(), "b".into()],
                 ),
-                ("admins".to_string(), vec!["x".to_string()]),
+                ("admins".to_string(), vec!["x".into()]),
             ]),
         );
         merge_api_keys(
             &mut sets,
             &HashMap::from([(
                 "clients".to_string(),
-                vec!["b".to_string(), "c".to_string()],
+                vec!["b".into(), "c".into()],
             )]),
         );
 
@@ -282,7 +291,7 @@ mod tests {
         let store = ApiKeysStore::new();
         store.publish(&HashMap::from([(
             "clients".to_string(),
-            vec!["key-1".to_string(), "key-2".to_string()],
+            vec!["key-1".into(), "key-2".into()],
         )]));
 
         let check =

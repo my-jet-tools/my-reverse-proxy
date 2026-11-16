@@ -149,7 +149,10 @@ impl SettingsCompiled {
 
         for (id, keys) in api_keys {
             let id = variables.apply_variables(id)?;
-            let keys = super::populate_vec_of_string(keys, variables)
+            let keys = keys
+                .into_iter()
+                .map(|key| variables.apply_variables_protected(key))
+                .collect::<Result<Vec<_>, _>>()
                 .map_err(|err| format!("api_keys '{id}': {err}"))?;
             let keys = crate::api_keys::check_api_keys(&id, keys)?;
 
@@ -170,10 +173,11 @@ impl SettingsCompiled {
         if let Some(ssh) = settings_model.ssh.take() {
             for (ssh_id, ssh_settings) in ssh {
                 let ssh_settings = SshConfigSettings {
-                    password: variables.apply_variables_opt(ssh_settings.password)?,
+                    password: variables.apply_variables_protected_opt(ssh_settings.password)?,
                     private_key_file: variables
                         .apply_variables_opt(ssh_settings.private_key_file)?,
-                    passphrase: variables.apply_variables_opt(ssh_settings.passphrase)?,
+                    passphrase: variables
+                        .apply_variables_protected_opt(ssh_settings.passphrase)?,
                 };
 
                 self.ssh.insert(ssh_id, ssh_settings);
@@ -319,7 +323,7 @@ impl SettingsCompiled {
                     variables.apply_variables(key)?,
                     GoogleAuthSettings {
                         client_id: variables.apply_variables(itm.client_id)?,
-                        client_secret: variables.apply_variables(itm.client_secret)?,
+                        client_secret: variables.apply_variables_protected(itm.client_secret)?,
                         whitelisted_domains: variables.apply_variables(itm.whitelisted_domains)?,
                     },
                 );
@@ -340,10 +344,11 @@ impl SettingsCompiled {
                     variables.apply_variables(key)?,
                     OAuthSettings {
                         client_id: variables.apply_variables(itm.client_id)?,
-                        client_secret: variables.apply_variables(itm.client_secret)?,
-                        consent_password: variables.apply_variables(itm.consent_password)?,
+                        client_secret: variables.apply_variables_protected(itm.client_secret)?,
+                        consent_password: variables
+                            .apply_variables_protected(itm.consent_password)?,
                         public_url: variables.apply_variables_opt(itm.public_url)?,
-                        signing_key: variables.apply_variables_opt(itm.signing_key)?,
+                        signing_key: variables.apply_variables_protected_opt(itm.signing_key)?,
                         signing_key_file: variables.apply_variables_opt(itm.signing_key_file)?,
                         access_token_ttl_sec: itm.access_token_ttl_sec,
                         refresh_token_ttl_sec: itm.refresh_token_ttl_sec,
@@ -613,7 +618,7 @@ fn compile_request_with_header_only(
         for (name, value) in item {
             let name = variables.apply_variables(name)?;
             let value = variables
-                .apply_variables(value)
+                .apply_variables_protected(value)
                 .map_err(|err| format!("request_with_header_only: the value of '{name}': {err}"))?;
 
             if compiled.insert(name.clone(), value).is_some() {
@@ -817,7 +822,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .iter()
-            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .map(|(name, value)| (name.to_string(), value.as_str().to_string()))
             .collect();
 
         assert_eq!(

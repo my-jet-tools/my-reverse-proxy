@@ -34,10 +34,10 @@ pub struct SettingsCompiled {
     pub dynamic_host_errors: BTreeMap<String, String>,
     /// The sets of `api_keys:` of the settings files, by their ids - each put together from every
     /// file which declares keys under its id.
-    pub api_keys: HashMap<String, Vec<String>>,
+    pub api_keys: HashMap<String, Vec<crate::types::ProtectedString>>,
     /// The keys the urls of `real_time_configurations` gave, by the ids of their sets. A request
     /// is checked against these together with `api_keys`: see [`Self::get_api_keys`].
-    pub dynamic_api_keys: HashMap<String, Vec<String>>,
+    pub dynamic_api_keys: HashMap<String, Vec<crate::types::ProtectedString>>,
     /// The variables the settings were compiled with - the dynamic hosts are compiled with them
     /// as well, when they come.
     pub variables: VariablesCompiled,
@@ -459,7 +459,7 @@ impl SettingsCompiled {
 
     /// Every set of keys requests are checked against: the keys the settings files declare, with
     /// the ones the urls gave under the same ids.
-    pub fn get_api_keys(&self) -> HashMap<String, Vec<String>> {
+    pub fn get_api_keys(&self) -> HashMap<String, Vec<crate::types::ProtectedString>> {
         let mut result = self.api_keys.clone();
         crate::api_keys::merge_api_keys(&mut result, &self.dynamic_api_keys);
         result
@@ -1502,7 +1502,7 @@ mod dynamic_hosts_tests {
         let mut settings = settings_with_static_host();
         settings
             .api_keys
-            .insert("mcp_clients".to_string(), vec!["file-key".to_string()]);
+            .insert("mcp_clients".to_string(), vec!["file-key".into()]);
 
         settings.set_real_time_answers(&answers(&[
             "api_keys:\n  mcp_clients:\n  - upper-key\n  admins:\n  - admin-key\n".to_string(),

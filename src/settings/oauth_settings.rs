@@ -1,5 +1,7 @@
 use serde::*;
 
+use crate::types::ProtectedString;
+
 /// A named `oauth:` block — the proxy acting as an OAuth 2.1 authorization
 /// server in front of one or more endpoints.
 ///
@@ -9,16 +11,16 @@ use serde::*;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct OAuthSettings {
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: ProtectedString,
     /// What the user types on the consent screen to approve the connector.
-    pub consent_password: String,
+    pub consent_password: ProtectedString,
     /// Public base URL of the authorization server, without a trailing slash.
     /// Defaults to the request's own scheme + `Host`, which is right unless
     /// another proxy in front rewrites either.
     pub public_url: Option<String>,
     /// base64url key the tokens are signed with. Leave unset to have one
     /// generated and kept in `signing_key_file`.
-    pub signing_key: Option<String>,
+    pub signing_key: Option<ProtectedString>,
     /// Where a generated signing key is kept. Defaults to
     /// `~/.my-reverse-proxy-oauth/{block_id}.json`.
     pub signing_key_file: Option<String>,

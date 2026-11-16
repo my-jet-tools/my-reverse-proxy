@@ -24,18 +24,16 @@
 //!   request look like one with the header twice - and so close a connection Cloudflare carries
 //!   the requests of other visitors on.
 //! - The headers are the proxy's alone: none of them reaches an upstream, in no spelling an
-//!   upstream could read as it, and wherever the headers of a request are logged their values are
-//!   [`MASKED`].
+//!   upstream could read as it. A value is a [`ProtectedString`] from the settings on, and so is a
+//!   header of a request under one of the names wherever the headers are logged
+//!   ([`crate::types::HeaderList`]): it is written as `***`.
 //!
 //! A byte bridge (`type: tcp`, `type: mcp`) reads no headers: with the setting it serves nobody.
 
 use crate::cloudflare::{header_name_is, Deviation, RequestClient};
 use crate::configurations::HttpEndpointInfo;
 use crate::settings::RequestWithHeaderOnlySettings;
-use crate::types::ConnectionIp;
-
-/// What the value of a header of `request_with_header_only` is written as, wherever it would be.
-pub const MASKED: &str = "***";
+use crate::types::{ConnectionIp, ProtectedString};
 
 /// Headers which can not be required (as [`header_name_is`] takes a name): a request can not go
 /// on without them - they carry its host, its body, its connection -, or the proxy writes them
@@ -67,7 +65,7 @@ struct RequiredHeader {
     name: String,
     /// The same, as [`header_name_is`] takes it: with `-` for `_`.
     read_as: String,
-    value: Vec<u8>,
+    value: ProtectedString,
 }
 
 /// `request_with_header_only:` of an endpoint, compiled. Empty: every request goes on.
@@ -111,7 +109,7 @@ impl RequiredHeaders {
             }
 
             // A variable is lower_cased: `${ZONE_SECRET}` is not put in, and would be the value.
-            if value.contains("${") {
+            if value.as_str().contains("${") {
                 return Err(format!(
                     "request_with_header_only: the value of '{name}' has a placeholder which is \
                      not put in - a variable of the settings is written lower_cased: ${{name}}"
@@ -128,7 +126,7 @@ impl RequiredHeaders {
             headers.push(RequiredHeader {
                 name,
                 read_as,
-                value: value.as_bytes().to_vec(),
+                value: value.clone(),
             });
         }
 
@@ -163,7 +161,7 @@ impl RequiredHeaders {
                 return Some(Deviation::SeveralRequiredHeader(header.name.clone()));
             }
 
-            if !crate::oauth::constant_time_eq(value.trim_ascii(), &header.value) {
+            if !crate::oauth::constant_time_eq(value.trim_ascii(), header.value.as_bytes()) {
                 return Some(Deviation::WrongRequiredHeader(header.name.clone()));
             }
         }
@@ -173,7 +171,7 @@ impl RequiredHeaders {
 
     /// Whether a request header named `name` is one of them, in any spelling an upstream could
     /// read as it ([`header_name_is`]): it never goes on to an upstream, and its value is logged
-    /// as [`MASKED`].
+    /// as `***` ([`crate::types::HeaderValue::new`]).
     pub fn covers(&self, name: &[u8]) -> bool {
         self.headers
             .iter()
@@ -184,7 +182,7 @@ impl RequiredHeaders {
 impl std::fmt::Debug for RequiredHeaders {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_map()
-            .entries(self.headers.iter().map(|header| (&header.name, MASKED)))
+            .entries(self.headers.iter().map(|header| (&header.name, &header.value)))
             .finish()
     }
 }
@@ -208,35 +206,6 @@ where
 
     crate::cloudflare::journal_request(endpoint.as_str(), peer, client, host, deviation);
     false
-}
-
-/// The headers of a request the way `{:?}` writes a `HeaderMap`, with the value of every header
-/// `masks` names written as [`MASKED`].
-pub struct HeadersForLog<'a, F> {
-    headers: &'a hyper::HeaderMap,
-    masks: F,
-}
-
-impl<'a, F: Fn(&[u8]) -> bool> HeadersForLog<'a, F> {
-    pub fn new(headers: &'a hyper::HeaderMap, masks: F) -> Self {
-        Self { headers, masks }
-    }
-}
-
-impl<F: Fn(&[u8]) -> bool> std::fmt::Debug for HeadersForLog<'_, F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut map = f.debug_map();
-
-        for (name, value) in self.headers.iter() {
-            if (self.masks)(name.as_str().as_bytes()) {
-                map.entry(name, &MASKED);
-            } else {
-                map.entry(name, value);
-            }
-        }
-
-        map.finish()
-    }
 }
 
 /// A header name of RFC 9110: one or more `tchar`.
@@ -484,19 +453,6 @@ mod tests {
         assert!(!debug.contains(SECRET), "{debug}");
         assert!(debug.contains("\"x-zone-secret\": \"***\""), "{debug}");
 
-        let mut headers = hyper::HeaderMap::new();
-        headers.insert("host", "api.example.com".parse().unwrap());
-        headers.insert("x-zone-secret", SECRET.parse().unwrap());
-        headers.insert("x-zone_secret", SECRET.parse().unwrap());
-
-        let line = format!(
-            "{:?}",
-            HeadersForLog::new(&headers, |name| required.covers(name))
-        );
-
-        assert!(!line.contains(SECRET), "{line}");
-        assert!(line.contains("\"host\": \"api.example.com\""), "{line}");
-        assert!(line.contains("\"x-zone-secret\": \"***\""), "{line}");
-        assert!(line.contains("\"x-zone_secret\": \"***\""), "{line}");
+        // A header of a request under one of the names: see `crate::types::HeaderList`.
     }
 }

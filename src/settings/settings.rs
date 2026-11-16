@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use super::*;
+use crate::types::ProtectedString;
 use serde::*;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -20,8 +21,8 @@ pub struct SettingsModel {
     pub dynamic_hosts: Option<my_settings_reader::serde_yaml::Value>,
     /// Sets of keys by their ids - what `api_keys_auth` of an endpoint or a location names. See
     /// [`crate::api_keys`].
-    pub api_keys: Option<HashMap<String, Vec<String>>>,
-    pub variables: Option<HashMap<String, String>>,
+    pub api_keys: Option<HashMap<String, Vec<ProtectedString>>>,
+    pub variables: Option<HashMap<String, ProtectedString>>,
     pub ssl_certificates: Option<Vec<SslCertificatesSettingsModel>>,
     pub client_certificate_ca: Option<Vec<ClientCertificateCaSettings>>,
     pub global_settings: Option<GlobalSettings>,
@@ -187,7 +188,7 @@ mod tests {
         ssh_configs.insert(
             "root@10.0.0.1".to_string(),
             SshConfigSettings {
-                password: "my_password".to_string().into(),
+                password: Some("my_password".into()),
                 private_key_file: None,
                 passphrase: None,
             },
@@ -198,7 +199,7 @@ mod tests {
             SshConfigSettings {
                 password: None,
                 private_key_file: Some("~/certs/private_key.ssh".to_string()),
-                passphrase: Some("my_pass_phrase".to_string()),
+                passphrase: Some("my_pass_phrase".into()),
             },
         );
 

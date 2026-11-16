@@ -89,7 +89,7 @@ impl GatewayClientSettings {
         })?;
 
         let unlocked = if private.is_encrypted() {
-            let phrase = ssh_entry.passphrase.as_deref().ok_or_else(|| {
+            let phrase = ssh_entry.passphrase.as_ref().map(|phrase| phrase.as_str()).ok_or_else(|| {
                 format!(
                     "Gateway client '{client_id}': private key '{resolved}' is encrypted but ssh entry has no passphrase"
                 )

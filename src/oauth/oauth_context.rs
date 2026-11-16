@@ -68,14 +68,14 @@ impl OAuthContext {
     pub fn check_client_secret(&self, presented: &str) -> bool {
         constant_time_eq(
             presented.as_bytes(),
-            self.settings.client_secret.trim().as_bytes(),
+            self.settings.client_secret.as_str().trim().as_bytes(),
         )
     }
 
     pub fn check_consent_password(&self, presented: &str) -> bool {
         constant_time_eq(
             presented.trim().as_bytes(),
-            self.settings.consent_password.trim().as_bytes(),
+            self.settings.consent_password.as_str().trim().as_bytes(),
         )
     }
 
@@ -140,8 +140,8 @@ mod tests {
     pub(super) fn settings() -> OAuthSettings {
         OAuthSettings {
             client_id: "claude".to_string(),
-            client_secret: "the-secret".to_string(),
-            consent_password: "the-password".to_string(),
+            client_secret: "the-secret".into(),
+            consent_password: "the-password".into(),
             public_url: None,
             signing_key: None,
             signing_key_file: None,
@@ -241,7 +241,7 @@ mod tests {
 
         assert!(context.settings_are_the_same(&settings()));
         assert!(!context.settings_are_the_same(&OAuthSettings {
-            client_secret: "rotated".to_string(),
+            client_secret: "rotated".into(),
             ..settings()
         }));
     }

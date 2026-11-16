@@ -688,14 +688,14 @@ mod tests {
             hosts,
             api_keys: HashMap::from([(
                 "mcp_clients".to_string(),
-                vec!["file-key-1".to_string(), "file-key-2".to_string()],
+                vec!["file-key-1".into(), "file-key-2".into()],
             )]),
             dynamic_api_keys: HashMap::from([
                 (
                     "mcp_clients".to_string(),
-                    vec!["file-key-1".to_string(), "url-key".to_string()],
+                    vec!["file-key-1".into(), "url-key".into()],
                 ),
-                ("not_used".to_string(), vec!["url-key-2".to_string()]),
+                ("not_used".to_string(), vec!["url-key-2".into()]),
             ]),
             ..Default::default()
         };

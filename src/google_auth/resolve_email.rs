@@ -85,7 +85,8 @@ pub async fn resolve_email(
 pub struct GetData {
     pub code: String,
     pub client_id: String,
-    pub client_secret: String,
+    /// Serialized as it is - into the request to Google; `{:?}` writes `***`.
+    pub client_secret: crate::types::ProtectedString,
     pub redirect_uri: String,
     pub grant_type: String,
 }

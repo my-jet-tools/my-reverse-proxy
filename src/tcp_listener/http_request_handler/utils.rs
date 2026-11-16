@@ -191,7 +191,7 @@ fn bad_request_response<B>(
                 "Host header".to_string(),
                 req.headers()
                     .get(hyper::header::HOST)
-                    .map(header_value_to_string)
+                    .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
                     .unwrap_or_else(none),
             ),
         ],
@@ -227,18 +227,9 @@ fn bad_request_response<B>(
 
     let headers = DebugPageSection {
         title: "Request headers",
-        rows: req
-            .headers()
+        rows: crate::types::HeaderList::new(req.headers(), &listen_port_config.required_headers())
             .iter()
-            .map(|(name, value)| {
-                let value = if listen_port_config.masks_header(name.as_str().as_bytes()) {
-                    crate::required_headers::MASKED.to_string()
-                } else {
-                    header_value_to_string(value)
-                };
-
-                (name.as_str().to_string(), value)
-            })
+            .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect(),
     };
 
@@ -254,10 +245,6 @@ fn bad_request_response<B>(
         "text/html; charset=utf-8",
         page,
     )
-}
-
-fn header_value_to_string(value: &hyper::header::HeaderValue) -> String {
-    String::from_utf8_lossy(value.as_bytes()).to_string()
 }
 
 pub fn generate_tech_page(

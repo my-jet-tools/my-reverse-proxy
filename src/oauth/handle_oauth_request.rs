@@ -94,8 +94,8 @@ mod tests {
         OAuthContext::new(
             &OAuthSettings {
                 client_id: "claude".to_string(),
-                client_secret: "the-secret".to_string(),
-                consent_password: "the-password".to_string(),
+                client_secret: "the-secret".into(),
+                consent_password: "the-password".into(),
                 public_url: None,
                 signing_key: None,
                 signing_key_file: None,

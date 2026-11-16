@@ -9,7 +9,7 @@ pub async fn update_ssh_config_list(settings_model: &SettingsCompiled) {
         if let Some(password) = &settings.password {
             to_add.push((
                 config_id.to_string(),
-                SshConfig::Password(password.to_string()),
+                SshConfig::Password(password.clone()),
             ));
         } else if let Some(private_key_file) = &settings.private_key_file {
             let file_source = match OverSshConnectionSettings::try_parse(private_key_file.as_str())

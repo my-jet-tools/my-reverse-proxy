@@ -56,7 +56,7 @@ async fn apply_ssh_config(
                     ssh_remote_host: host.to_string(),
                     ssh_remote_port: port,
                     ssh_user_name: ssh_credentials.get_user_name().to_string(),
-                    password: password.to_string(),
+                    password: password.as_str().to_string(),
                 }
                 .into(),
             ),
@@ -87,7 +87,10 @@ async fn apply_ssh_config(
                     ssh_remote_port: port,
                     ssh_user_name: ssh_credentials.get_user_name().to_string(),
                     private_key: file_content,
-                    passphrase: ssh_config_settings.passphrase.clone(),
+                    passphrase: ssh_config_settings
+                        .passphrase
+                        .as_ref()
+                        .map(|passphrase| passphrase.as_str().to_string()),
                 }
                 .into(),
             ),

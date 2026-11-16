@@ -2,34 +2,19 @@ use std::{collections::HashMap, mem};
 
 use rust_common::placeholders::*;
 
-use crate::settings::SettingsModel;
+use crate::{settings::SettingsModel, types::ProtectedString};
 
 /// The variables of the settings files. A value may be a secret - the value of a header of
-/// `request_with_header_only`, a password -, so none is ever written out: `{:?}` shows the names
-/// alone.
-#[derive(Default, Clone)]
+/// `request_with_header_only`, a password -, so each is a [`ProtectedString`] from the moment the
+/// settings are read: `{:?}` shows the names alone, the values as `***`.
+#[derive(Default, Clone, Debug)]
 pub struct VariablesCompiled {
-    data: HashMap<String, String>,
-}
-
-impl std::fmt::Debug for VariablesCompiled {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut names: Vec<&String> = self.data.keys().collect();
-        names.sort();
-
-        f.debug_map()
-            .entries(
-                names
-                    .into_iter()
-                    .map(|name| (name, crate::required_headers::MASKED)),
-            )
-            .finish()
-    }
+    data: HashMap<String, ProtectedString>,
 }
 
 /// What is told of a variable a later settings file writes over: its name, the values as `***`.
 fn overriding_message(key: &str) -> String {
-    let masked = crate::required_headers::MASKED;
+    let masked = ProtectedString::MASK;
     format!("Overriding variable '{masked}' to '{masked}' for key '{key}'")
 }
 
@@ -53,6 +38,25 @@ impl VariablesCompiled {
 
         let result = self.apply_variables(value)?;
         Ok(Some(result.to_string()))
+    }
+
+    /// [`Self::apply_variables`] of a secret: it stays one.
+    pub fn apply_variables_protected(
+        &self,
+        value: ProtectedString,
+    ) -> Result<ProtectedString, String> {
+        self.apply_variables(value.into_string())
+            .map(ProtectedString::from)
+    }
+
+    /// [`Self::apply_variables_protected`] of a secret which may not be set.
+    pub fn apply_variables_protected_opt(
+        &self,
+        value: Option<ProtectedString>,
+    ) -> Result<Option<ProtectedString>, String> {
+        value
+            .map(|value| self.apply_variables_protected(value))
+            .transpose()
     }
 
     pub fn apply_variables(&self, value: String) -> Result<String, String> {
@@ -164,7 +168,9 @@ mod tests {
         );
 
         let debug = format!("{variables:?}");
-        assert_eq!(debug, "{\"env\": \"***\", \"zone_secret\": \"***\"}");
+        assert!(!debug.contains("s3cr3t") && !debug.contains("dev"), "{debug}");
+        assert!(debug.contains("\"zone_secret\": \"***\""), "{debug}");
+        assert!(debug.contains("\"env\": \"***\""), "{debug}");
     }
 
     #[test]
@@ -172,10 +178,10 @@ mod tests {
         let mut variables = VariablesCompiled::default();
         variables
             .data
-            .insert("cert_domain".to_string(), "certs.example.com".to_string());
+            .insert("cert_domain".to_string(), "certs.example.com".into());
         variables
             .data
-            .insert("cert_ip".to_string(), "12.3.3.2".to_string());
+            .insert("cert_ip".to_string(), "12.3.3.2".into());
 
         let result = variables
             .apply_variables(

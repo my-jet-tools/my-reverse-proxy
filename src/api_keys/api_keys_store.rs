@@ -23,7 +23,7 @@ impl ApiKeysStore {
     }
 
     /// Takes `sets` in place of the sets published before.
-    pub fn publish(&self, sets: &HashMap<String, Vec<String>>) {
+    pub fn publish(&self, sets: &HashMap<String, Vec<crate::types::ProtectedString>>) {
         let sets = sets
             .iter()
             .map(|(id, keys)| (id.clone(), to_bytes(keys)))
@@ -50,7 +50,8 @@ impl ApiKeysStore {
 
     #[cfg(test)]
     pub fn add_for_tests(&self, id: &str, keys: &[&str]) {
-        let keys: Vec<String> = keys.iter().map(|key| key.to_string()).collect();
+        let keys: Vec<crate::types::ProtectedString> =
+            keys.iter().map(|key| (*key).into()).collect();
 
         self.sets_of_tests
             .lock()
@@ -60,7 +61,7 @@ impl ApiKeysStore {
     }
 }
 
-fn to_bytes(keys: &[String]) -> Vec<Box<[u8]>> {
+fn to_bytes(keys: &[crate::types::ProtectedString]) -> Vec<Box<[u8]>> {
     keys.iter().map(|key| key.as_bytes().into()).collect()
 }
 
@@ -94,15 +95,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    fn sets(items: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+    fn sets(items: &[(&str, &[&str])]) -> HashMap<String, Vec<crate::types::ProtectedString>> {
         items
             .iter()
-            .map(|(id, keys)| {
-                (
-                    id.to_string(),
-                    keys.iter().map(|key| key.to_string()).collect(),
-                )
-            })
+            .map(|(id, keys)| (id.to_string(), keys.iter().map(|key| (*key).into()).collect()))
             .collect()
     }
 

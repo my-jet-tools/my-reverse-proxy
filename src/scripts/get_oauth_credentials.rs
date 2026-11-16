@@ -62,9 +62,9 @@ pub async fn get_oauth_credentials(
 
 fn validate(oauth_id: &str, settings: &OAuthSettings) -> Result<(), String> {
     for (field, value) in [
-        ("client_id", &settings.client_id),
-        ("client_secret", &settings.client_secret),
-        ("consent_password", &settings.consent_password),
+        ("client_id", settings.client_id.as_str()),
+        ("client_secret", settings.client_secret.as_str()),
+        ("consent_password", settings.consent_password.as_str()),
     ] {
         if value.trim().is_empty() {
             return Err(format!(
@@ -84,7 +84,7 @@ fn validate(oauth_id: &str, settings: &OAuthSettings) -> Result<(), String> {
 /// It has to be stable across restarts — tokens carry their own claims and are
 /// checked by signature alone, so a new key logs every connector out.
 async fn resolve_signing_key(oauth_id: &str, settings: &OAuthSettings) -> Result<Vec<u8>, String> {
-    if let Some(signing_key) = settings.signing_key.as_deref() {
+    if let Some(signing_key) = settings.signing_key.as_ref().map(|key| key.as_str()) {
         let signing_key = signing_key.trim();
 
         if !signing_key.is_empty() {

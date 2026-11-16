@@ -61,9 +61,10 @@ impl HttpRequestHandler {
                 format!(
                     "Rejected request: can not detect host. Uri:{}. Headers: {:?}",
                     req.uri(),
-                    crate::required_headers::HeadersForLog::new(req.headers(), |name| {
-                        listen_port_config.masks_header(name)
-                    })
+                    crate::types::HeaderList::new(
+                        req.headers(),
+                        &listen_port_config.required_headers()
+                    )
                 ),
             );
             return Err(create_bad_request_response(

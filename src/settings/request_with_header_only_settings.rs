@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::*;
 
+use crate::types::ProtectedString;
+
 /// `request_with_header_only:` of an endpoint, as the settings write it: the headers, each with
 /// the one value it has to have, which every request to the endpoint comes with.
 ///
@@ -11,36 +13,26 @@ use serde::*;
 /// ```
 ///
 /// An item may name several headers: every header of every item is required. The values are
-/// secrets: `{:?}` writes each of them as `***`. See [`crate::required_headers`].
-#[derive(Serialize, Deserialize, Clone, Default)]
+/// secrets, a [`ProtectedString`] each from the moment they are read: `{:?}` writes them as `***`.
+/// See [`crate::required_headers`].
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 #[serde(transparent)]
-pub struct RequestWithHeaderOnlySettings(pub Vec<BTreeMap<String, String>>);
+pub struct RequestWithHeaderOnlySettings(pub Vec<BTreeMap<String, ProtectedString>>);
 
 impl RequestWithHeaderOnlySettings {
     /// Every header with its value, in the order of the list.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ProtectedString)> {
         self.0.iter().flat_map(|item| {
             item.iter()
-                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .map(|(name, value)| (name.as_str(), value))
         })
     }
 
     /// Every header as `<name>: ***` - all that may be shown of it.
     pub fn masked(&self) -> Vec<String> {
         self.iter()
-            .map(|(name, _)| format!("{name}: {}", crate::required_headers::MASKED))
+            .map(|(name, _)| format!("{name}: {}", ProtectedString::MASK))
             .collect()
-    }
-}
-
-impl std::fmt::Debug for RequestWithHeaderOnlySettings {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map()
-            .entries(
-                self.iter()
-                    .map(|(name, _)| (name, crate::required_headers::MASKED)),
-            )
-            .finish()
     }
 }
 

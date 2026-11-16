@@ -3,14 +3,15 @@ use std::{collections::HashMap, sync::Arc};
 use my_ssh::SshCredentials;
 use tokio::sync::RwLock;
 
+/// The password and the passphrase are secrets: `{:?}` writes them as `***`.
 #[derive(Debug, Clone)]
 pub enum SshConfig {
     PrivateKey {
         private_key: String,
-        pass_phrase: Option<String>,
+        pass_phrase: Option<crate::types::ProtectedString>,
     },
 
-    Password(String),
+    Password(crate::types::ProtectedString),
 }
 
 pub struct SshConfigListInternal {

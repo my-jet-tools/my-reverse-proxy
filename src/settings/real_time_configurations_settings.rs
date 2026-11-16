@@ -100,7 +100,7 @@ pub struct RealTimeConfigurationModel {
     /// Keys by the ids of their sets, put together with the keys the settings files and the other
     /// urls declare under the same ids. Taken as they are written: no variable is put into them.
     #[serde(default, deserialize_with = "super::null_as_default")]
-    pub api_keys: HashMap<String, Vec<String>>,
+    pub api_keys: HashMap<String, Vec<crate::types::ProtectedString>>,
 }
 
 impl RealTimeConfigurationModel {

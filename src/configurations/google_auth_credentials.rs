@@ -4,7 +4,7 @@ use crate::types::Email;
 
 pub struct GoogleAuthCredentials {
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: crate::types::ProtectedString,
     pub whitelisted_domains: String,
 }
 

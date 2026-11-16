@@ -4,6 +4,8 @@ use bytes::Bytes;
 use flate2::{write::GzEncoder, Compression};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, header::*, Method, Request, Uri};
+// Of hyper, not the `HeaderValue` of `crate::types`, which a log takes.
+use hyper::header::HeaderValue;
 use hyper_tungstenite::{tungstenite::http::request::Parts, HyperWebsocket};
 
 use crate::{configurations::*, types::*};
@@ -368,7 +370,7 @@ impl HttpRequestBuilder {
                 format!(
                     "[{}]. h2->h2 ext-CONNECT WS handshake to upstream: {:?}",
                     request.uri(),
-                    request.headers()
+                    crate::types::HeaderList::new(request.headers(), &[])
                 ),
             );
         }
@@ -477,7 +479,7 @@ impl HttpRequestBuilder {
                 format!(
                     "[{}]. h2->h1 WS handshake to upstream: {:?}",
                     request.uri(),
-                    request.headers()
+                    crate::types::HeaderList::new(request.headers(), &[])
                 ),
             );
         }
@@ -552,7 +554,7 @@ impl HttpRequestBuilder {
                 format!(
                     "[{}]. After Conversion Request: {:?}. ",
                     request.uri(),
-                    request.headers()
+                    crate::types::HeaderList::new(request.headers(), &[])
                 ),
             );
         }
@@ -659,7 +661,11 @@ impl HttpRequestBuilder {
                     ip.clone(),
                     format!(
                         "[{}]. Streaming request body upstream, announced size: {:?}. Headers: {:?}",
-                        parts.uri, content_size, parts.headers
+                        parts.uri,
+                        content_size,
+                        // What goes upstream: the headers of `request_with_header_only` are
+                        // not among them any more.
+                        crate::types::HeaderList::new(&parts.headers, &[])
                     ),
                 );
             }
@@ -716,7 +722,8 @@ impl HttpRequestBuilder {
                 ip.clone(),
                 format!(
                     "[{}]. After Conversion Request: {:?}.",
-                    parts.uri, parts.headers
+                    parts.uri,
+                    crate::types::HeaderList::new(&parts.headers, &[])
                 ),
             );
         }

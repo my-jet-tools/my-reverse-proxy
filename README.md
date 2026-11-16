@@ -1654,6 +1654,11 @@ The check:
 - The key is checked before anything of the request goes on, and before the headers of the endpoint and of
   the location are applied. On an endpoint with `oauth`, a guarded location takes a request which carries
   both: the token in `Authorization`, and the key in `X-Api-Key`.
+- Its value is never written out: in the logs (with debug on) and on the debug page it is `***`, in every
+  spelling of the name (`X_Api_Key` too). So are `Authorization`, `Proxy-Authorization`, `Cookie` and
+  `Set-Cookie`, and the headers of `request_with_header_only`. The keys of `api_keys:` - and the other secrets
+  of the settings: `variables`, `client_secret` of `g_auth` and of `oauth`, `consent_password`, `signing_key`,
+  the `password` and `passphrase` of `ssh` - are kept as such from the moment the settings are read.
 - `X-Api-Key` is **forwarded to the upstream as it came**: the upstream may tell its clients apart by it. To
   keep it from the upstream, take it off with `modify_http_headers` of the location or of the endpoint (not of
   `endpoint_templates`, where `modify_http_headers` is not applied):

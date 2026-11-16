@@ -35,7 +35,7 @@ pub async fn get_google_auth_credentials(
         Some(g_auth_settings) => {
             let google_auth_credentials = GoogleAuthCredentials {
                 client_id: g_auth_settings.client_id.to_string(),
-                client_secret: g_auth_settings.client_secret.to_string(),
+                client_secret: g_auth_settings.client_secret.clone(),
                 whitelisted_domains: g_auth_settings.whitelisted_domains.clone(), // make domains_check
             };
 

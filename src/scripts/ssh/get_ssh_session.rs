@@ -23,7 +23,10 @@ pub async fn get_ssh_session(
                         .get(ssh_credentials.as_ref());
                     ssh_pass_key
                 } else {
-                    pass_phrase.clone()
+                    // The ssh library takes it as a `String`: unwrapped here, where it is used.
+                    pass_phrase
+                        .as_ref()
+                        .map(|pass_phrase| pass_phrase.as_str().to_string())
                 };
                 let ssh_credentials = SshCredentials::PrivateKey {
                     ssh_remote_host: host.to_string(),
@@ -41,7 +44,7 @@ pub async fn get_ssh_session(
                     ssh_remote_host: host.to_string(),
                     ssh_remote_port: port,
                     ssh_user_name: ssh_credentials.get_user_name().to_string(),
-                    password: password.to_string(),
+                    password: password.as_str().to_string(),
                 };
 
                 Arc::new(ssh_credentials)

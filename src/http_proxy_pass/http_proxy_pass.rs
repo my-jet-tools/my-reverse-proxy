@@ -65,9 +65,10 @@ impl HttpProxyPass {
                 format!(
                     "Request. Uri: [{}] Headers: {:?}",
                     req.uri(),
-                    crate::required_headers::HeadersForLog::new(req.headers(), |name| {
-                        self.endpoint_info.request_with_header_only.covers(name)
-                    })
+                    crate::types::HeaderList::new(
+                        req.headers(),
+                        &[&self.endpoint_info.request_with_header_only]
+                    )
                 ),
             );
         }
@@ -219,7 +220,16 @@ impl HttpProxyPass {
                     self.endpoint_info.host_endpoint.as_str(),
                     Some(location_index.id),
                     ip.clone(),
-                    format!("Request parts: {:?}", request.req_parts),
+                    format!(
+                        "Request parts: {} {} {:?} Headers: {:?}",
+                        request.req_parts.method,
+                        request.req_parts.uri,
+                        request.req_parts.version,
+                        crate::types::HeaderList::new(
+                            &request.req_parts.headers,
+                            &[&self.endpoint_info.request_with_header_only]
+                        )
+                    ),
                 );
             }
 
@@ -266,7 +276,10 @@ impl HttpProxyPass {
                         self.endpoint_info.host_endpoint.as_str(),
                         Some(location_index.id),
                         ip.clone(),
-                        format!("Response headers: {:?}", response.headers()),
+                        format!(
+                            "Response headers: {:?}",
+                            crate::types::HeaderList::new(response.headers(), &[])
+                        ),
                     );
                 }
                 response
@@ -284,7 +297,7 @@ impl HttpProxyPass {
                         ip.clone(),
                         format!(
                             "Response as web-socket upgrade. Headers: {:?}",
-                            response.headers()
+                            crate::types::HeaderList::new(response.headers(), &[])
                         ),
                     );
                 }
