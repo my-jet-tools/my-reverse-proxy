@@ -1,7 +1,7 @@
 //! The journal of deviations: a line of text for every connection a `cloudflare: true` endpoint
 //! closed, for every request closed for a header of `request_with_header_only` (with the name of
 //! the header - never a value), and for every Cloudflare server which reached an endpoint without
-//! the flag.
+//! the flag. Each address of a line comes with its country (see [`country_of`]).
 //!
 //! Whoever is turned away decides how many deviations there are and part of what they say, so the
 //! journal is bounded every way: a deviation is put in a queue of [`QUEUE_CAPACITY`] and the
@@ -49,19 +49,22 @@ pub struct DeviationEvent {
 impl DeviationEvent {
     fn to_line(&self) -> String {
         let mut line = format!(
-            "{} endpoint={} reason={} peer={}",
+            "{} endpoint={} reason={} peer={} peer_country={}",
             format_utc(self.at_unix_micros),
             self.endpoint,
             self.deviation.as_code(),
             match self.peer {
                 Some(peer) => peer.to_string(),
                 None => "-".to_string(),
-            }
+            },
+            country_of(self.peer),
         );
 
         if let Some(client) = self.client {
             line.push_str(" client=");
             line.push_str(&client.to_string());
+            line.push_str(" client_country=");
+            line.push_str(&country_of(Some(client)));
         }
 
         if let Some(host) = self.host.as_ref() {
@@ -85,6 +88,19 @@ impl DeviationEvent {
         line.push('\n');
         line
     }
+}
+
+/// The country of `ip` as the country database of [`crate::ip_db`] gives it: the ISO 3166 code of
+/// two letters - `-` for an address it has no country for (a private one, the loopback, one it does
+/// not know), and for no address at all (a unix socket). Looked up by the writer of the journal,
+/// not by the connection which is turned away.
+fn country_of(ip: Option<IpAddr>) -> String {
+    // An IPv4 client of a dual-stack listener comes as `::ffff:a.b.c.d`: it is looked up as the
+    // IPv4 address it is.
+    ip.and_then(|ip| crate::ip_db::lookup_country(ip.to_canonical()))
+        // Two upper case letters, as the database is read: printable as they are.
+        .map(|code| String::from_utf8_lossy(&code).into_owned())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 pub struct DeviationJournal {
@@ -439,13 +455,13 @@ mod tests {
         assert_eq!(
             event(AT, Deviation::NotCloudflarePeer).to_line(),
             "2026-11-15T14:03:21.512Z endpoint=api.example.com:443 reason=not_cloudflare_peer \
-             peer=203.0.113.7 host=\"api.example.com\"\n"
+             peer=203.0.113.7 peer_country=- host=\"api.example.com\"\n"
         );
 
         assert_eq!(
             event(AT, Deviation::InvalidCfConnectingIp(printable(b"x\ny"))).to_line(),
             "2026-11-15T14:03:21.512Z endpoint=api.example.com:443 reason=bad_cf_connecting_ip \
-             peer=203.0.113.7 host=\"api.example.com\" value=\"x\\x0ay\"\n"
+             peer=203.0.113.7 peer_country=- host=\"api.example.com\" value=\"x\\x0ay\"\n"
         );
     }
 
@@ -462,7 +478,8 @@ mod tests {
         assert_eq!(
             through_cloudflare.to_line(),
             "2026-11-15T14:03:21.512Z endpoint=api.example.com:443 reason=wrong_required_header \
-             peer=203.0.113.7 client=198.51.100.4 host=\"api.example.com\" header=x-zone-secret\n"
+             peer=203.0.113.7 peer_country=- client=198.51.100.4 client_country=- \
+             host=\"api.example.com\" header=x-zone-secret\n"
         );
 
         assert_eq!(
@@ -472,7 +489,43 @@ mod tests {
             )
             .to_line(),
             "2026-11-15T14:03:21.512Z endpoint=api.example.com:443 reason=no_required_header \
-             peer=203.0.113.7 host=\"api.example.com\" header=x-zone-secret\n"
+             peer=203.0.113.7 peer_country=- host=\"api.example.com\" header=x-zone-secret\n"
+        );
+    }
+
+    /// Each address comes with its country by the country database - an IPv4 address of a
+    /// dual-stack listener (`::ffff:a.b.c.d`) as the IPv4 address it is - and `-` for one the
+    /// database has no country for, or for no address at all.
+    #[test]
+    fn a_line_tells_the_country_of_each_address() {
+        let mut through_cloudflare = event(
+            AT,
+            Deviation::MissingRequiredHeader("x-zone-secret".to_string()),
+        );
+        through_cloudflare.peer = Some("::ffff:8.8.8.8".parse().unwrap());
+        through_cloudflare.client = Some("1.0.0.0".parse().unwrap());
+
+        assert_eq!(
+            through_cloudflare.to_line(),
+            "2026-11-15T14:03:21.512Z endpoint=api.example.com:443 reason=no_required_header \
+             peer=::ffff:8.8.8.8 peer_country=US client=1.0.0.0 client_country=AU \
+             host=\"api.example.com\" header=x-zone-secret\n"
+        );
+
+        let mut private = event(AT, Deviation::NotCloudflarePeer);
+        private.peer = Some("10.0.0.5".parse().unwrap());
+        assert!(
+            private.to_line().contains(" peer=10.0.0.5 peer_country=- "),
+            "{}",
+            private.to_line()
+        );
+
+        let mut unix_socket = event(AT, Deviation::NotCloudflarePeer);
+        unix_socket.peer = None;
+        assert!(
+            unix_socket.to_line().contains(" peer=- peer_country=- "),
+            "{}",
+            unix_socket.to_line()
         );
     }
 

@@ -1526,7 +1526,11 @@ hosts:
   startup and then every hour: the proxy needs outbound https to it, and until the first
   read succeeds such an endpoint takes no connection.
 * Every connection it closes is written to `$HOME/logs/cloudflare-deviations-<date>-<hour>.log`
-  (files are kept 24 hours).
+  (files are kept 24 hours). A line has the address of the connection with its country
+  (`peer=203.0.113.7 peer_country=NL`) and, for a request which came through Cloudflare, the
+  client of its `CF-Connecting-IP` with its country (`client=198.51.100.4 client_country=UA`). The
+  country is the one of the country database the proxy carries; `-` - an address it has no
+  country for (a private one, one it does not know).
 * `mcp` and `tcp` endpoints read no HTTP: with `cloudflare: true` they serve nobody.
 
 ### Required headers (`request_with_header_only`)
