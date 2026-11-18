@@ -103,7 +103,7 @@ async fn load_from_http_or_https<'s>(
     let mut response = FlUrl::new(remote_endpoint.as_str())
         .with_header(
             "Accept-Encoding",
-            crate::secure::aes128gcm::CONTENT_ENCODING,
+            my_http_server::AES128GCM_CONTENT_ENCODING,
         )
         .get()
         .await
@@ -176,7 +176,7 @@ async fn load_content_from_http_via_ssh<'s>(
     let http_request = MyHttpRequestBuilder::new(Method::GET, remote_endpoint.as_str())
         .append_header(
             "Accept-Encoding",
-            crate::secure::aes128gcm::CONTENT_ENCODING,
+            my_http_server::AES128GCM_CONTENT_ENCODING,
         )
         .build()
         .map_err(|err| format!("{:?}", err))?;

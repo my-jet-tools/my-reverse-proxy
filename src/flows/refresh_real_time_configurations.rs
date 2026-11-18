@@ -93,7 +93,7 @@ pub async fn read_real_time_configuration(
         .set_timeout(request_timeout)
         .with_header(
             "Accept-Encoding",
-            crate::secure::aes128gcm::CONTENT_ENCODING,
+            my_http_server::AES128GCM_CONTENT_ENCODING,
         )
         .get()
         .await

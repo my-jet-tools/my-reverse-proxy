@@ -1,9 +1,9 @@
 //! What the proxy reads from a source, encrypted with a network key: a file, an answer over HTTP,
 //! the answer of a url of `real_time_configurations` - docs/encrypted-service-data.md.
 //!
-//! The network keys of the proxy are shared by the tests which run at the same time, so every
-//! test here sets the same one key: a source encrypted with any other key is one the proxy can
-//! not open.
+//! The network keys of the proxy are shared by the tests which run at the same time: every test
+//! here sets [`TEST_NETWORK_KEY`](super::TEST_NETWORK_KEY), and a source encrypted with any other
+//! key is one the proxy can not open.
 
 use std::{sync::Arc, time::Duration};
 
@@ -13,22 +13,12 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
-use zeroize::Zeroizing;
 
-use super::aes128gcm;
-use crate::app::APP_CTX;
+use super::{encrypt_for_tests, use_test_network_key, TEST_NETWORK_KEY as NETWORK_KEY};
 
-const NETWORK_KEY: [u8; 32] = [0x5a; 32];
 const ANOTHER_KEY: [u8; 32] = [0xa5; 32];
 
 const PEM: &[u8] = b"-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n";
-
-fn use_the_network_key() {
-    APP_CTX
-        .secure
-        .network_keys
-        .set(vec![Zeroizing::new(NETWORK_KEY)]);
-}
 
 fn temporary_file(name: &str, content: &[u8]) -> String {
     let path = std::env::temp_dir().join(format!(
@@ -98,11 +88,11 @@ async fn serve(content_encoding: Option<&str>, body: Vec<u8>) -> (u16, Arc<Mutex
 
 #[tokio::test]
 async fn an_encrypted_file_is_decrypted_and_a_plain_one_is_read_as_it_is() {
-    use_the_network_key();
+    use_test_network_key();
 
-    let encrypted = temporary_file("encrypted", &aes128gcm::encrypt(&NETWORK_KEY, PEM));
+    let encrypted = temporary_file("encrypted", &encrypt_for_tests(&NETWORK_KEY, PEM));
     let plain = temporary_file("plain", PEM);
-    let foreign = temporary_file("foreign", &aes128gcm::encrypt(&ANOTHER_KEY, PEM));
+    let foreign = temporary_file("foreign", &encrypt_for_tests(&ANOTHER_KEY, PEM));
 
     let from_encrypted = load(&encrypted).await;
     let from_plain = load(&plain).await;
@@ -122,11 +112,11 @@ async fn an_encrypted_file_is_decrypted_and_a_plain_one_is_read_as_it_is() {
 
 #[tokio::test]
 async fn an_encrypted_answer_over_http_is_decrypted() {
-    use_the_network_key();
+    use_test_network_key();
 
     let (marked, marked_head) =
-        serve(Some("aes128gcm"), aes128gcm::encrypt(&NETWORK_KEY, PEM)).await;
-    let (unmarked, _) = serve(None, aes128gcm::encrypt(&NETWORK_KEY, PEM)).await;
+        serve(Some("aes128gcm"), encrypt_for_tests(&NETWORK_KEY, PEM)).await;
+    let (unmarked, _) = serve(None, encrypt_for_tests(&NETWORK_KEY, PEM)).await;
     let (plain, _) = serve(None, PEM.to_vec()).await;
 
     assert_eq!(
@@ -158,9 +148,9 @@ async fn an_encrypted_answer_over_http_is_decrypted() {
 /// An answer which says it is encrypted is never taken as it is.
 #[tokio::test]
 async fn a_marked_answer_none_of_the_keys_opens_is_an_error() {
-    use_the_network_key();
+    use_test_network_key();
 
-    let (port, _) = serve(Some("aes128gcm"), aes128gcm::encrypt(&ANOTHER_KEY, PEM)).await;
+    let (port, _) = serve(Some("aes128gcm"), encrypt_for_tests(&ANOTHER_KEY, PEM)).await;
 
     let err = load(&format!("http://127.0.0.1:{port}/cert.pem"))
         .await
@@ -172,12 +162,12 @@ async fn a_marked_answer_none_of_the_keys_opens_is_an_error() {
 
 #[tokio::test]
 async fn a_real_time_answer_is_decrypted_before_it_is_parsed() {
-    use_the_network_key();
+    use_test_network_key();
 
     let yaml = b"ip_white_lists:\n  office:\n  - 10.0.0.1\n";
 
     for content_encoding in [Some("aes128gcm"), None] {
-        let (port, head) = serve(content_encoding, aes128gcm::encrypt(&NETWORK_KEY, yaml)).await;
+        let (port, head) = serve(content_encoding, encrypt_for_tests(&NETWORK_KEY, yaml)).await;
 
         let model = crate::flows::read_real_time_configuration(
             &format!("http://127.0.0.1:{port}/hosts"),
@@ -191,7 +181,7 @@ async fn a_real_time_answer_is_decrypted_before_it_is_parsed() {
         assert!(head.lock().contains("accept-encoding: aes128gcm"));
     }
 
-    let (port, _) = serve(Some("aes128gcm"), aes128gcm::encrypt(&ANOTHER_KEY, yaml)).await;
+    let (port, _) = serve(Some("aes128gcm"), encrypt_for_tests(&ANOTHER_KEY, yaml)).await;
 
     let err = crate::flows::read_real_time_configuration(
         &format!("http://127.0.0.1:{port}/hosts"),

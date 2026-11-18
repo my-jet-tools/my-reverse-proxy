@@ -221,13 +221,29 @@ async fn initialize_is_served_on_the_control_port() {
 /// One POST with a JSON body on a connection of its own; the response is read up to the close.
 /// `headers` are more header lines, each ended with `\r\n`.
 async fn post(port: u16, target: &str, headers: &str, body: &str) -> Response {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    post_bytes(port, target, headers, body.as_bytes()).await
+}
 
-    let request = format!(
-        "POST {target} HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}",
+async fn post_bytes(port: u16, target: &str, headers: &str, body: &[u8]) -> Response {
+    let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    post_on(stream, &format!("localhost:{port}"), target, headers, body).await
+}
+
+/// `POST target` with `body` on `stream`; the response is read up to the close.
+async fn post_on(
+    mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
+    host: &str,
+    target: &str,
+    headers: &str,
+    body: &[u8],
+) -> Response {
+    let head = format!(
+        "POST {target} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n",
         body.len()
     );
-    stream.write_all(request.as_bytes()).await.unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
 
     let mut received = Vec::new();
     tokio::time::timeout(TIMEOUT, stream.read_to_end(&mut received))
@@ -307,7 +323,94 @@ async fn the_control_port_is_served_on_a_unix_socket() {
     assert_eq!(response.status, 200);
     assert_eq!(response.body, index_html);
 
+    // The keys are taken over the socket: a key which is no key is refused for what it is, not for
+    // where it came from.
+    let stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let response = post_on(
+        stream,
+        "localhost",
+        "/api/initialize",
+        "",
+        br#"{"key": "short"}"#,
+    )
+    .await;
+    assert_eq!(response.status, 400);
+
     let _ = std::fs::remove_file(&path);
+}
+
+/// The control port decrypts a request encrypted with a network key (my-http-server, before the
+/// action runs) and refuses a replayed one. The action sees the JSON alone: here `/api/initialize`
+/// refuses the key in it for what it is.
+#[tokio::test]
+async fn an_encrypted_request_is_decrypted_and_a_replay_is_refused() {
+    use my_http_server::{EncryptedBody, HttpBodyEncryptionKey};
+    use rust_extensions::date_time::DateTimeAsMicroseconds;
+
+    crate::secure::use_test_network_key();
+    let key = HttpBodyEncryptionKey::from_bytes(&crate::secure::TEST_NETWORK_KEY).unwrap();
+
+    let port = start_control_port().await;
+
+    let encrypted = |timestamp: DateTimeAsMicroseconds| {
+        EncryptedBody {
+            salt: EncryptedBody::random_salt(),
+            timestamp,
+            body: br#"{"key": "short"}"#.to_vec(),
+        }
+        .encrypt(&key)
+    };
+
+    let body = encrypted(DateTimeAsMicroseconds::now());
+    let headers = "Content-Encoding: aes128gcm\r\n";
+
+    let response = post_bytes(port, "/api/initialize", headers, &body).await;
+    assert_eq!(
+        response.status,
+        400,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    assert!(
+        String::from_utf8_lossy(&response.body).contains("key is not base64"),
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+
+    // The same bytes once more: a replay.
+    let response = post_bytes(port, "/api/initialize", headers, &body).await;
+    assert_eq!(
+        response.status,
+        403,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+
+    // A sender whose clock is a minute behind.
+    let late = DateTimeAsMicroseconds::now().sub(Duration::from_secs(60));
+    let response = post_bytes(port, "/api/initialize", headers, &encrypted(late)).await;
+    assert_eq!(
+        response.status,
+        403,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+
+    // Encrypted with a key the proxy does not have.
+    let foreign = HttpBodyEncryptionKey::from_bytes(&[0xa5; 32]).unwrap();
+    let body = EncryptedBody {
+        salt: EncryptedBody::random_salt(),
+        timestamp: DateTimeAsMicroseconds::now(),
+        body: br#"{"key": "short"}"#.to_vec(),
+    }
+    .encrypt(&foreign);
+    let response = post_bytes(port, "/api/initialize", headers, &body).await;
+    assert_eq!(
+        response.status,
+        400,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
 }
 
 /// One request on a connection of its own to the unix socket at `path`, once it is served.

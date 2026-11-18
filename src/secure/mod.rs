@@ -1,11 +1,10 @@
 //! What keeps the proxy's secrets. The store on its disk, encrypted with the files key that
-//! `POST /api/initialize` brings after every start, and the network keys the data read from
-//! services is decrypted with (`Content-Encoding: aes128gcm`, RFC 8188).
+//! `POST /api/initialize` brings after every start, and the network keys every packet of the
+//! standard is encrypted with (`Content-Encoding: aes128gcm`, RFC 8188 - my-http-utils' and
+//! my-http-server's implementation).
 //!
 //! docs/secure-parameters.md is the proxy's side of it; docs/encrypted-service-data.md is what a
 //! service does to serve the proxy encrypted data.
-
-pub mod aes128gcm;
 
 mod keys;
 pub use keys::*;

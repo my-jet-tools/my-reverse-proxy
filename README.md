@@ -315,13 +315,17 @@ Two keys, each 32 random bytes in base64 (`openssl rand -base64 32`), each with 
 
 - the **files key** encrypts the secure store on the proxy's disk and nothing else. The proxy writes it nowhere:
   it is given after every start and kept in memory until the process stops;
-- the **network keys** decrypt what the proxy reads from services. There may be several - one per service, an
-  old and a new one while a key is rotated - and each is tried until one opens the data. They are kept in the
-  secure store.
+- the **network keys** encrypt every packet of the standard: what the proxy reads from services, and the
+  encrypted calls to the control port. There may be several - one per service, an old and a new one while a key
+  is rotated - and each is tried until one opens the data. They are kept in the secure store.
+
+The keys go in plain text, so `POST /api/initialize` is taken only over the control unix socket
+(`global_settings.control_unix_socket`) or over TCP from the host's own loopback:
 
 ```sh
-curl http://127.0.0.1:8000/api/initialize                  # True / False
-curl -X POST http://127.0.0.1:8000/api/initialize \
+S=/var/run/my-reverse-proxy/control.sock
+curl --unix-socket $S http://localhost/api/initialize      # True / False
+curl --unix-socket $S -X POST http://localhost/api/initialize \
      -H 'Content-Type: application/json' \
      -d '{"key": "<files key>", "network_keys": ["<network key>"]}'
 ```
@@ -332,7 +336,7 @@ curl -X POST http://127.0.0.1:8000/api/initialize \
 | `200 Initialized` | The store opened with this key - or it already was, with this same key. |
 | `400` | A key is not base64 of 32 bytes, `network_keys` is an empty list, or the body is not this JSON. |
 | `401 Invalid Key` | The store is there and this key does not open it, or the proxy is initialized with another key. |
-| `403` | The request came through a proxy (`X-Forwarded-For`): the keys go to the control port directly. |
+| `403` | The request came over the network, or through a proxy (`X-Forwarded-For`): the keys go over the control unix socket or the loopback. |
 | `500` | The store can not be read or written - the message names the file. |
 
 - `network_keys` is optional; given, it replaces the whole list the store has. The store is the check for the
@@ -343,6 +347,9 @@ curl -X POST http://127.0.0.1:8000/api/initialize \
   certificate, private key, CA and revocation list loaded from a source - a file, `http(s)://`, over ssh. An
   answer with `Content-Encoding: aes128gcm` has to open with one of the keys; anything else is decrypted if a
   key opens it and read as it is if none does. The proxy asks with `Accept-Encoding: aes128gcm`.
+- **Encrypted calls to the control port:** body encryption is supported by FlUrl and my-http-server - how it
+  works is in my-http-server's `docs/http-actions/encrypted-requests.md`. The control port decrypts with the
+  network keys, and a replayed body is refused.
 - **Until initialize** nothing encrypted can be read: a certificate or CA from an encrypted source is not
   loaded, so its endpoints cut their TLS handshakes, and an encrypted real-time answer is a failed read (what
   the url gave before stays). Right after initialize the urls are read and every certificate and CA which is

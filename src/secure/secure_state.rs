@@ -220,7 +220,7 @@ mod tests {
     }
 
     fn opens_with(state: &SecureState, byte: u8) -> bool {
-        let body = aes128gcm::encrypt(&[byte; SECURE_KEY_LEN], b"data");
+        let body = encrypt_for_tests(&[byte; SECURE_KEY_LEN], b"data");
         state.network_keys.try_open(&body).is_some()
     }
 

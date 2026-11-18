@@ -4,9 +4,11 @@ Status: draft, 2026-11-18. This document covers the proxy's own side: its keys, 
 initialized, its store, and the operator's calls. The standard services follow to serve data to the
 proxy is [encrypted-service-data.md](encrypted-service-data.md).
 
-Built so far (`src/secure`): `/api/initialize`, the store with the network keys, the reading of
-encrypted sources, and `ip_white_lists` in real-time answers. Not built yet: the other parameters
-of the store, the operator's calls and the tool that encrypts them.
+Built so far (`src/secure`): `/api/initialize` (over the control unix socket or the loopback), the
+store with the network keys, the reading of encrypted sources, `ip_white_lists` in real-time
+answers, and the control port's servers decrypting encrypted calls and refusing replays. Body
+encryption is FlUrl's and my-http-server's: the proxy has none of its own. Not built yet: the other parameters of the store, the operator's calls and the tool that
+encrypts them.
 
 ## Two keys
 
@@ -36,7 +38,7 @@ The answer is text, exactly `True` or `False`. The call takes no key.
 ### `POST /api/initialize`
 
 ```
-curl -X POST http://127.0.0.1:8000/api/initialize \
+curl -X POST --unix-socket /var/run/my-reverse-proxy/control.sock http://localhost/api/initialize \
      -H 'Content-Type: application/json' \
      -d '{"key": "<files key>", "network_keys": ["<network key>", "<another network key>"]}'
 ```
@@ -55,8 +57,10 @@ curl -X POST http://127.0.0.1:8000/api/initialize \
 - `network_keys`, when given, replaces the whole stored list. Without it, the stored list stays.
 - The first key of the list is the proxy's current key, the one it encrypts with.
 - Only one initialize runs at a time. Whitespace around a key is ignored.
-- A request which came through a proxy (it carries `X-Forwarded-For`) is refused with `403`: the
-  keys travel in plain text and go to the control port directly.
+- The keys travel in plain text, so they are taken only over the control unix socket
+  (`global_settings.control_unix_socket`) or over TCP from this host's own loopback, where nobody
+  can read them on the way. A request from anywhere else, or one a proxy relayed (it carries
+  `X-Forwarded-For`), gets `403`.
 - The store is the file `global_settings.secure_store_file` names, `~/.my-reverse-proxy-secure`
   when it names none. In a container it has to be on a volume the proxy can write to. The file is
   `MRPS`, a version byte, a nonce and AES-256-GCM of the protobuf, under a key derived from the
@@ -93,7 +97,8 @@ curl -X POST http://127.0.0.1:8000/api/initialize \
 
 Two places read sources, and both decrypt: `load_file` (certificates, private keys, CAs and
 revocation lists from a file, `http(s)://` or ssh) and the reading of real-time configurations.
-Both send `Accept-Encoding: aes128gcm`.
+Both send `Accept-Encoding: aes128gcm`, and both decrypt with the same `BodyEncryptionKeys` the
+control port has (`decrypt`: each key in turn, my-http-utils' aes128gcm).
 
 - An answer with `Content-Encoding: aes128gcm` has to open with one of the keys. Otherwise the read
   fails, saying whether the proxy has no keys or none of them opens it.
@@ -109,34 +114,17 @@ Both send `Accept-Encoding: aes128gcm`.
 ## The operator's calls
 
 The methods that change the store, and the one that reads it, take an encrypted body and answer
-encrypted, with the network keys:
+encrypted, with the network keys. Body encryption is supported by FlUrl and my-http-server: how it
+works - the body decrypted before the action runs, a replayed body refused, the answer encrypted -
+is in my-http-server's `docs/http-actions/encrypted-requests.md`. What the proxy adds:
 
-```
-POST <path> HTTP/1.1
-Content-Type: application/json
-Content-Encoding: aes128gcm
-
-<the JSON encrypted with one of the network keys, binary>
-```
-
-- The control port's HTTP server (my-http-server) decrypts the body before the action runs. The
-  proxy gives it the network keys as an `Arc<BodyEncryptionKeys>` (`set_body_encryption_keys`) and
-  replaces them with `set` after initialize. In that list each key's id is its position in
-  `network_keys`, and `0` is the current key. The server tries each key until one decrypts the
-  body. The action gets the plain JSON and does not learn which key opened it.
-- The server answers before the action runs: `415` with `Accept-Encoding` while it has no keys
-  (until initialize), and `400` for a body that no key decrypts, or that is damaged or cut short.
-- The action answers `415` to a body without `Content-Encoding: aes128gcm`. The header is still in
-  the request, and a body that carried it reached the action only because a key opened it.
-- The decrypted JSON carries `ts`, the sender's clock in unix seconds, and `nonce`, 16 random
-  bytes in base64. The proxy accepts a body only when `ts` is within 5 minutes of its own clock,
-  and accepts each `nonce` once: it remembers the nonces of the last 5 minutes. A `ts` that is off,
-  or a `nonce` already seen, gets `401 Invalid Key`.
-- The proxy encrypts the answer with its current key, taken from the same list by id
-  (`get_by_id("0")`, then `HttpResultBuilder::encode`). While a key is being rotated, the
-  operator's tool needs the current key to read answers, whichever key it encrypted the call with.
+- The control port's servers get the network keys (`set_body_encryption_keys`): one list for its
+  TCP address and its unix socket, replaced on each initialize.
+- An action refuses with `415` a body which did not come encrypted, and answers with the key that
+  decrypted the request (`HttpResultBuilder::encode(&info.key)`).
 - The operator encrypts the calls with a tool kept in this repository (like `gateway_keygen`). The
-  tool reads the key from a local file, so the key never appears in a chat.
+  tool reads the key from a local file, so the key never appears in a chat, and sends the body with
+  FlUrl's `encrypted(&key)`.
 
 ## Until initialize
 

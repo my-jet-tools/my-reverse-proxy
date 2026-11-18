@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use base64::Engine;
+use my_http_server::{BodyEncryptionKey, BodyEncryptionKeys, AES128GCM_CONTENT_ENCODING};
 use zeroize::Zeroizing;
-
-use super::aes128gcm;
 
 /// A files key or a network key: 32 random bytes.
 pub const SECURE_KEY_LEN: usize = 32;
@@ -41,34 +39,53 @@ pub fn same_secure_key(a: &[u8; SECURE_KEY_LEN], b: &[u8; SECURE_KEY_LEN]) -> bo
         == 0
 }
 
-/// The network keys: what the data read from services is decrypted with. Several at once - one
-/// per service, an old one and a new one while a key is rotated - and each is tried until one
-/// opens the body. They come with `POST /api/initialize` and live in the secure store.
+/// The network keys: what every packet of the standard is encrypted with - the data the proxy reads
+/// from services, and the operator's calls to the control port. Several at once - one per service,
+/// an old one and a new one while a key is rotated - and each is tried until one opens the body.
+/// They come with `POST /api/initialize` and live in the secure store.
+///
+/// One list of my-http-server for everything: the control port's servers (its TCP address and its
+/// unix socket) decrypt requests with it and refuse replays against the salts it keeps, and the
+/// proxy decrypts what it reads with it. The encryption itself is my-http-utils' - RFC 8188,
+/// `Content-Encoding: aes128gcm`, see docs/encrypted-service-data.md.
 pub struct NetworkKeys {
-    keys: ArcSwap<Vec<SecureKey>>,
+    keys: Arc<BodyEncryptionKeys>,
 }
 
 impl NetworkKeys {
     pub fn new() -> Self {
         Self {
-            keys: ArcSwap::from_pointee(Vec::new()),
+            keys: Arc::new(BodyEncryptionKeys::new(Vec::new())),
         }
     }
 
+    /// The list the control port's servers decrypt requests with. Both get this one: a body
+    /// accepted on one of them is refused as a replay on the other.
+    pub fn body_encryption_keys(&self) -> Arc<BodyEncryptionKeys> {
+        self.keys.clone()
+    }
+
+    /// Replaces the keys. The id of each is its place in the list: `0` is the current key.
     pub fn set(&self, keys: Vec<SecureKey>) {
-        self.keys.store(Arc::new(keys));
+        let keys = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                BodyEncryptionKey::from_bytes(index.to_string(), &key[..])
+                    .expect("a network key is 32 bytes")
+            })
+            .collect();
+
+        self.keys.set(keys);
     }
 
     pub fn count(&self) -> usize {
-        self.keys.load().len()
+        self.keys.len()
     }
 
     /// The body decrypted with the first key which opens it.
     pub fn try_open(&self, body: &[u8]) -> Option<Vec<u8>> {
-        self.keys
-            .load()
-            .iter()
-            .find_map(|key| aes128gcm::decrypt(&key[..], body).ok())
+        self.keys.decrypt(body).ok()
     }
 
     /// What a source gave, the way the proxy reads it: decrypted if one of the keys opens it, as
@@ -92,17 +109,15 @@ impl NetworkKeys {
 
         if count == 0 {
             return Err(format!(
-                "the answer is encrypted (Content-Encoding: {}) and the proxy has no network keys: \
-                 POST /api/initialize with network_keys",
-                aes128gcm::CONTENT_ENCODING
+                "the answer is encrypted (Content-Encoding: {AES128GCM_CONTENT_ENCODING}) and the \
+                 proxy has no network keys: POST /api/initialize with network_keys"
             ));
         }
 
         self.try_open(body).ok_or_else(|| {
             format!(
-                "the answer is encrypted (Content-Encoding: {}) and none of the {count} network \
-                 keys opens it",
-                aes128gcm::CONTENT_ENCODING
+                "the answer is encrypted (Content-Encoding: {AES128GCM_CONTENT_ENCODING}) and none \
+                 of the {count} network keys opens it"
             )
         })
     }
@@ -113,7 +128,7 @@ impl NetworkKeys {
         let is_marked = content_encoding.is_some_and(|value| {
             value
                 .trim()
-                .eq_ignore_ascii_case(aes128gcm::CONTENT_ENCODING)
+                .eq_ignore_ascii_case(AES128GCM_CONTENT_ENCODING)
         });
 
         if is_marked {
@@ -122,6 +137,29 @@ impl NetworkKeys {
             Ok(self.open_if_encrypted(body))
         }
     }
+}
+
+/// The network key of the tests. The proxy's keys are shared by the tests which run at the same
+/// time, so every test which sets them sets this one: anything encrypted with another key is one
+/// the proxy can not open.
+#[cfg(test)]
+pub const TEST_NETWORK_KEY: [u8; SECURE_KEY_LEN] = [0x5a; SECURE_KEY_LEN];
+
+/// The proxy's network keys are [`TEST_NETWORK_KEY`] alone.
+#[cfg(test)]
+pub fn use_test_network_key() {
+    crate::app::APP_CTX
+        .secure
+        .network_keys
+        .set(vec![Zeroizing::new(TEST_NETWORK_KEY)]);
+}
+
+/// `plain` encrypted with `key`, the way a service of the standard encrypts its answer.
+#[cfg(test)]
+pub fn encrypt_for_tests(key: &[u8; SECURE_KEY_LEN], plain: &[u8]) -> Vec<u8> {
+    my_http_server::HttpBodyEncryptionKey::from_bytes(key)
+        .unwrap()
+        .encrypt(plain)
 }
 
 #[cfg(test)]
@@ -154,15 +192,41 @@ mod tests {
         assert!(parse_secure_key(&long, "key").is_err());
     }
 
+    /// A body encrypted the way the services encrypt their answers, kept as a fixed vector:
+    /// whatever version of my-http-utils the proxy is built with, it opens what the services
+    /// write.
+    #[test]
+    fn the_vector_of_the_standard_opens() {
+        let keys = NetworkKeys::new();
+        keys.set(vec![Zeroizing::new(core::array::from_fn(|index| {
+            index as u8
+        }))]);
+
+        let body = base64::engine::general_purpose::STANDARD
+            .decode("oKGio6SlpqeoqaqrrK2urwAAEAAAd4lQdR25LBqmiaRlRbryiJTYDikv7OAMtydV1zSRPu4Fy70/BNOmc0q8RjUIqwznMD1/D9zqlMc=")
+            .unwrap();
+
+        assert_eq!(
+            keys.try_open(&body).unwrap(),
+            b"ip_white_lists:\n  office:\n  - 10.0.0.1\n"
+        );
+    }
+
     #[test]
     fn every_key_is_tried_until_one_opens_the_body() {
         let keys = NetworkKeys::new();
-        let body = aes128gcm::encrypt(&key(2)[..], b"hosts: {}\n");
+        let body = encrypt_for_tests(&key(2), b"hosts: {}\n");
 
         assert_eq!(keys.try_open(&body), None);
 
         keys.set(vec![key(1), key(2), key(3)]);
         assert_eq!(keys.try_open(&body).unwrap(), b"hosts: {}\n");
+        assert_eq!(keys.count(), 3);
+
+        // The id of a key is its place in the list: `0` is the current one.
+        assert!(keys.body_encryption_keys().get_by_id("0").is_some());
+        assert!(keys.body_encryption_keys().get_by_id("2").is_some());
+        assert!(keys.body_encryption_keys().get_by_id("3").is_none());
 
         keys.set(vec![key(1), key(3)]);
         assert_eq!(keys.try_open(&body), None);
@@ -178,7 +242,7 @@ mod tests {
         assert_eq!(keys.read(plain.clone(), None).unwrap(), plain);
         assert_eq!(keys.read(plain.clone(), Some("gzip")).unwrap(), plain);
 
-        let body = aes128gcm::encrypt(&key(1)[..], b"data");
+        let body = encrypt_for_tests(&key(1), b"data");
         assert_eq!(keys.open_if_encrypted(body.clone()), b"data");
         assert_eq!(keys.read(body, None).unwrap(), b"data");
     }
@@ -187,7 +251,7 @@ mod tests {
     #[test]
     fn a_marked_answer_has_to_open() {
         let keys = NetworkKeys::new();
-        let body = aes128gcm::encrypt(&key(5)[..], b"data");
+        let body = encrypt_for_tests(&key(5), b"data");
 
         let err = keys.read(body.clone(), Some("aes128gcm")).unwrap_err();
         assert!(err.contains("no network keys"), "{err}");

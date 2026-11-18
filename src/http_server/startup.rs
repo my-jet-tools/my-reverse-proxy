@@ -49,6 +49,16 @@ fn serve(mut http_server: MyHttpServer) {
     // `header_read_timeout` of the global settings - a slow client is not held for ever.
     http_server.set_header_read_timeout(crate::app::APP_CTX.http_control_header_read_timeout);
 
+    // An encrypted request (Content-Encoding: aes128gcm) is decrypted with the network keys before
+    // its action runs, and a replayed one is refused. One list for the TCP address and the unix
+    // socket: a body accepted on one is refused on the other.
+    http_server.set_body_encryption_keys(
+        crate::app::APP_CTX
+            .secure
+            .network_keys
+            .body_encryption_keys(),
+    );
+
     let controllers = Arc::new(super::builder::build_controllers());
 
     let swagger_middleware = SwaggerMiddleware::new(
