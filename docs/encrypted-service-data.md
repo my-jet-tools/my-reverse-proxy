@@ -11,31 +11,35 @@ Make the service follow this standard:
 
 1. The service keeps its data encrypted under a **files key** that it never stores. After every
    start it receives the files key over `POST /api/initialize`.
-2. In the same call it receives the **network key** and keeps it in its encrypted store.
-3. Every request and answer that carries secrets is encrypted with the network key, using the HTTP
+2. In the same call it receives the **network keys** (one or several) and keeps them in its
+   encrypted store.
+3. Every request and answer that carries secrets is encrypted with a network key, using the HTTP
    standard for encrypted bodies: `Content-Encoding: aes128gcm` from
    [RFC 8188](https://www.rfc-editor.org/rfc/rfc8188).
 
 There are two keys, and each has one job. The files key encrypts the service's store and nothing
-else. It is sent only to `POST /api/initialize`. The network key covers the requests: the answers
+else. It is sent only to `POST /api/initialize`. The network keys cover the requests: the answers
 my-reverse-proxy reads, my-reverse-proxy's own calls that carry a body, and the operator's calls to
 the service.
+
+There may be several network keys: one per pair of services, an old one and a new one while they
+are being rotated, and so on. Whoever decrypts tries each key it has until one opens the body.
 
 If the service already has its own initialize calls (ip-whitelister has `POST /api/is-initialized`
 and an `initialize` that answers 409 the second time), replace them with the ones below. If the
 service encrypts its admin API with the files key today (ip-whitelister does), move that API to the
-network key, as described in [Requests with a body](#requests-with-a-body).
+network keys, as described in [Requests with a body](#requests-with-a-body).
 
 ## The keys
 
 | Key | What it encrypts | Where it lives |
 |---|---|---|
 | files key | the service's own data on its disk | nowhere: it is given to `POST /api/initialize` after every start and kept in memory until the process stops |
-| network key | every request and answer that carries secrets | in the service's encrypted store. my-reverse-proxy and the operator's tool hold the same key |
+| network keys, one or several | every request and answer that carries secrets | in the service's encrypted store. my-reverse-proxy and the operator's tool hold the keys they share with the service |
 
-- Both keys have the same format: 32 random bytes written as standard base64, 44 characters. Make
+- Every key has the same format: 32 random bytes written as standard base64, 44 characters. Make
   one with `openssl rand -base64 32`.
-- The service never writes either key to its settings, a plain file, a log or an answer.
+- The service never writes a key to its settings, a plain file, a log or an answer.
 - If the files key is lost, the store is lost too, because nothing else opens it.
 
 ## `/api/initialize`
@@ -57,25 +61,29 @@ keys.
 ```
 curl -X POST --unix-socket <socket> http://localhost/api/initialize \
      -H 'Content-Type: application/json' \
-     -d '{"key": "<files key>", "network_key": "<network key>"}'
+     -d '{"key": "<files key>", "network_keys": ["<network key>", "<another network key>"]}'
 ```
 
-`network_key` is optional.
+`network_keys` is optional.
 
 | Answer | |
 |---|---|
-| `200 Created` | There was no store yet. The service created it, encrypted with this key, and saved `network_key` if one was given. This is the first initialize of an installation. |
+| `200 Created` | There was no store yet. The service created it, encrypted with this key, and saved `network_keys` if they were given. This is the first initialize of an installation. |
 | `200 Initialized` | The store opened with this key and is now in use. Also the answer when the service was already opened with this same key. |
-| `400` | `key` or `network_key` is not base64 of 32 bytes. |
+| `400` | `key` or one of `network_keys` is not base64 of 32 bytes, or `network_keys` is an empty list. |
 | `401 Invalid Key` | A store exists and this key does not open it, or the service is already initialized with another key. Nothing changed. |
 | `500` | The store could not be read or written. The message names the file and the reason. |
 
 - The answers are text, and the words in backticks are exact.
 - Once the store exists, it is the check for the key: if the store opens, the key is right. The
   service keeps no hash of the key anywhere.
-- When `network_key` is given, the service saves it into the store, replacing the one there. To
-  rotate the network key, call initialize again with the same files key and a new `network_key`.
-  Without `network_key`, the stored one stays.
+- When `network_keys` is given, the service saves the list into the store, replacing the whole list
+  that was there. A key listed twice is kept once. Without `network_keys`, the stored list stays.
+  Call initialize again with the same files key to change the list.
+- The first key of the list encrypts the answers that are not replies to an encrypted request
+  (my-reverse-proxy's reads). The service tries every key on an encrypted request.
+- To rotate a key: give the readers the new key next to the old one. Then put the new key first on
+  the service. Once every party has it, remove the old key everywhere.
 - Only one initialize runs at a time.
 - Whitespace around a key is ignored.
 - The keys travel here as plain text, so the call is for the inside only. Serve it on a unix socket
@@ -87,8 +95,8 @@ curl -X POST --unix-socket <socket> http://localhost/api/initialize \
 - Every read by my-reverse-proxy answers `503` with a sentence saying what is missing. It never
   gets an empty answer. On a failed read my-reverse-proxy keeps what it read last. An empty
   whitelist would lock everybody out, and a missing certificate would break an endpoint.
-- An initialized service that has no network key yet answers `503` to a read of secret data:
-  "no network key: POST /api/initialize with network_key".
+- An initialized service that has no network keys yet answers `503` to a read of secret data:
+  "no network keys: POST /api/initialize with network_keys".
 - `GET /api/initialize`, `POST /api/initialize` and the liveness checks always answer.
 
 ## What my-reverse-proxy reads
@@ -130,17 +138,18 @@ Cache-Control: no-store
   `application/x-pem-file`.
 - The service encrypts every answer that carries secret data, whether or not the request asked
   with `Accept-Encoding`.
+- The answer is encrypted with the first of the service's network keys.
 - A fresh random salt goes into every answer, so the same data never looks the same twice.
-- `200` with the data, or `503` while the service is not initialized or has no network key. Any
+- `200` with the data, or `503` while the service is not initialized or has no network keys. Any
   other status counts as a failed read.
 
 ## How my-reverse-proxy reads the answer
 
 1. It takes the body.
-2. With `Content-Encoding: aes128gcm`, it decrypts the body with its network key, then parses the
-   result.
+2. With `Content-Encoding: aes128gcm`, it tries each of its network keys until one decrypts the
+   body, then parses the result.
 3. Without that header, it tries to parse the body as it is (YAML or JSON, or PEM). If that fails
-   and it has a network key, it tries to decrypt the body as `aes128gcm` with each key it has, then
+   and it has network keys, it tries to decrypt the body as `aes128gcm` with each of them, then
    parses the result.
 4. If neither works, the read fails. my-reverse-proxy keeps what it read last and logs why.
 
@@ -158,10 +167,11 @@ POST <path> HTTP/1.1
 Content-Type: application/json
 Content-Encoding: aes128gcm
 
-<the body: the JSON encrypted with the network key, binary>
+<the body: the JSON encrypted with one of the network keys, binary>
 ```
 
 - `Content-Type` is the type of the decrypted body.
+- The service tries each of its network keys until one decrypts the body.
 - The decrypted JSON carries `ts`, the sender's clock in unix seconds, next to the fields of the
   call.
 - The service accepts a body only when `ts` is within 5 minutes of its own clock, and accepts each
@@ -169,10 +179,10 @@ Content-Encoding: aes128gcm
   recorded request therefore cannot be sent again.
 - The service answers:
   - `415` to a body without `Content-Encoding: aes128gcm`;
-  - `401 Invalid Key` to a body that does not decrypt, whose `ts` is off, or that was already
-    accepted;
-  - `503` while it is not initialized or has no network key.
-- The answer is encrypted with the network key the same way, unless it is one of the refusals
+  - `401 Invalid Key` to a body that none of its keys decrypts, whose `ts` is off, or that was
+    already accepted;
+  - `503` while it is not initialized or has no network keys.
+- The answer is encrypted with the key that decrypted the request, unless it is one of the refusals
   above.
 
 ## The encryption: `aes128gcm` (RFC 8188)
@@ -182,7 +192,7 @@ body   = header || record_0 || record_1 || ... || record_last
 header = salt (16 random bytes) || rs (uint32, big-endian) || idlen (1 byte) || keyid (idlen bytes)
 ```
 
-- `IKM` is the network key: its 32 bytes, decoded from base64.
+- `IKM` is the network key in use: its 32 bytes, decoded from base64.
 - `PRK = HMAC-SHA-256(key = salt, message = IKM)`
 - `CEK` is the first 16 bytes of `HMAC-SHA-256(PRK, "Content-Encoding: aes128gcm" || 0x00 || 0x01)`.
 - `NONCE_BASE` is the first 12 bytes of `HMAC-SHA-256(PRK, "Content-Encoding: nonce" || 0x00 || 0x01)`.
@@ -193,7 +203,8 @@ header = salt (16 random bytes) || rs (uint32, big-endian) || idlen (1 byte) || 
 - A record is `AES-128-GCM(CEK, nonce, plain text)`: the ciphertext, then the 16-byte tag. Every
   record but the last is exactly `rs` bytes long, and the last one is at most `rs`. With
   `rs = 4096`, a record carries up to 4079 bytes of data.
-- `keyid` may be empty. A reader with several keys tries each one.
+- `keyid` may be empty. A reader with several keys tries each one. A wrong key already fails on
+  the tag of the first record, so each extra key tried costs one record, never the whole body.
 - To read a record: decrypt it, check the tag, strip the trailing `0x00` padding, then take off the
   delimiter.
 - If a record fails its tag, the whole body is refused: the key is wrong or the body is damaged.
@@ -224,13 +235,14 @@ The salt is the first 16 bytes of each body. The tests must check that:
 ## Checklist
 
 - `GET /api/initialize` and `POST /api/initialize` answer exactly as above.
-- The files key and the network key are never on disk in plain text, and never in logs or answers.
-- `network_key` is saved in the encrypted store, and replaced on every initialize that carries one.
-- Every answer to my-reverse-proxy that carries secret data is `aes128gcm` with the network key and
-  a fresh salt, sent with `Content-Encoding: aes128gcm` and `Cache-Control: no-store`.
-- Every request with a body (my-reverse-proxy's and the operator's) is `aes128gcm` with the network
-  key, carries `ts`, and is accepted once.
+- The files key and the network keys are never on disk in plain text, and never in logs or answers.
+- `network_keys` is saved in the encrypted store. Every initialize that carries it replaces the
+  whole list.
+- Every answer to my-reverse-proxy that carries secret data is `aes128gcm` with the first network
+  key and a fresh salt, sent with `Content-Encoding: aes128gcm` and `Cache-Control: no-store`.
+- Every request with a body (my-reverse-proxy's and the operator's) is `aes128gcm` with one of the
+  network keys, carries `ts`, and is accepted once. The service tries each key, and answers with
+  the key that decrypted the request.
 - The files key encrypts only the store and is sent only to `POST /api/initialize`.
-- Reads answer `503`, never an empty answer, until the service is initialized and has a network
-  key.
+- Reads answer `503`, never an empty answer, until the service is initialized and has network keys.
 - The test vectors pass.
