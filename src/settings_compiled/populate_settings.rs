@@ -285,7 +285,7 @@ impl SettingsCompiled {
             itm.get_debug_ip()?;
             itm.get_http_control_addr()?;
 
-            self.global_settings = Some(GlobalSettings {
+            let global_settings = GlobalSettings {
                 connection_settings: itm.connection_settings,
                 all_http_endpoints: if let Some(itm) = itm.all_http_endpoints {
                     Some(AllHttpEndpointsGlobalSettings {
@@ -300,13 +300,18 @@ impl SettingsCompiled {
                 show_error_description_on_error_page: itm.show_error_description_on_error_page,
                 http_control_port: itm.http_control_port,
                 http_control_ip: itm.http_control_ip,
+                control_unix_socket: variables.apply_variables_opt(itm.control_unix_socket)?,
                 default_h2_livness_url: itm.default_h2_livness_url,
                 ip_blocklist_white_list: itm.ip_blocklist_white_list,
                 debug_ip: itm.debug_ip,
                 pool_supervisor_interval: itm.pool_supervisor_interval,
                 secure_store_file: variables.apply_variables_opt(itm.secure_store_file)?,
                 timeouts: itm.timeouts,
-            })
+            };
+
+            global_settings.get_control_unix_socket()?;
+
+            self.global_settings = Some(global_settings);
         }
 
         Ok(())

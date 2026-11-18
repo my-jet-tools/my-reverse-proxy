@@ -30,6 +30,11 @@ pub struct GlobalSettings {
     /// is a bare port. The other way of saying `http_control_port: 0.0.0.0:9000`; the two may not
     /// both name one.
     pub http_control_ip: Option<String>,
+    /// The control port on a unix socket too: the path of the socket, `~` expanded. The same admin
+    /// ui, `/api`, `/swagger` and `/mcp` as on `http_control_port`. `control-unix-socket` is read
+    /// as well. Bound at startup.
+    #[serde(alias = "control-unix-socket")]
+    pub control_unix_socket: Option<String>,
     pub default_h2_livness_url: Option<String>,
     /// Global allow-list for the automatic IP block-list (fail2ban): source IPs
     /// (single addresses or `from-to` ranges) whose failed connections are never
@@ -86,6 +91,27 @@ impl GlobalSettings {
         }
 
         Ok(result)
+    }
+
+    /// `control_unix_socket` with `~` expanded - `None` when it is not given. An error on a
+    /// platform without unix sockets: the control port does not quietly go without the socket.
+    pub fn get_control_unix_socket(&self) -> Result<Option<String>, String> {
+        let Some(path) = self
+            .control_unix_socket
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        else {
+            return Ok(None);
+        };
+
+        if !cfg!(unix) {
+            return Err(format!(
+                "global_settings.control_unix_socket: '{path}' - unix sockets are not supported on this platform"
+            ));
+        }
+
+        super::expand_home(path).map(Some)
     }
 
     /// The address the control port listens on, out of `http_control_port` and `http_control_ip`.
@@ -168,6 +194,34 @@ mod tests {
 
     fn parse(yaml: &str) -> GlobalSettings {
         serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn the_control_unix_socket_is_a_path_with_home_expanded() {
+        assert_eq!(
+            parse("http_control_port: 9000").get_control_unix_socket(),
+            Ok(None)
+        );
+        assert_eq!(
+            parse("control_unix_socket: ''").get_control_unix_socket(),
+            Ok(None)
+        );
+
+        let settings = parse("control_unix_socket: /var/run/my-reverse-proxy-control.sock");
+        assert_eq!(
+            settings.get_control_unix_socket(),
+            Ok(Some("/var/run/my-reverse-proxy-control.sock".to_string()))
+        );
+
+        // Written the way the other settings of the services are written, too.
+        let settings = parse("control-unix-socket: ~/sockets/control.sock");
+        assert_eq!(
+            settings.get_control_unix_socket(),
+            Ok(Some(format!(
+                "{}/sockets/control.sock",
+                crate::settings::home_dir().unwrap()
+            )))
+        );
     }
 
     #[test]

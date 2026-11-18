@@ -27,6 +27,7 @@ global_settings:
                           # served HERE - never on the ports under `hosts:`. A bare port is served on
                           # 127.0.0.1; the whole address opens it up: 0.0.0.0:9000, "[::]:9000".
                           # Absent = 127.0.0.1:8000 (see "Certificates provided at runtime")
+  control_unix_socket: /var/run/my-reverse-proxy/control.sock # the same, on a unix socket too
   connection_settings:
     buffer_size: 512Kb # Buffer, which is allocated twice (read/write) per connection to pass traffic by
     connect_to_remote_timeout: 5000 # ms — timeout to connect to remote host (type: tcp endpoints)
@@ -375,6 +376,18 @@ global_settings:
 A value which is neither a port nor an address with a port, an `http_control_ip` that is not an ip address, and an
 address given in both settings fail the settings load, the same way a wrong `debug_ip` does - the port does not
 end up on an address nobody meant. The address is bound at startup: a change takes effect after a restart.
+
+The control port can be served on a unix socket as well - the same admin ui, `/api`, `/swagger` and `/mcp`:
+
+```yaml
+global_settings:
+  control_unix_socket: ~/sockets/my-reverse-proxy-control.sock   # `control-unix-socket` is read too
+```
+
+`~` is expanded. A file left at the path by a run before is removed when the socket is bound, at startup. The
+TCP control port is served as before. Only processes that can reach the socket file can connect - in Docker,
+mount its folder into the containers that call the control port. Unix sockets are not supported on Windows: there
+the setting fails the settings load.
 
 ### 1. Declare it
 

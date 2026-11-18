@@ -117,6 +117,9 @@ pub struct AppContext {
     /// The address the control port listens on (`global_settings.http_control_port` /
     /// `http_control_ip`, `127.0.0.1:8000` by default). Bound once, at startup.
     pub http_control_addr: SocketAddr,
+    /// `global_settings.control_unix_socket`: the control port is served on this unix socket too.
+    /// Bound once, at startup.
+    pub http_control_unix_socket: Option<String>,
     /// `header_read_timeout` of `global_settings`, for the control port: my-http-server times the
     /// head of an http/1.1 request with it (it is no endpoint, so only the global level applies).
     pub http_control_header_read_timeout: std::time::Duration,
@@ -153,6 +156,7 @@ pub struct AppContext {
 impl AppContext {
     pub fn new(settings_model: SettingsCompiled) -> Self {
         let http_control_addr = settings_model.get_http_control_addr().unwrap();
+        let http_control_unix_socket = settings_model.get_control_unix_socket().unwrap();
         let http_control_header_read_timeout = settings_model
             .get_global_timeouts()
             .resolve()
@@ -256,6 +260,7 @@ impl AppContext {
             gateway_server,
             gateway_clients,
             http_control_addr,
+            http_control_unix_socket,
             http_control_header_read_timeout,
             ssh_sessions_pool: SshSessionsPool::new(),
             self_signed_cert: Arc::new(

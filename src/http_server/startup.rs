@@ -14,15 +14,37 @@ use crate::mcp::{
 };
 
 /// The control port at the address of the settings: `global_settings.http_control_port` and
-/// `http_control_ip`, `127.0.0.1:8000` when they say nothing.
+/// `http_control_ip`, `127.0.0.1:8000` when they say nothing - and on the unix socket of
+/// `global_settings.control_unix_socket` too, when it names one.
 pub fn start() {
     start_at(crate::app::APP_CTX.http_control_addr);
+
+    if let Some(unix_socket) = crate::app::APP_CTX.http_control_unix_socket.as_ref() {
+        start_at_unix_socket(unix_socket);
+    }
 }
 
 /// The control port server at the address given.
 pub fn start_at(addr: SocketAddr) {
-    let mut http_server = MyHttpServer::new(addr);
+    serve(MyHttpServer::new(addr));
+}
 
+/// The control port server on the unix socket given: the same as at its address. A file left
+/// at the path by a run before is removed first.
+#[cfg(unix)]
+pub fn start_at_unix_socket(unix_socket: &str) {
+    serve(MyHttpServer::new_as_unix_socket(unix_socket));
+}
+
+/// The settings load refuses `control_unix_socket` on a platform without unix sockets, so this is
+/// never reached there.
+#[cfg(not(unix))]
+pub fn start_at_unix_socket(unix_socket: &str) {
+    panic!("The control port can not be served on the unix socket {unix_socket}: unix sockets are not supported on this platform");
+}
+
+/// Everything the control port serves, put on `http_server`, which is started then.
+fn serve(mut http_server: MyHttpServer) {
     // The head of an http/1.1 request, and the first bytes of a connection, within the
     // `header_read_timeout` of the global settings - a slow client is not held for ever.
     http_server.set_header_read_timeout(crate::app::APP_CTX.http_control_header_read_timeout);

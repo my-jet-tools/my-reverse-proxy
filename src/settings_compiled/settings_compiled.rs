@@ -832,6 +832,14 @@ impl SettingsCompiled {
         }
     }
 
+    /// `global_settings.control_unix_socket`: the unix socket the control port is served on too.
+    pub fn get_control_unix_socket(&self) -> Result<Option<String>, String> {
+        match self.global_settings.as_ref() {
+            Some(global_settings) => global_settings.get_control_unix_socket(),
+            None => Ok(None),
+        }
+    }
+
     /// `global_settings.secure_store_file`, or `~/.my-reverse-proxy-secure`.
     pub fn get_secure_store_file(&self) -> String {
         self.global_settings

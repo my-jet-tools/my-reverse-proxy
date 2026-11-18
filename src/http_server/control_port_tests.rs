@@ -287,12 +287,57 @@ struct Response {
     body: Vec<u8>,
 }
 
+/// `global_settings.control_unix_socket`: the control port serves the same on the socket. A file
+/// a run before left at the path is not in the way.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_control_port_is_served_on_a_unix_socket() {
+    let path = std::env::temp_dir().join(format!("mrp-control-{}.sock", std::process::id()));
+    let path = path.to_str().unwrap().to_string();
+    std::fs::write(&path, b"left by a run before").unwrap();
+
+    super::start_at_unix_socket(&path);
+
+    let response = get_over_unix_socket(&path, "/api/initialize").await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"False");
+
+    let index_html = std::fs::read("wwwroot/index.html").unwrap();
+    let response = get_over_unix_socket(&path, "/").await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, index_html);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// One request on a connection of its own to the unix socket at `path`, once it is served.
+#[cfg(unix)]
+async fn get_over_unix_socket(path: &str, target: &str) -> Response {
+    for _ in 0..100 {
+        if let Ok(stream) = tokio::net::UnixStream::connect(path).await {
+            return get_on(stream, "localhost", target).await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    panic!("the control port is not served on the unix socket {path}");
+}
+
 /// One request on a connection of its own; the response is read up to the close.
 async fn get(port: u16, target: &str) -> Response {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
 
-    let request =
-        format!("GET {target} HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n");
+    get_on(stream, &format!("localhost:{port}"), target).await
+}
+
+/// `GET target` on `stream`; the response is read up to the close.
+async fn get_on(
+    mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
+    host: &str,
+    target: &str,
+) -> Response {
+    let request = format!("GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).await.unwrap();
 
     let mut received = Vec::new();
