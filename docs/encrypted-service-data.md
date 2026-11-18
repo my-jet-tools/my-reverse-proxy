@@ -111,6 +111,10 @@ header = salt (16 random bytes) || rs (uint32, big-endian) || idlen (1 byte) || 
 In Rust this takes about 60 lines with `aes-gcm`, `hmac` and `sha2`. In a browser, WebCrypto has
 HMAC-SHA-256 and AES-GCM.
 
+A service built on my-http-server needs none of this: `HttpResultBuilder::encode(&key)` writes
+exactly this answer (a fresh salt, `rs = 4096`, no key id, `Content-Encoding: aes128gcm`,
+`Cache-Control: no-store`), and `my_http_server::aes128gcm` passes the test vectors below.
+
 ### Test vectors
 
 Every implementation must pass these. The first two come from RFC 8188 and use base64url. The third

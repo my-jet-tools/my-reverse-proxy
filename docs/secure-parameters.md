@@ -119,13 +119,22 @@ Content-Encoding: aes128gcm
 <the JSON encrypted with one of the network keys, binary>
 ```
 
-- The proxy tries each of its keys until one decrypts the body. It encrypts the answer with the key
-  that decrypted the request.
-- The decrypted JSON carries `ts`, the sender's clock in unix seconds. The proxy accepts a body only
-  when `ts` is within 5 minutes of its own clock, and accepts each body once: it remembers the
-  salts of the last 5 minutes.
-- `415` for a body without `Content-Encoding: aes128gcm`. `401 Invalid Key` for a body that no key
-  decrypts, whose `ts` is off, or that was already accepted. `503` until initialize.
+- The control port's HTTP server (my-http-server) decrypts the body before the action runs. The
+  proxy gives it the network keys as an `Arc<BodyEncryptionKeys>` (`set_body_encryption_keys`) and
+  replaces them with `set` after initialize. In that list each key's id is its position in
+  `network_keys`, and `0` is the current key. The server tries each key until one decrypts the
+  body. The action gets the plain JSON and does not learn which key opened it.
+- The server answers before the action runs: `415` with `Accept-Encoding` while it has no keys
+  (until initialize), and `400` for a body that no key decrypts, or that is damaged or cut short.
+- The action answers `415` to a body without `Content-Encoding: aes128gcm`. The header is still in
+  the request, and a body that carried it reached the action only because a key opened it.
+- The decrypted JSON carries `ts`, the sender's clock in unix seconds, and `nonce`, 16 random
+  bytes in base64. The proxy accepts a body only when `ts` is within 5 minutes of its own clock,
+  and accepts each `nonce` once: it remembers the nonces of the last 5 minutes. A `ts` that is off,
+  or a `nonce` already seen, gets `401 Invalid Key`.
+- The proxy encrypts the answer with its current key, taken from the same list by id
+  (`get_by_id("0")`, then `HttpResultBuilder::encode`). While a key is being rotated, the
+  operator's tool needs the current key to read answers, whichever key it encrypted the call with.
 - The operator encrypts the calls with a tool kept in this repository (like `gateway_keygen`). The
   tool reads the key from a local file, so the key never appears in a chat.
 
