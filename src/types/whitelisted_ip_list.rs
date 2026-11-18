@@ -12,6 +12,35 @@ pub struct WhiteListedIpList {
 /// The entry which lets every address in.
 pub const WHITE_LIST_EVERYBODY: &str = "*";
 
+/// Whether `entry` can be an entry of an ip list: an IPv4 address, a `from-to` range of them, or
+/// `*`. [`WhiteListedIpList::new`] panics on anything else, so a list from outside the settings
+/// files is checked with this first.
+pub fn check_ip_white_list_entry(entry: &str) -> Result<(), String> {
+    let entry = entry.trim();
+
+    if entry == WHITE_LIST_EVERYBODY {
+        return Ok(());
+    }
+
+    let is_valid = match entry.split_once('-') {
+        Some((from, to)) => {
+            from.trim().parse::<std::net::Ipv4Addr>().is_ok()
+                && to.trim().parse::<std::net::Ipv4Addr>().is_ok()
+                && from.trim() == from
+                && to.trim() == to
+        }
+        None => entry.parse::<std::net::Ipv4Addr>().is_ok(),
+    };
+
+    if is_valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "'{entry}' is neither an IPv4 address, nor a from-to range of them, nor *"
+        ))
+    }
+}
+
 impl WhiteListedIpList {
     pub fn new(src: &[String]) -> Self {
         let mut everybody = false;

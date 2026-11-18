@@ -14,6 +14,12 @@ pub fn build_controllers() -> ControllersMiddleware {
     //));
 
     result.register_get_action(Arc::new(
+        super::controllers::initialize::IsInitializedAction,
+    ));
+
+    result.register_post_action(Arc::new(super::controllers::initialize::InitializeAction));
+
+    result.register_get_action(Arc::new(
         super::controllers::configuration::GetCurrentConfigAction,
     ));
 

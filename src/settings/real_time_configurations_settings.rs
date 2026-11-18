@@ -86,7 +86,7 @@ impl RealTimeConfigurationsSettings {
 
 /// What a url of `real_time_configurations` answers with, in YAML - read by the same parser as
 /// the settings files: the `hosts:` of a settings file, `additional_hosts:` for hosts which have
-/// their configuration already, and `api_keys:`. Any of them may be left out. Nothing else of a
+/// their configuration already, `api_keys:` and `ip_white_lists:`. Any of them may be left out. Nothing else of a
 /// settings file is read from there - another key is an error rather than quietly left out.
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 #[serde(deny_unknown_fields)]
@@ -101,6 +101,12 @@ pub struct RealTimeConfigurationModel {
     /// urls declare under the same ids. Taken as they are written: no variable is put into them.
     #[serde(default, deserialize_with = "super::null_as_default")]
     pub api_keys: HashMap<String, Vec<crate::types::ProtectedString>>,
+    /// IP lists by their ids - what `whitelisted_ip` of an endpoint or a location names - put
+    /// together with the lists the settings files and the other urls declare under the same ids.
+    /// ip-whitelister's `GET /api/export` answers with this. Each entry is an IPv4 address, a
+    /// `from-to` range of them, or `*`: one which is none of them refuses the whole answer.
+    #[serde(default, deserialize_with = "super::null_as_default")]
+    pub ip_white_lists: HashMap<String, Vec<String>>,
 }
 
 impl RealTimeConfigurationModel {
@@ -127,6 +133,14 @@ impl RealTimeConfigurationModel {
         }
 
         model.api_keys = api_keys;
+
+        for (id, entries) in model.ip_white_lists.iter() {
+            for entry in entries {
+                crate::types::check_ip_white_list_entry(entry).map_err(|err| {
+                    format!("the answer is refused: ip_white_lists '{id}': {err}")
+                })?;
+            }
+        }
 
         Ok(Some(model))
     }
@@ -264,6 +278,40 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(model.additional_hosts.is_empty());
+    }
+
+    /// ip-whitelister's `GET /api/export`: ip lists and nothing else.
+    #[test]
+    fn the_answer_may_be_ip_white_lists_only() {
+        let yaml = "ip_white_lists:\n  office:\n  - 198.51.100.4\n  - 10.0.1.1-10.0.1.9\n  - '*'\n  empty: []\n";
+
+        let model = RealTimeConfigurationModel::parse(yaml.as_bytes())
+            .unwrap()
+            .unwrap();
+
+        assert!(model.hosts.is_empty());
+        assert_eq!(
+            model.ip_white_lists["office"],
+            ["198.51.100.4", "10.0.1.1-10.0.1.9", "*"]
+        );
+        assert!(model.ip_white_lists["empty"].is_empty());
+    }
+
+    /// An entry `WhiteListedIpList` can not read would panic the proxy: it refuses the answer.
+    #[test]
+    fn an_ip_list_with_an_entry_which_is_not_an_address_refuses_the_answer() {
+        for content in [
+            "ip_white_lists:\n  office:\n  - 10.0.0.1/24\n",
+            "ip_white_lists:\n  office:\n  - 2001:db8::1\n",
+            "ip_white_lists:\n  office:\n  - 10.0.0.300\n",
+            "ip_white_lists:\n  office:\n  - 10.0.0.1-\n",
+            "ip_white_lists:\n  office:\n  - office.example.com\n",
+            "ip_white_lists:\n  office:\n  - ''\n",
+            "ip_white_lists:\n  office: 10.0.0.1\n",
+        ] {
+            let result = RealTimeConfigurationModel::parse(content.as_bytes());
+            assert!(result.is_err(), "{content:?}");
+        }
     }
 
     /// Keys only: a url which hands out keys for the hosts of the settings files.

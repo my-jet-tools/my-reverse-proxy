@@ -30,6 +30,7 @@ mod tcp_listener;
 mod tcp_utils;
 
 mod scripts;
+mod secure;
 
 mod error_templates;
 mod h1_proxy_server;

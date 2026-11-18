@@ -8,10 +8,28 @@ use rust_extensions::remote_endpoint::RemoteEndpoint;
 
 use crate::configurations::drive_path_with_backslashes;
 
+/// What `content_source` holds: a local file, a file over ssh, or an `http(s)://` url, directly or
+/// over ssh. Encrypted content is decrypted with the network keys: an answer which says it is
+/// encrypted (`Content-Encoding: aes128gcm`) has to open, and anything else is decrypted if one of
+/// the keys opens it, and taken as it is if none does - docs/encrypted-service-data.md.
 pub async fn load_file(
     content_source: &OverSshConnectionSettings,
     connect_timeout: Duration,
 ) -> Result<Vec<u8>, String> {
+    let (content, content_encoding) = load_content(content_source, connect_timeout).await?;
+
+    crate::app::APP_CTX
+        .secure
+        .network_keys
+        .read(content, content_encoding.as_deref())
+        .map_err(|err| format!("{}: {err}", content_source.remote_resource_string.as_str()))
+}
+
+/// The content as it was read, and the `Content-Encoding` of the answer when it came over HTTP.
+async fn load_content(
+    content_source: &OverSshConnectionSettings,
+    connect_timeout: Duration,
+) -> Result<(Vec<u8>, Option<String>), String> {
     // A path behind ssh is one of the remote host, and is sent there as it is.
     let source = if content_source.ssh_credentials.is_some() {
         Cow::Borrowed(content_source.remote_resource_string.as_str())
@@ -53,7 +71,8 @@ pub async fn load_file(
         }
     } else {
         if let Some(ssh_credentials) = content_source.ssh_credentials.as_ref() {
-            return loading_file_from_ssh(ssh_credentials, remote_endpoint).await;
+            let content = loading_file_from_ssh(ssh_credentials, remote_endpoint).await?;
+            Ok((content, None))
         } else {
             let file_name = crate::settings::expand_home(source.as_ref())?;
 
@@ -65,7 +84,7 @@ pub async fn load_file(
                 )
             })?;
 
-            Ok(result)
+            Ok((result, None))
         }
     }
 }
@@ -74,7 +93,7 @@ async fn load_from_http_or_https<'s>(
     remote_endpoint: RemoteEndpoint<'s>,
     ssh_credentials: Option<&Arc<SshCredentials>>,
     connect_timeout: Duration,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Option<String>), String> {
     if let Some(ssh_credentials) = ssh_credentials {
         return load_content_from_http_via_ssh(ssh_credentials, remote_endpoint, connect_timeout)
             .await;
@@ -82,9 +101,19 @@ async fn load_from_http_or_https<'s>(
 
     // FlUrl::new never panics: a malformed `https://domain@ip:port/...` source fails the request
     let mut response = FlUrl::new(remote_endpoint.as_str())
+        .with_header(
+            "Accept-Encoding",
+            crate::secure::aes128gcm::CONTENT_ENCODING,
+        )
         .get()
         .await
         .map_err(|err| format!("Error loading file from HTTP. Error: {:?}", err))?;
+
+    let content_encoding = response
+        .get_header("content-encoding")
+        .ok()
+        .flatten()
+        .map(|value| value.to_string());
 
     // A file of any size, as before: what is loaded here is named in the settings.
     let result = response
@@ -94,7 +123,7 @@ async fn load_from_http_or_https<'s>(
         .await
         .map_err(|itm| format!("Error loading file from HTTP. Error: {:?}", itm))?;
 
-    Ok(result)
+    Ok((result, content_encoding))
 }
 
 async fn loading_file_from_ssh<'s>(
@@ -128,7 +157,7 @@ async fn load_content_from_http_via_ssh<'s>(
     ssh_credentials: &Arc<SshCredentials>,
     remote_endpoint: RemoteEndpoint<'s>,
     connect_timeout: Duration,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Option<String>), String> {
     use crate::http_client_connectors::HttpOverSshConnector;
     use my_ssh::*;
 
@@ -145,6 +174,10 @@ async fn load_content_from_http_via_ssh<'s>(
         MyHttpClient::new(connector);
 
     let http_request = MyHttpRequestBuilder::new(Method::GET, remote_endpoint.as_str())
+        .append_header(
+            "Accept-Encoding",
+            crate::secure::aes128gcm::CONTENT_ENCODING,
+        )
         .build()
         .map_err(|err| format!("{:?}", err))?;
 
@@ -159,14 +192,22 @@ async fn load_content_from_http_via_ssh<'s>(
         );
     };
 
+    let content_encoding = response
+        .headers()
+        .get(http::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+
     // Through the reader of the body, not as collected frames: a frame is the buffer the
     // connection is read into, and with the two of them held a file bigger than both would
     // never be read to its end.
-    response
+    let content = response
         .into_body()
         .into_vec(usize::MAX)
         .await
-        .map_err(|err| format!("{:?}", err))
+        .map_err(|err| format!("{:?}", err))?;
+
+    Ok((content, content_encoding))
 }
 
 #[cfg(test)]

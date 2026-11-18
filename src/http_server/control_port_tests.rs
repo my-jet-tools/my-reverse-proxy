@@ -181,6 +181,69 @@ async fn the_control_port_listens_on_the_address_of_the_settings() {
     }
 }
 
+/// `GET /api/initialize` and `POST /api/initialize` share the route, each with its method. None of
+/// these requests opens a store: the secure state of the tests is never initialized.
+#[tokio::test]
+async fn initialize_is_served_on_the_control_port() {
+    let port = start_control_port().await;
+
+    let response = get(port, "/api/initialize").await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"False");
+
+    let key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    // A key which is not base64 of 32 bytes, a body which is not the JSON, a field nobody reads.
+    for body in [
+        r#"{"key": "short"}"#.to_string(),
+        "not json".to_string(),
+        format!(r#"{{"key": "{key}", "network_keys": []}}"#),
+        format!(r#"{{"key": "{key}", "network_key": "{key}"}}"#),
+    ] {
+        let response = post(port, "/api/initialize", "", &body).await;
+        assert_eq!(response.status, 400, "{body}");
+    }
+
+    // The keys do not travel through a proxy.
+    let response = post(
+        port,
+        "/api/initialize",
+        "X-Forwarded-For: 203.0.113.7\r\n",
+        &format!(r#"{{"key": "{key}"}}"#),
+    )
+    .await;
+    assert_eq!(response.status, 403);
+
+    let response = get(port, "/api/initialize").await;
+    assert_eq!(response.body, b"False");
+}
+
+/// One POST with a JSON body on a connection of its own; the response is read up to the close.
+/// `headers` are more header lines, each ended with `\r\n`.
+async fn post(port: u16, target: &str, headers: &str, body: &str) -> Response {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    let request = format!(
+        "POST {target} HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut received = Vec::new();
+    tokio::time::timeout(TIMEOUT, stream.read_to_end(&mut received))
+        .await
+        .expect("no response in time")
+        .unwrap();
+
+    let head_end = find(&received, b"\r\n\r\n").expect("no response head") + 4;
+    let head = String::from_utf8(received[..head_end].to_vec()).unwrap();
+
+    Response {
+        status: head[9..12].parse().unwrap(),
+        body: received[head_end..].to_vec(),
+    }
+}
+
 /// The control port server on a free port.
 async fn start_control_port() -> u16 {
     let port = free_port().await;

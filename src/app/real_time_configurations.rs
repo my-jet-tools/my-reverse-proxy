@@ -54,6 +54,7 @@ impl RealTimeConfigurations {
         same_hosts(&current.hosts, &answer.hosts)
             && current.additional_hosts == answer.additional_hosts
             && current.api_keys == answer.api_keys
+            && current.ip_white_lists == answer.ip_white_lists
     }
 
     /// Forgets the urls which are not in `urls` any more: a url put back into the list gives

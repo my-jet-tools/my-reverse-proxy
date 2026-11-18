@@ -45,6 +45,9 @@ pub const DEFAULT_POOL_HOT_WINDOW: Duration = Duration::from_secs(3);
 pub const DEFAULT_POOL_PING_TIMEOUT: Duration = Duration::from_secs(1);
 // How often the (single, global) supervisor sweeps every pool.
 pub const DEFAULT_POOL_SUPERVISOR_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The file of the secure store when `global_settings.secure_store_file` names none.
+pub const DEFAULT_SECURE_STORE_FILE: &str = "~/.my-reverse-proxy-secure";
 // How often the urls of `real_time_configurations` are read, and how long a read of one may take.
 pub const DEFAULT_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_REAL_TIME_CONFIGURATIONS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);

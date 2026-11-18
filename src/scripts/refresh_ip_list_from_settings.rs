@@ -7,7 +7,7 @@ pub async fn refresh_ip_list_from_settings(
     settings_model: &SettingsCompiled,
     white_list_ip_id: &str,
 ) -> Result<(), String> {
-    let Some(ip_list) = settings_model.ip_white_lists.get(white_list_ip_id) else {
+    let Some(ip_list) = settings_model.get_ip_white_list(white_list_ip_id) else {
         println!(
             "whitelisted_ip: '{white_list_ip_id}' is not in ip_white_lists - nobody is let in by it"
         );
@@ -20,7 +20,7 @@ pub async fn refresh_ip_list_from_settings(
         return Ok(());
     };
 
-    let white_list_ip_list = WhiteListedIpList::new(ip_list);
+    let white_list_ip_list = WhiteListedIpList::new(&ip_list);
 
     crate::app::APP_CTX
         .current_configuration

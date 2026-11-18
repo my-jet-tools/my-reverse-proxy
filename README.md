@@ -203,7 +203,7 @@ hosts:
 
 ## Real-time configurations
 
-More hosts and api keys can be read from urls, on a timer, next to what the settings files have:
+More hosts, api keys and ip lists can be read from urls, on a timer, next to what the settings files have:
 
 ```yaml
 real_time_configurations:
@@ -217,7 +217,7 @@ real_time_configurations:
 This was `dynamic_hosts:` with one `url:` before. Settings which still have `dynamic_hosts:` are refused, with a
 word on the new name.
 
-Each url answers in YAML, read by the same parser as the settings files, with three sections - any of them may
+Each url answers in YAML, read by the same parser as the settings files, with four sections - any of them may
 be left out - and nothing else:
 
 ```yaml
@@ -237,6 +237,11 @@ additional_hosts:                       # more names for a host which is there a
 api_keys:                               # more keys for the sets of `api_keys:` - see "API keys"
   mcp_clients:
   - tenant7-issued-key
+
+ip_white_lists:                         # more entries for the lists of `ip_white_lists:` - see "IP Whitelisting"
+  office:                               # what ip-whitelister's `GET /api/export` answers with
+  - 198.51.100.4
+  - 10.0.1.1-10.0.1.9
 ```
 
 `additional_hosts:` is what makes it possible to keep the configuration in the settings files and have a url
@@ -251,6 +256,12 @@ give only the list of names it is served under - as if they were written in `add
 - **The keys of one id are put together** from the settings files and from every url: see "API keys". A url's
   keys are taken as it writes them - no variable is put into them. A set under the id `none`, an empty key, or
   a key with `${` in it refuses the whole answer of that url.
+- **The entries of one ip list are put together** from the settings files and from every url, each once. An
+  entry which is not an IPv4 address, a `from-to` range of them, or `*` refuses the whole answer of that url.
+  A list no settings file declares and no url gives any more is gone: an endpoint naming it lets nobody in.
+- **An answer may be encrypted** with a network key (`Content-Encoding: aes128gcm`, RFC 8188): the proxy tries
+  its keys on it - see "Initialize: the files key and the network keys" below, and
+  [docs/encrypted-service-data.md](docs/encrypted-service-data.md) for what a service does to answer that way.
 - **Each read of a url replaces what it gave the read before.** A host or a key the url does not give any more
   is no longer served. `hosts: {}` (or `additional_hosts: {}`, `api_keys: {}`) means it gives none.
 - **A blank answer changes nothing.** A `2xx` - `204` included - whose body is empty, or nothing but spaces and
@@ -296,6 +307,45 @@ give only the list of names it is served under - as if they were written in `add
 
 Use `https://`: whoever can answer for a url decides where traffic for the hosts it names goes, and who gets
 through what its keys guard.
+
+## Initialize: the files key and the network keys
+
+Two keys, each 32 random bytes in base64 (`openssl rand -base64 32`), each with one job:
+
+- the **files key** encrypts the secure store on the proxy's disk and nothing else. The proxy writes it nowhere:
+  it is given after every start and kept in memory until the process stops;
+- the **network keys** decrypt what the proxy reads from services. There may be several - one per service, an
+  old and a new one while a key is rotated - and each is tried until one opens the data. They are kept in the
+  secure store.
+
+```sh
+curl http://127.0.0.1:8000/api/initialize                  # True / False
+curl -X POST http://127.0.0.1:8000/api/initialize \
+     -H 'Content-Type: application/json' \
+     -d '{"key": "<files key>", "network_keys": ["<network key>"]}'
+```
+
+| Answer | |
+|---|---|
+| `200 Created` | There was no store: it is created, encrypted with this key. |
+| `200 Initialized` | The store opened with this key - or it already was, with this same key. |
+| `400` | A key is not base64 of 32 bytes, `network_keys` is an empty list, or the body is not this JSON. |
+| `401 Invalid Key` | The store is there and this key does not open it, or the proxy is initialized with another key. |
+| `403` | The request came through a proxy (`X-Forwarded-For`): the keys go to the control port directly. |
+| `500` | The store can not be read or written - the message names the file. |
+
+- `network_keys` is optional; given, it replaces the whole list the store has. The store is the check for the
+  files key: no hash of it is kept anywhere.
+- The store is `~/.my-reverse-proxy-secure`, or the file `global_settings.secure_store_file` names. In a
+  container, put it on a volume the proxy can write to.
+- **What is read with the network keys:** the answers of the urls of `real_time_configurations`, and every
+  certificate, private key, CA and revocation list loaded from a source - a file, `http(s)://`, over ssh. An
+  answer with `Content-Encoding: aes128gcm` has to open with one of the keys; anything else is decrypted if a
+  key opens it and read as it is if none does. The proxy asks with `Accept-Encoding: aes128gcm`.
+- **Until initialize** nothing encrypted can be read: a certificate or CA from an encrypted source is not
+  loaded, so its endpoints cut their TLS handshakes, and an encrypted real-time answer is a failed read (what
+  the url gave before stays). Right after initialize the urls are read and every certificate and CA which is
+  not loaded is loaded from its source again.
 
 ## Certificates provided at runtime
 

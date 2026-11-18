@@ -38,6 +38,9 @@ pub struct SettingsCompiled {
     /// The keys the urls of `real_time_configurations` gave, by the ids of their sets. A request
     /// is checked against these together with `api_keys`: see [`Self::get_api_keys`].
     pub dynamic_api_keys: HashMap<String, Vec<crate::types::ProtectedString>>,
+    /// The ip lists the urls of `real_time_configurations` gave, by their ids. A list is the
+    /// entries of the settings files together with these: see [`Self::get_ip_white_list`].
+    pub dynamic_ip_white_lists: HashMap<String, Vec<String>>,
     /// The variables the settings were compiled with - the dynamic hosts are compiled with them
     /// as well, when they come.
     pub variables: VariablesCompiled,
@@ -53,6 +56,22 @@ pub struct SettingsCompiled {
     pub country_white_lists: HashMap<String, Vec<String>>,
     pub gateway_server: Option<GatewayServerSettings>,
     pub gateway_clients: HashMap<String, GatewayClientSettings>,
+}
+
+/// The lists of `from` added to the ones of `into` with the same ids, each entry once.
+fn merge_ip_white_lists(
+    into: &mut HashMap<String, Vec<String>>,
+    from: &HashMap<String, Vec<String>>,
+) {
+    for (id, entries) in from {
+        let list = into.entry(id.clone()).or_default();
+
+        for entry in entries {
+            if !list.contains(entry) {
+                list.push(entry.clone());
+            }
+        }
+    }
 }
 
 /// Who has an id already, while the answers of the urls are put next to the hosts of the files.
@@ -427,6 +446,7 @@ impl SettingsCompiled {
 
         for answer in answers {
             crate::api_keys::merge_api_keys(&mut self.dynamic_api_keys, &answer.api_keys);
+            merge_ip_white_lists(&mut self.dynamic_ip_white_lists, &answer.ip_white_lists);
         }
     }
 
@@ -455,6 +475,28 @@ impl SettingsCompiled {
         self.additional_hosts.retain(|_, itm| !itm.dynamic);
         self.dynamic_host_errors.clear();
         self.dynamic_api_keys.clear();
+        self.dynamic_ip_white_lists.clear();
+    }
+
+    /// The ip list `id`: the entries the settings files declare, with the ones the urls gave under
+    /// the same id. `None` if neither declares it - then nobody is let in by it.
+    pub fn get_ip_white_list(&self, id: &str) -> Option<Vec<String>> {
+        let from_files = self.ip_white_lists.get(id);
+        let from_urls = self.dynamic_ip_white_lists.get(id);
+
+        if from_files.is_none() && from_urls.is_none() {
+            return None;
+        }
+
+        let mut result = from_files.cloned().unwrap_or_default();
+
+        for entry in from_urls.into_iter().flatten() {
+            if !result.contains(entry) {
+                result.push(entry.clone());
+            }
+        }
+
+        Some(result)
     }
 
     /// Every set of keys requests are checked against: the keys the settings files declare, with
@@ -790,6 +832,15 @@ impl SettingsCompiled {
         }
     }
 
+    /// `global_settings.secure_store_file`, or `~/.my-reverse-proxy-secure`.
+    pub fn get_secure_store_file(&self) -> String {
+        self.global_settings
+            .as_ref()
+            .and_then(|itm| itm.secure_store_file.clone())
+            .filter(|itm| !itm.trim().is_empty())
+            .unwrap_or_else(|| crate::consts::DEFAULT_SECURE_STORE_FILE.to_string())
+    }
+
     pub fn get_show_error_description_on_error_page(&self) -> bool {
         if let Some(global_settings) = self.global_settings.as_ref() {
             if let Some(show_error_description_on_error_page) =
@@ -826,6 +877,35 @@ mod dynamic_hosts_tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    /// A list is the entries of the files with the ones of every url under its id, each once.
+    #[test]
+    fn an_ip_list_is_put_together_from_the_files_and_the_urls() {
+        let mut settings = SettingsCompiled::default();
+        settings
+            .ip_white_lists
+            .insert("office".to_string(), vec!["10.0.0.1".to_string()]);
+
+        let first = answer(
+            "ip_white_lists:\n  office:\n  - 10.0.0.2\n  - 10.0.0.1\n  vpn:\n  - 10.8.0.1\n",
+        );
+        let second = answer("ip_white_lists:\n  office:\n  - 10.0.0.3\n");
+
+        settings.set_real_time_answers(&[Arc::new(first), Arc::new(second)]);
+
+        assert_eq!(
+            settings.get_ip_white_list("office").unwrap(),
+            ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+        );
+        assert_eq!(settings.get_ip_white_list("vpn").unwrap(), ["10.8.0.1"]);
+        assert_eq!(settings.get_ip_white_list("nobody"), None);
+
+        // The urls give nothing any more: what the files declare stays, the rest goes.
+        settings.set_real_time_answers(&[]);
+
+        assert_eq!(settings.get_ip_white_list("office").unwrap(), ["10.0.0.1"]);
+        assert_eq!(settings.get_ip_white_list("vpn"), None);
+    }
 
     fn hosts(yaml: &str) -> HashMap<String, HostSettings> {
         RealTimeConfigurationModel::parse(yaml.as_bytes())

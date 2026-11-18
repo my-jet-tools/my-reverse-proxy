@@ -47,6 +47,10 @@ pub struct GlobalSettings {
     /// pool, in milliseconds. Defaults to 10000 (10s). Global-only — a single
     /// timer drives every pool, so it is not part of the cascade.
     pub pool_supervisor_interval: Option<u64>,
+    /// The file of the secure store: what `POST /api/initialize` opens with the files key, or
+    /// creates. It has to be on a volume the proxy can write to. Absent:
+    /// `~/.my-reverse-proxy-secure`.
+    pub secure_store_file: Option<String>,
     /// Lowest level of the timeout cascade — overridden by the endpoint, then
     /// the location.
     #[serde(flatten)]

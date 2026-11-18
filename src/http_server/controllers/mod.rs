@@ -1,6 +1,7 @@
 pub mod client_certificates;
 pub mod configuration;
 pub mod debug;
+pub mod initialize;
 pub mod ip_blocklist;
 pub mod logs;
 pub mod prometheus;

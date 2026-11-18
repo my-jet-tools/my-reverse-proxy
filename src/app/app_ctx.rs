@@ -144,6 +144,10 @@ pub struct AppContext {
     /// Every connection a `cloudflare: true` endpoint closed, and every Cloudflare server which
     /// reached an endpoint without the flag - written to `$HOME/logs`.
     pub cloudflare_deviations: crate::cloudflare::DeviationJournal,
+
+    /// Whether `POST /api/initialize` has opened the secure store, and the network keys the data
+    /// read from services is decrypted with. See [`crate::secure`].
+    pub secure: crate::secure::SecureState,
 }
 
 impl AppContext {
@@ -267,6 +271,7 @@ impl AppContext {
             resolved_domain_ips: ResolvedDomainIps::new(),
             cloudflare_ip_ranges: crate::cloudflare::CloudflareIpRanges::new(),
             cloudflare_deviations: crate::cloudflare::DeviationJournal::new(),
+            secure: crate::secure::SecureState::new(),
         }
     }
 

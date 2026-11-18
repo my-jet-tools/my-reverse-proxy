@@ -91,6 +91,10 @@ pub async fn read_real_time_configuration(
 ) -> Result<Option<RealTimeConfigurationModel>, String> {
     let mut response = FlUrl::new(url)
         .set_timeout(request_timeout)
+        .with_header(
+            "Accept-Encoding",
+            crate::secure::aes128gcm::CONTENT_ENCODING,
+        )
         .get()
         .await
         .map_err(|err| format!("the request failed: {err}"))?;
@@ -101,12 +105,24 @@ pub async fn read_real_time_configuration(
         return Err(format!("answered with the status code {status_code}"));
     }
 
+    let content_encoding = response
+        .get_header("content-encoding")
+        .ok()
+        .flatten()
+        .map(|value| value.to_string());
+
     let body = response
         .get_body()
         .map_err(|err| format!("the answer can not be read: {err}"))?
         .into_vec(crate::consts::MAX_REAL_TIME_CONFIGURATION_RESPONSE_SIZE)
         .await
         .map_err(|err| format!("the answer can not be read: {err}"))?;
+
+    // An encrypted answer - docs/encrypted-service-data.md - is decrypted with the network keys.
+    let body = APP_CTX
+        .secure
+        .network_keys
+        .read(body, content_encoding.as_deref())?;
 
     RealTimeConfigurationModel::parse(&body)
 }
@@ -151,10 +167,36 @@ async fn apply_real_time_configurations() {
 
     let listeners_changed = apply_dynamic_hosts_change(&before, &after).await;
 
+    refresh_changed_ip_lists(&before, &after).await;
+
     APP_CTX.applied_settings.store(Some(Arc::new(after)));
 
     if listeners_changed {
         crate::scripts::sync_endpoints().await;
+    }
+}
+
+/// Puts into the live configuration each ip list whose entries the read changed: one a url gives
+/// now, one a url gave before and gives no more, one whose entries are other ones. A list the
+/// settings files do not declare and no url gives any more is taken out - an endpoint naming it
+/// lets nobody in.
+async fn refresh_changed_ip_lists(before: &SettingsCompiled, after: &SettingsCompiled) {
+    let mut ids: Vec<&String> = before
+        .dynamic_ip_white_lists
+        .keys()
+        .chain(after.dynamic_ip_white_lists.keys())
+        .collect();
+    ids.sort();
+    ids.dedup();
+
+    for id in ids {
+        if before.get_ip_white_list(id) == after.get_ip_white_list(id) {
+            continue;
+        }
+
+        if let Err(err) = crate::scripts::refresh_ip_list_from_settings(after, id).await {
+            println!("Real-time configurations: ip list '{id}' can not be applied: {err}");
+        }
     }
 }
 

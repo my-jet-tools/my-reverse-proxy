@@ -176,8 +176,7 @@ impl SettingsCompiled {
                     password: variables.apply_variables_protected_opt(ssh_settings.password)?,
                     private_key_file: variables
                         .apply_variables_opt(ssh_settings.private_key_file)?,
-                    passphrase: variables
-                        .apply_variables_protected_opt(ssh_settings.passphrase)?,
+                    passphrase: variables.apply_variables_protected_opt(ssh_settings.passphrase)?,
                 };
 
                 self.ssh.insert(ssh_id, ssh_settings);
@@ -305,6 +304,7 @@ impl SettingsCompiled {
                 ip_blocklist_white_list: itm.ip_blocklist_white_list,
                 debug_ip: itm.debug_ip,
                 pool_supervisor_interval: itm.pool_supervisor_interval,
+                secure_store_file: variables.apply_variables_opt(itm.secure_store_file)?,
                 timeouts: itm.timeouts,
             })
         }

@@ -27,7 +27,7 @@ decrypts the answer.
 
 | Where in its settings | What the answer holds, once decrypted |
 |---|---|
-| `real_time_configurations.urls` | A real-time configuration in YAML or JSON: `hosts`, `additional_hosts`, `api_keys`, any of them may be left out. `ip_white_lists` (ip-whitelister's `GET /api/export`) is being added on the proxy side. |
+| `real_time_configurations.urls` | A real-time configuration in YAML or JSON: `hosts`, `additional_hosts`, `api_keys` and `ip_white_lists` (ip-whitelister's `GET /api/export` answers with it), any of them may be left out. |
 | `ssl_certificates[].certificate` and `.private_key`, as `http://` or `https://` sources | PEM: the certificate chain, and the private key. |
 | `client_certificate_ca[].ca` and `.revocation_list`, as `http://` or `https://` sources | PEM: the CA certificate, and the revocation list. |
 
