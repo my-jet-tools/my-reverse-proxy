@@ -86,7 +86,8 @@ ssl_certificates:
 client_certificate_ca:
   - id: ca_id
     ca: ~/certs/ca.cer  
-    revocation_list: ~/certs/revocation_list.crl
+    revocation_list: ~/certs/revocation_list.crl  # an X.509 CRL in PEM, or a YAML array of the
+                                                  # revoked serials: `- 5`, `[]` when none
 
   # The `ca:` source is optional: an entry without it means the certificate is uploaded at
   # runtime - see "Certificates provided at runtime". Everything ELSE about the ca (its

@@ -10,7 +10,7 @@ pub async fn update_crl(id: String, file_source: &OverSshConnectionSettings) {
 
     let crl = crl.unwrap();
 
-    let crl = match super::parse_crl_pem(&crl) {
+    let crl = match super::parse_revocation_list(&crl) {
         Ok(crl) => crl,
         Err(err) => {
             println!("Error reading CRL file: {}", err);

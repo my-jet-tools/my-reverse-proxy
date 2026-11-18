@@ -29,7 +29,7 @@ decrypts the answer.
 |---|---|
 | `real_time_configurations.urls` | A real-time configuration in YAML or JSON: `hosts`, `additional_hosts`, `api_keys` and `ip_white_lists` (ip-whitelister's `GET /api/export` answers with it), any of them may be left out. |
 | `ssl_certificates[].certificate` and `.private_key`, as `http://` or `https://` sources | PEM: the certificate chain, and the private key. |
-| `client_certificate_ca[].ca` and `.revocation_list`, as `http://` or `https://` sources | PEM: the CA certificate, and the revocation list. |
+| `client_certificate_ca[].ca` and `.revocation_list`, as `http://` or `https://` sources | The CA certificate in PEM. The revocation list as an X.509 CRL in PEM, or as a YAML array of the revoked serials - decimal integers, `- 5`, `[]` when none is revoked - the way ca-api's `GET /api/revoked/v1/list` answers. |
 
 The plain text of the answer is exactly what an unencrypted answer would be.
 

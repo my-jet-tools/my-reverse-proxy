@@ -55,7 +55,7 @@ pub async fn refresh_ca_from_sources<'s>(
         let crl =
             super::load_file(&crl_file_src, crate::consts::DEFAULT_HTTP_CONNECT_TIMEOUT).await?;
 
-        let crl = super::parse_crl_pem(crl.as_slice())?;
+        let crl = super::parse_revocation_list(crl.as_slice())?;
 
         Some((crl, Some(crl_file_src)))
     } else {

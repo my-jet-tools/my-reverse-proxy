@@ -133,7 +133,7 @@ pub async fn init_client_ca_manually(
         &'static str,
     )> = match crl_pem {
         Some(crl_pem) => Some((
-            crate::scripts::parse_crl_pem(crl_pem.as_slice())?,
+            crate::scripts::parse_revocation_list(crl_pem.as_slice())?,
             // The pasted list is the operator's explicit intent: it is not tied to a source,
             // so the refresh timer will not overwrite it.
             None,
@@ -296,7 +296,7 @@ async fn load_configured_revocation_list(
             )
         })?;
 
-    let crl = crate::scripts::parse_crl_pem(crl.as_slice()).map_err(|err| {
+    let crl = crate::scripts::parse_revocation_list(crl.as_slice()).map_err(|err| {
         format!(
             "Client certificate ca '{}' declares 'revocation_list: {}' which does not parse: {}. Fix the source, or upload the revocation list together with the ca.",
             ca_id, revocation_list, err
