@@ -12,21 +12,26 @@ Make the service follow this standard:
 1. The service keeps its data encrypted under a **files key** that it never stores. After every
    start it receives the files key over `POST /api/initialize`.
 2. In the same call it receives the **network key** and keeps it in its encrypted store.
-3. It encrypts its answers to my-reverse-proxy with the network key, using the HTTP standard for
-   encrypted bodies: `Content-Encoding: aes128gcm` from
+3. Every request and answer that carries secrets is encrypted with the network key, using the HTTP
+   standard for encrypted bodies: `Content-Encoding: aes128gcm` from
    [RFC 8188](https://www.rfc-editor.org/rfc/rfc8188).
 
+There are two keys, and each has one job. The files key encrypts the service's store and nothing
+else. It is sent only to `POST /api/initialize`. The network key covers the requests: the answers
+my-reverse-proxy reads, my-reverse-proxy's own calls that carry a body, and the operator's calls to
+the service.
+
 If the service already has its own initialize calls (ip-whitelister has `POST /api/is-initialized`
-and an `initialize` that answers 409 the second time), replace them with the ones below. An
-encrypted admin API the service has for its own operator stays as it is. This standard covers only
-initialize and the data my-reverse-proxy reads.
+and an `initialize` that answers 409 the second time), replace them with the ones below. If the
+service encrypts its admin API with the files key today (ip-whitelister does), move that API to the
+network key, as described in [Requests with a body](#requests-with-a-body).
 
 ## The keys
 
 | Key | What it encrypts | Where it lives |
 |---|---|---|
 | files key | the service's own data on its disk | nowhere: it is given to `POST /api/initialize` after every start and kept in memory until the process stops |
-| network key | what the service hands to my-reverse-proxy | in the service's encrypted store. my-reverse-proxy holds the same key in its own |
+| network key | every request and answer that carries secrets | in the service's encrypted store. my-reverse-proxy and the operator's tool hold the same key |
 
 - Both keys have the same format: 32 random bytes written as standard base64, 44 characters. Make
   one with `openssl rand -base64 32`.
@@ -142,6 +147,34 @@ Cache-Control: no-store
 It reads sources that are not HTTP the same way. A local file, or a file over ssh, may hold the
 encrypted bytes. The proxy then uses step 3.
 
+## Requests with a body
+
+This covers a request that carries data to a service: my-reverse-proxy's call (ip-whitelister's
+`POST /api/whitelist`), or the operator's call (creating a user, adding a permanent whitelist
+entry).
+
+```
+POST <path> HTTP/1.1
+Content-Type: application/json
+Content-Encoding: aes128gcm
+
+<the body: the JSON encrypted with the network key, binary>
+```
+
+- `Content-Type` is the type of the decrypted body.
+- The decrypted JSON carries `ts`, the sender's clock in unix seconds, next to the fields of the
+  call.
+- The service accepts a body only when `ts` is within 5 minutes of its own clock, and accepts each
+  body once. It remembers the salts (the first 16 bytes of a body) of the last 5 minutes. A
+  recorded request therefore cannot be sent again.
+- The service answers:
+  - `415` to a body without `Content-Encoding: aes128gcm`;
+  - `401 Invalid Key` to a body that does not decrypt, whose `ts` is off, or that was already
+    accepted;
+  - `503` while it is not initialized or has no network key.
+- The answer is encrypted with the network key the same way, unless it is one of the refusals
+  above.
+
 ## The encryption: `aes128gcm` (RFC 8188)
 
 ```
@@ -195,6 +228,9 @@ The salt is the first 16 bytes of each body. The tests must check that:
 - `network_key` is saved in the encrypted store, and replaced on every initialize that carries one.
 - Every answer to my-reverse-proxy that carries secret data is `aes128gcm` with the network key and
   a fresh salt, sent with `Content-Encoding: aes128gcm` and `Cache-Control: no-store`.
+- Every request with a body (my-reverse-proxy's and the operator's) is `aes128gcm` with the network
+  key, carries `ts`, and is accepted once.
+- The files key encrypts only the store and is sent only to `POST /api/initialize`.
 - Reads answer `503`, never an empty answer, until the service is initialized and has a network
   key.
 - The test vectors pass.
