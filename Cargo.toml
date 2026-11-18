@@ -65,7 +65,6 @@ futures = "*"
 tokio-util = { version = "*", features = ["compat"] }
 futures-util = { version = "*", features = ["compat"] }
 serde_yaml = "*"
-http2parse = "*"
 rustls-pki-types = "*"
 rustls-pemfile = "*"
 x509-parser = { version = "*", features = ["verify"] }
@@ -76,7 +75,6 @@ async-trait = "*"
 hyper-tungstenite = "*"
 uuid = { version = "*", features = ["v4"] }
 prost = "*"
-prost-types = "*"
 serde_json = "*"
 rcgen = "*"
 time = "*"
@@ -106,9 +104,6 @@ lz4 = "1"
 zstd = { version = "0.14", default-features = false }
 
 mcp-server-middleware = { tag = "0.9.0", git = "https://github.com/my-ai-utils/mcp-server-middleware.git" }
-my-ai-agent = { tag = "0.1.0", git = "https://github.com/my-ai-utils/my-ai-agent.git", features = [
-    "agent",
-] }
 
 [build-dependencies]
 ci-utils = { git = "https://github.com/MyJetTools/ci-utils.git", tag = "0.1.3" }

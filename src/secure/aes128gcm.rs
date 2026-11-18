@@ -6,6 +6,7 @@
 //! every service checks its own implementation with: the tests below are the same ones.
 
 use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM};
+#[cfg(test)]
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -14,6 +15,10 @@ use zeroize::Zeroizing;
 pub const CONTENT_ENCODING: &str = "aes128gcm";
 
 /// The record size the proxy encrypts with.
+///
+/// The proxy only decrypts today - what it reads from services - so encrypting is built for the
+/// tests alone. The operator's calls, encrypted both ways, will take the `cfg(test)` off.
+#[cfg(test)]
 pub const DEFAULT_RECORD_SIZE: u32 = 4096;
 
 const SALT_LEN: usize = 16;
@@ -117,6 +122,7 @@ pub fn decrypt(ikm: &[u8], body: &[u8]) -> Result<Vec<u8>, OpenError> {
 
 /// `plain`, encrypted with `ikm` under a fresh random salt, in records of
 /// [`DEFAULT_RECORD_SIZE`], with no key id.
+#[cfg(test)]
 pub fn encrypt(ikm: &[u8], plain: &[u8]) -> Vec<u8> {
     let mut salt = [0u8; SALT_LEN];
 
@@ -129,6 +135,7 @@ pub fn encrypt(ikm: &[u8], plain: &[u8]) -> Vec<u8> {
 
 /// `plain`, encrypted with `ikm` under `salt`, in records of `record_size` bytes, with `key_id`
 /// in the header. A salt is never to be used twice with one key: [`encrypt`] makes a fresh one.
+#[cfg(test)]
 pub fn encrypt_with(
     ikm: &[u8],
     salt: &[u8; SALT_LEN],
