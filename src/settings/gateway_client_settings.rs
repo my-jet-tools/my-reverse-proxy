@@ -46,7 +46,7 @@ impl GatewayClientSettings {
     pub fn get_connect_timeout(&self) -> Duration {
         match self.connect_timeout {
             Some(value) => Duration::from_millis(value),
-            None => Duration::from_secs(5),
+            None => crate::consts::DEFAULT_GATEWAY_CONNECT_TIMEOUT,
         }
     }
 

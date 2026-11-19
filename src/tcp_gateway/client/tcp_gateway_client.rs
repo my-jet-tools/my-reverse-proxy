@@ -97,6 +97,24 @@ impl TcpGatewayClient {
     pub fn get_sync_ssl_certificates(&self) -> &[String] {
         self.inner.sync_ssl_certificates.as_slice()
     }
+
+    /// Stops the client for good: it connects no more, and its gateway connection - with
+    /// everything tunnelled through it - is closed now, not when it breaks some day.
+    pub fn shutdown(&self) {
+        // The flag first: a connection the loop registers after the look below sees it, and
+        // closes itself.
+        self.inner.stop();
+
+        for connection in self.inner.get_gateway_connections() {
+            connection.disconnect_gateway();
+        }
+    }
+
+    /// Whether the client still connects: `false` once it is shut down or dropped.
+    #[cfg(test)]
+    pub fn is_running(&self) -> bool {
+        self.inner.is_running()
+    }
 }
 
 impl Drop for TcpGatewayClient {
@@ -231,6 +249,15 @@ async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration,
             inner.register_gateway_connection(&inner.gateway_id, gateway_connection.clone())
         {
             displaced.disconnect_gateway();
+        }
+
+        // Shut down while it connected: what it connected is closed. `shutdown` stops the client
+        // before it closes what is registered, so a connection registered after that look is
+        // closed here.
+        if !inner.is_running() {
+            gateway_connection.disconnect_gateway();
+            inner.remove_gateway_connection(&inner.gateway_id, &gateway_connection);
+            break;
         }
 
         crate::app::spawn_named(

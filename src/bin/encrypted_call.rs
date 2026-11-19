@@ -5,7 +5,8 @@
 //!
 //! <control port>  where the control port is: `http://127.0.0.1:8000`, or its unix socket,
 //!                 `http+unix:///var/run/my-reverse-proxy/control.sock`.
-//! <route>         `/api/private-keys/v1/set`, `/api/private-keys/v1/list`, ...
+//! <route>         `/api/private-keys/v1/set`, `/api/private-keys/v1/generate`,
+//!                 `/api/gateway-connections/v1/set`, `/api/mcp/v1/admin-mode`, ...
 //! <key file>      a file with a network key: base64 of 32 bytes. The key is read from a file,
 //!                 never from the command line, so it is left neither in the history of the shell
 //!                 nor in a chat.

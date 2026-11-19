@@ -23,7 +23,7 @@ use tokio::{
 use super::{
     client::{TcpGatewayClient, TcpGatewayClientParams},
     forwarded_connection::TcpGatewayProxyForwardStream,
-    server::{is_ip_allowed, TcpGatewayServer},
+    server::{is_ip_allowed, GatewayServerKeys, TcpGatewayServer},
     session::CompressionLevel,
     *,
 };
@@ -3658,6 +3658,61 @@ async fn a_client_with_a_key_which_is_not_authorized_is_not_let_in() {
     let _known = start_client("known", &key, port, false);
     wait_until(|| server.get_gateway_connection("known").is_some()).await;
     assert!(server.get_gateway_connection("stranger").is_none());
+}
+
+/// A key the secure store authorizes is let in from the next handshake on - no restart, and no
+/// `authorized_keys` file - and once it is removed from the store, a new handshake with it is
+/// refused while the connection it let in stays.
+#[tokio::test]
+async fn a_key_the_secure_store_authorizes_is_let_in_without_a_restart() {
+    use base64::Engine;
+
+    let path = std::env::temp_dir()
+        .join(format!(
+            "my-reverse-proxy-gateway-authorized-keys-{}",
+            std::process::id()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let secure = crate::secure::SecureState::new();
+    let files_key = base64::engine::general_purpose::STANDARD.encode([1u8; 32]);
+    secure.initialize(&path, &files_key, None).await.unwrap();
+
+    let port = free_port().await;
+    let server = TcpGatewayServer::new(
+        format!("127.0.0.1:{port}"),
+        GatewayServerKeys::new(Vec::new(), secure.gateway_authorized_keys.clone()),
+        None,
+        false,
+    )
+    .unwrap();
+
+    let key = signing_key();
+    let _client = start_client("from-store", &key, port, false);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(server.get_gateway_connection("from-store").is_none());
+
+    secure
+        .set_gateway_authorized_key("from-store", key.verifying_key())
+        .await
+        .unwrap();
+    wait_until(|| server.get_gateway_connection("from-store").is_some()).await;
+
+    assert!(secure
+        .delete_gateway_authorized_key("from-store")
+        .await
+        .unwrap());
+
+    let _second = start_client("second", &key, port, false);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    std::fs::remove_file(&path).unwrap();
+
+    assert!(server.get_gateway_connection("second").is_none());
+    assert!(server.get_gateway_connection("from-store").is_some());
 }
 
 /// A link which goes silent without closing anything - a route which died. The client gives the

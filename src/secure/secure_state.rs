@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwapOption;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, VerifyingKey};
 
 use super::*;
 
@@ -16,6 +16,9 @@ pub struct SecureState {
     /// The private keys of the store. An `Arc` of its own: a gateway client takes its key from here
     /// at every connect.
     pub private_keys: Arc<PrivateKeys>,
+    /// The public keys of the store the gateway server lets in. An `Arc` of its own: the server
+    /// looks at them at every handshake.
+    pub gateway_authorized_keys: Arc<AuthorizedKeys>,
 }
 
 /// The store `POST /api/initialize` opened, and the files key it opened it with: kept in memory
@@ -31,8 +34,25 @@ struct OpenedStore {
 pub enum SecureStoreError {
     /// `POST /api/initialize` has not opened the store yet.
     NotInitialized,
+    /// The id is taken: by a key of the store, or by a gateway client of the settings.
+    Conflict(String),
+    /// The call names what the store does not have - a connection, the private key which is not
+    /// there - or gives what can not work.
+    Invalid(String),
     /// The store can not be written: the message says which file and why.
     Failed(String),
+}
+
+impl SecureStoreError {
+    /// What the caller is told.
+    pub fn message(&self) -> String {
+        match self {
+            Self::NotInitialized => {
+                "The proxy is not initialized: POST /api/initialize first".to_string()
+            }
+            Self::Conflict(reason) | Self::Invalid(reason) | Self::Failed(reason) => reason.clone(),
+        }
+    }
 }
 
 /// What an initialize did.
@@ -73,6 +93,7 @@ impl SecureState {
             opened: ArcSwapOption::empty(),
             network_keys: NetworkKeys::new(),
             private_keys: Arc::new(PrivateKeys::new()),
+            gateway_authorized_keys: Arc::new(AuthorizedKeys::new()),
         }
     }
 
@@ -139,7 +160,7 @@ impl SecureState {
             SecureStoreLookup::Missing => {
                 let model = SecureStoreModel {
                     network_keys: to_bytes(network_keys.as_deref().unwrap_or_default()),
-                    private_keys: Vec::new(),
+                    ..Default::default()
                 };
                 write_store(path.clone(), files_key.clone(), model.clone())
                     .await
@@ -160,9 +181,12 @@ impl SecureState {
         let network_keys = from_bytes(&path, &model.network_keys)?;
         let private_keys =
             private_keys_of(&path, &model.private_keys).map_err(InitializeError::Failed)?;
+        let authorized_keys = authorized_keys_of(&path, &model.gateway_authorized_keys)
+            .map_err(InitializeError::Failed)?;
 
         self.network_keys.set(network_keys);
         self.private_keys.set_all(private_keys);
+        self.gateway_authorized_keys.set_all(authorized_keys);
         self.opened.store(Some(Arc::new(OpenedStore {
             path,
             files_key,
@@ -175,35 +199,145 @@ impl SecureState {
     /// Installs `key` under `id` - in place of the key the id had, if it had one - and writes the
     /// store. A gateway client which names `id` signs its next connect with it.
     pub async fn set_private_key(&self, id: &str, key: SigningKey) -> Result<(), SecureStoreError> {
-        self.change_private_keys(|model| {
+        self.change_store(|model| {
             model.private_keys.retain(|itm| itm.id != id);
             model.private_keys.push(StoredPrivateKey {
                 id: id.to_string(),
                 ed25519: key.to_bytes().to_vec(),
             });
             model.private_keys.sort_by(|a, b| a.id.cmp(&b.id));
-            true
+            Ok(true)
         })
         .await
         .map(|_| ())
     }
 
+    /// A new Ed25519 key under `id`, and the store written; its public half is returned. An id
+    /// which has a key is refused: the clients which sign with that key would be cut off.
+    pub async fn generate_private_key(&self, id: &str) -> Result<VerifyingKey, SecureStoreError> {
+        let key = generate_signing_key();
+        let public = key.verifying_key();
+
+        self.change_store(|model| {
+            if model.private_keys.iter().any(|itm| itm.id == id) {
+                return Err(SecureStoreError::Conflict(format!(
+                    "There is a private key '{id}' already: delete it first, or take another id"
+                )));
+            }
+
+            model.private_keys.push(StoredPrivateKey {
+                id: id.to_string(),
+                ed25519: key.to_bytes().to_vec(),
+            });
+            model.private_keys.sort_by(|a, b| a.id.cmp(&b.id));
+            Ok(true)
+        })
+        .await?;
+
+        Ok(public)
+    }
+
     /// Removes the key `id` and writes the store. `false`: there was no such key, and nothing is
     /// written.
     pub async fn delete_private_key(&self, id: &str) -> Result<bool, SecureStoreError> {
-        self.change_private_keys(|model| {
+        self.change_store(|model| {
             let before = model.private_keys.len();
             model.private_keys.retain(|itm| itm.id != id);
-            model.private_keys.len() != before
+            Ok(model.private_keys.len() != before)
         })
         .await
     }
 
-    /// `change` the model the store holds; when it says it changed something, the store is written,
-    /// and only then are the private keys in memory replaced.
-    async fn change_private_keys(
+    /// The connections to gateways of the store, by their ids in order: none before initialize.
+    pub fn gateway_connections(&self) -> Vec<StoredGatewayConnection> {
+        match self.opened.load().as_ref() {
+            Some(opened) => opened.model.lock().gateway_connections.clone(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Keeps `connection` in the store, in place of the one of its id. The private key it names
+    /// has to be in the store: a connection with no key would wait for it in silence.
+    pub async fn set_gateway_connection(
         &self,
-        change: impl FnOnce(&mut SecureStoreModel) -> bool,
+        connection: StoredGatewayConnection,
+    ) -> Result<(), SecureStoreError> {
+        self.change_store(|model| {
+            if !model
+                .private_keys
+                .iter()
+                .any(|itm| itm.id == connection.private_key)
+            {
+                return Err(SecureStoreError::Invalid(format!(
+                    "There is no private key '{}' in the secure store: generate or set it first",
+                    connection.private_key
+                )));
+            }
+
+            if model.gateway_connections.contains(&connection) {
+                return Ok(false);
+            }
+
+            model
+                .gateway_connections
+                .retain(|itm| itm.id != connection.id);
+            model.gateway_connections.push(connection);
+            model.gateway_connections.sort_by(|a, b| a.id.cmp(&b.id));
+            Ok(true)
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Removes the connection `id` and writes the store. `false`: there was no such connection.
+    pub async fn delete_gateway_connection(&self, id: &str) -> Result<bool, SecureStoreError> {
+        self.change_store(|model| {
+            let before = model.gateway_connections.len();
+            model.gateway_connections.retain(|itm| itm.id != id);
+            Ok(model.gateway_connections.len() != before)
+        })
+        .await
+    }
+
+    /// Lets `key` in through the gateway server under `id` - in place of the key the id had - and
+    /// writes the store. The next handshake takes it.
+    pub async fn set_gateway_authorized_key(
+        &self,
+        id: &str,
+        key: VerifyingKey,
+    ) -> Result<(), SecureStoreError> {
+        self.change_store(|model| {
+            model.gateway_authorized_keys.retain(|itm| itm.id != id);
+            model.gateway_authorized_keys.push(StoredAuthorizedKey {
+                id: id.to_string(),
+                ed25519_public: key.to_bytes().to_vec(),
+            });
+            model
+                .gateway_authorized_keys
+                .sort_by(|a, b| a.id.cmp(&b.id));
+            Ok(true)
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Stops letting the key `id` in, and writes the store. A gateway connection it let in stays
+    /// up; the next handshake with it is refused. `false`: there was no such key.
+    pub async fn delete_gateway_authorized_key(&self, id: &str) -> Result<bool, SecureStoreError> {
+        self.change_store(|model| {
+            let before = model.gateway_authorized_keys.len();
+            model.gateway_authorized_keys.retain(|itm| itm.id != id);
+            Ok(model.gateway_authorized_keys.len() != before)
+        })
+        .await
+    }
+
+    /// `change` the model the store holds; when it says it changed something, the store is
+    /// written, and only then are the keys in memory replaced. What `change` refuses is the error,
+    /// and nothing is written.
+    async fn change_store(
+        &self,
+        change: impl FnOnce(&mut SecureStoreModel) -> Result<bool, SecureStoreError>,
     ) -> Result<bool, SecureStoreError> {
         let _writing = self.write_lock.lock().await;
 
@@ -214,12 +348,14 @@ impl SecureState {
 
         let mut model = opened.model.lock().clone();
 
-        if !change(&mut model) {
+        if !change(&mut model)? {
             return Ok(false);
         }
 
         let private_keys =
             private_keys_of(&opened.path, &model.private_keys).map_err(SecureStoreError::Failed)?;
+        let authorized_keys = authorized_keys_of(&opened.path, &model.gateway_authorized_keys)
+            .map_err(SecureStoreError::Failed)?;
 
         write_store(opened.path.clone(), opened.files_key.clone(), model.clone())
             .await
@@ -227,6 +363,7 @@ impl SecureState {
 
         *opened.model.lock() = model;
         self.private_keys.set_all(private_keys);
+        self.gateway_authorized_keys.set_all(authorized_keys);
 
         Ok(true)
     }
@@ -247,6 +384,33 @@ fn private_keys_of(
                 )
             })?;
             Ok((itm.id.clone(), Arc::new(SigningKey::from_bytes(&bytes))))
+        })
+        .collect()
+}
+
+/// The public keys the gateway server lets in, by their ids.
+fn authorized_keys_of(
+    path: &str,
+    keys: &[StoredAuthorizedKey],
+) -> Result<Vec<(String, VerifyingKey)>, String> {
+    keys.iter()
+        .map(|itm| {
+            let bytes: [u8; 32] = itm.ed25519_public.as_slice().try_into().map_err(|_| {
+                format!(
+                    "the secure store {path} has an authorized key '{}' of {} bytes",
+                    itm.id,
+                    itm.ed25519_public.len()
+                )
+            })?;
+
+            let key = VerifyingKey::from_bytes(&bytes).map_err(|err| {
+                format!(
+                    "the secure store {path} has an authorized key '{}' which is not an Ed25519 key: {err}",
+                    itm.id
+                )
+            })?;
+
+            Ok((itm.id.clone(), key))
         })
         .collect()
 }
@@ -448,6 +612,128 @@ mod tests {
 
         assert!(again.private_keys.get("london").is_none());
         assert!(again.private_keys.get("berlin").is_some());
+    }
+
+    /// A generated key is kept like an installed one, and an id which has a key is refused.
+    #[tokio::test]
+    async fn a_generated_key_is_kept_and_never_replaces_one() {
+        let path = temporary_path("generate");
+        let _ = std::fs::remove_file(&path);
+
+        let state = SecureState::new();
+
+        assert_eq!(
+            state.generate_private_key("london").await,
+            Err(SecureStoreError::NotInitialized)
+        );
+
+        state.initialize(&path, &text(1), None).await.unwrap();
+
+        let public = state.generate_private_key("london").await.unwrap();
+        assert_eq!(
+            state.private_keys.get("london").unwrap().verifying_key(),
+            public
+        );
+
+        let refused = state.generate_private_key("london").await.unwrap_err();
+        assert!(
+            matches!(refused, SecureStoreError::Conflict(_)),
+            "{refused:?}"
+        );
+        assert_eq!(
+            state.private_keys.get("london").unwrap().verifying_key(),
+            public
+        );
+
+        let restarted = SecureState::new();
+        restarted.initialize(&path, &text(1), None).await.unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(
+            restarted
+                .private_keys
+                .get("london")
+                .unwrap()
+                .verifying_key(),
+            public
+        );
+    }
+
+    /// The connections to gateways and the keys the gateway server lets in are kept by the store.
+    #[tokio::test]
+    async fn the_gateway_connections_and_authorized_keys_are_kept_by_the_store() {
+        let path = temporary_path("gateway");
+        let _ = std::fs::remove_file(&path);
+
+        let state = SecureState::new();
+        assert!(state.gateway_connections().is_empty());
+
+        state.initialize(&path, &text(1), None).await.unwrap();
+
+        let connection = StoredGatewayConnection {
+            id: "london".to_string(),
+            remote_host: "10.0.0.1:9000".to_string(),
+            private_key: "to-london".to_string(),
+            ..Default::default()
+        };
+
+        // The key it names has to be there first.
+        let refused = state
+            .set_gateway_connection(connection.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, SecureStoreError::Invalid(_)),
+            "{refused:?}"
+        );
+        assert!(state.gateway_connections().is_empty());
+
+        state.generate_private_key("to-london").await.unwrap();
+        state
+            .set_gateway_connection(connection.clone())
+            .await
+            .unwrap();
+
+        // Set again under its id, it replaces the one there was.
+        let changed = StoredGatewayConnection {
+            compress: 1,
+            ..connection.clone()
+        };
+        state.set_gateway_connection(changed.clone()).await.unwrap();
+        assert_eq!(state.gateway_connections(), std::slice::from_ref(&changed));
+
+        let paris = SigningKey::from_bytes(&[9; 32]).verifying_key();
+        state
+            .set_gateway_authorized_key("paris", paris)
+            .await
+            .unwrap();
+        assert!(!state.delete_gateway_authorized_key("rome").await.unwrap());
+
+        let restarted = SecureState::new();
+        restarted.initialize(&path, &text(1), None).await.unwrap();
+
+        assert_eq!(restarted.gateway_connections(), [changed]);
+        assert_eq!(
+            restarted.gateway_authorized_keys.list().as_slice(),
+            [("paris".to_string(), paris)]
+        );
+
+        assert!(restarted.delete_gateway_connection("london").await.unwrap());
+        assert!(!restarted.delete_gateway_connection("london").await.unwrap());
+        assert!(restarted
+            .delete_gateway_authorized_key("paris")
+            .await
+            .unwrap());
+
+        let again = SecureState::new();
+        again.initialize(&path, &text(1), None).await.unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(again.gateway_connections().is_empty());
+        assert!(again.gateway_authorized_keys.list().is_empty());
+        assert!(again.private_keys.get("to-london").is_some());
     }
 
     #[tokio::test]

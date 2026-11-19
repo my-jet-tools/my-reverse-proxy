@@ -9,7 +9,7 @@ impl MyTimerTick for MetricsTimer {
             server_gateway.timer_1s().await;
         }
 
-        for connection in crate::app::APP_CTX.gateway_clients.values() {
+        for connection in crate::app::APP_CTX.gateway_clients.all().values() {
             connection.timer_1s().await;
         }
 

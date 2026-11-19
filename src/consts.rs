@@ -53,6 +53,14 @@ pub const FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED: u32 = 5;
 
 /// The file of the secure store when `global_settings.secure_store_file` names none.
 pub const DEFAULT_SECURE_STORE_FILE: &str = "~/.my-reverse-proxy-secure";
+
+/// How long a gateway client waits for its TCP connect when its `connect_timeout` says nothing.
+pub const DEFAULT_GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long the admin mode of MCP stays open when the call which opens it names no minutes, and
+/// the longest it may be opened for at once.
+pub const DEFAULT_MCP_ADMIN_MODE_MINUTES: u64 = 10;
+pub const MAX_MCP_ADMIN_MODE_MINUTES: u64 = 60;
 // How often the urls of `real_time_configurations` are read, and how long a read of one may take.
 pub const DEFAULT_REAL_TIME_CONFIGURATIONS_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEFAULT_REAL_TIME_CONFIGURATIONS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);

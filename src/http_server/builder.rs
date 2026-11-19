@@ -28,6 +28,36 @@ pub fn build_controllers() -> ControllersMiddleware {
     result.register_post_action(Arc::new(
         super::controllers::private_keys::ListPrivateKeysAction,
     ));
+    result.register_post_action(Arc::new(
+        super::controllers::private_keys::GeneratePrivateKeyAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::private_keys::DownloadPrivateKeyAction,
+    ));
+
+    result.register_post_action(Arc::new(
+        super::controllers::gateway_connections::SetGatewayConnectionAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::gateway_connections::DeleteGatewayConnectionAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::gateway_connections::ListGatewayConnectionsAction,
+    ));
+
+    result.register_post_action(Arc::new(
+        super::controllers::gateway_authorized_keys::SetGatewayAuthorizedKeyAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::gateway_authorized_keys::DeleteGatewayAuthorizedKeyAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::gateway_authorized_keys::ListGatewayAuthorizedKeysAction,
+    ));
+
+    result.register_post_action(Arc::new(
+        super::controllers::mcp_admin_mode::SetMcpAdminModeAction,
+    ));
 
     result.register_get_action(Arc::new(
         super::controllers::configuration::GetCurrentConfigAction,

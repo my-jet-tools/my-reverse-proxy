@@ -11,7 +11,7 @@ impl MyTimerTick for GatewaySyncCertsTimer {
     async fn tick(&self) -> RepeatTimerIteration {
         let now = DateTimeAsMicroseconds::now();
 
-        for (client_id, gateway_client) in crate::app::APP_CTX.gateway_clients.iter() {
+        for (client_id, gateway_client) in crate::app::APP_CTX.gateway_clients.all().iter() {
             let sync_ids = gateway_client.get_sync_ssl_certificates();
             if sync_ids.is_empty() {
                 continue;

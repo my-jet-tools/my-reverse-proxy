@@ -6,12 +6,18 @@ use my_http_server::{
 };
 
 use crate::mcp::{
+    DeleteGatewayAuthorizedKeyHandler, DeleteGatewayConnectionHandler, GeneratePrivateKeyHandler,
     GetAppliedSettingsHandler, GetClientCaEndpointsStatusHandler, GetClientCertificateCaHandler,
-    GetDynamicSettingsHandler, GetProxyLogsHandler, GetProxyStateSnapshotHandler,
+    GetDynamicSettingsHandler, GetGatewayAuthorizedKeysHandler, GetGatewayConnectionsHandler,
+    GetMcpAdminModeHandler, GetProxyLogsHandler, GetProxyStateSnapshotHandler, GetPublicKeyHandler,
     GetSettingsHandler, GetSslCertificateHandler, GetSslEndpointsStatusHandler,
     InitClientCertificateCaHandler, InitSslCertificateHandler, LookupPoolHandler,
-    ReloadSettingsHandler, SetDynamicSettingsHandler,
+    ReloadSettingsHandler, SetDynamicSettingsHandler, SetGatewayAuthorizedKeyHandler,
+    SetGatewayConnectionHandler,
 };
+
+/// What MCP clients are told about the server as a whole.
+const MCP_INSTRUCTIONS: &str = "my-reverse-proxy diagnostic snapshots — pools, locations, and their correlation. The secure store - private keys, connections to gateways, the keys the gateway server lets in - is changed only in ADMIN MODE: the tools marked so work only while the operator has opened it, for some minutes, with an encrypted call of the control port. No tool opens it: when one is refused, say so and ask the operator to open it, do not retry. get_mcp_admin_mode tells whether it is open; reading is never gated. A private key never leaves the proxy over MCP: only public keys do.";
 
 /// The control port at the address of the settings: `global_settings.http_control_port` and
 /// `http_control_ip`, `127.0.0.1:8000` when they say nothing - and on the unix socket of
@@ -73,7 +79,7 @@ fn serve(mut http_server: MyHttpServer) {
         "/mcp",
         crate::app::APP_NAME,
         crate::app::APP_VERSION,
-        "my-reverse-proxy diagnostic snapshots — pools, locations, and their correlation",
+        MCP_INSTRUCTIONS,
     );
     mcp.register_tool_call(Arc::new(GetProxyStateSnapshotHandler));
     mcp.register_tool_call(Arc::new(LookupPoolHandler));
@@ -89,6 +95,15 @@ fn serve(mut http_server: MyHttpServer) {
     mcp.register_tool_call(Arc::new(GetClientCaEndpointsStatusHandler));
     mcp.register_tool_call(Arc::new(GetClientCertificateCaHandler));
     mcp.register_tool_call(Arc::new(InitClientCertificateCaHandler));
+    mcp.register_tool_call(Arc::new(GetMcpAdminModeHandler));
+    mcp.register_tool_call(Arc::new(GetPublicKeyHandler));
+    mcp.register_tool_call(Arc::new(GeneratePrivateKeyHandler));
+    mcp.register_tool_call(Arc::new(GetGatewayConnectionsHandler));
+    mcp.register_tool_call(Arc::new(SetGatewayConnectionHandler));
+    mcp.register_tool_call(Arc::new(DeleteGatewayConnectionHandler));
+    mcp.register_tool_call(Arc::new(GetGatewayAuthorizedKeysHandler));
+    mcp.register_tool_call(Arc::new(SetGatewayAuthorizedKeyHandler));
+    mcp.register_tool_call(Arc::new(DeleteGatewayAuthorizedKeyHandler));
 
     http_server.add_middleware(Arc::new(mcp));
 

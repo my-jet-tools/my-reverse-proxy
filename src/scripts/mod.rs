@@ -75,3 +75,5 @@ mod init_client_ca_manually;
 pub use init_client_ca_manually::*;
 mod get_client_ca_details;
 pub use get_client_ca_details::*;
+mod gateway_connections;
+pub use gateway_connections::*;

@@ -1,6 +1,9 @@
 mod tcp_gateway_server;
 pub use tcp_gateway_server::*;
 
+mod gateway_server_keys;
+pub use gateway_server_keys::*;
+
 mod server_packet_handler;
 pub use server_packet_handler::*;
 //mod _handle_connect_forward_endpoint;

@@ -2,7 +2,6 @@ use std::net::IpAddr;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
-use ed25519_dalek::VerifyingKey;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -25,7 +24,7 @@ impl TcpGatewayServer {
     /// would end the task alone and leave the process running with no gateway listener.
     pub fn new(
         listen: String,
-        authorized_keys: Vec<VerifyingKey>,
+        authorized_keys: impl Into<GatewayServerKeys>,
         allowed_ip: Option<WhiteListedIpList>,
         debug: bool,
     ) -> Result<Self, String> {
@@ -38,7 +37,7 @@ impl TcpGatewayServer {
         let inner = Arc::new(TcpGatewayInner::new_server(
             "ServerGateway".to_string(),
             listen,
-            authorized_keys,
+            authorized_keys.into(),
         ));
         println!("GATEWAY spawning {}", inner.gateway_host.as_str(),);
 
@@ -181,8 +180,9 @@ async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream
     // Every frame is written whole: there is nothing for the kernel to wait for.
     let _ = stream.set_nodelay(true);
 
+    // The keys of the store as they are now: one set or removed a moment ago counts.
     let authorized_keys = match tcp_gateway.authorized_keys.as_ref() {
-        Some(keys) => keys.clone(),
+        Some(keys) => keys.current(),
         None => {
             eprintln!("Gateway server: no authorized_keys configured, dropping inbound");
             return;

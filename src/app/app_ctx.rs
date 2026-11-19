@@ -26,7 +26,7 @@ use crate::{
     tcp_gateway::{
         client::{TcpGatewayClient, TcpGatewayClientParams},
         forwarded_connection::TcpGatewayProxyForwardStream,
-        server::TcpGatewayServer,
+        server::{GatewayServerKeys, TcpGatewayServer},
         TcpGatewayConnection,
     },
     upstream_h1_pool::H1PoolRegistry,
@@ -113,7 +113,8 @@ pub struct AppContext {
     pub ssh_cert_pass_keys: CertPassKeys,
 
     pub gateway_server: Option<TcpGatewayServer>,
-    pub gateway_clients: HashMap<String, TcpGatewayClient>,
+    /// The gateway clients of the settings, and those of the connections of the secure store.
+    pub gateway_clients: GatewayClients,
     /// The address the control port listens on (`global_settings.http_control_port` /
     /// `http_control_ip`, `127.0.0.1:8000` by default). Bound once, at startup.
     pub http_control_addr: SocketAddr,
@@ -151,6 +152,9 @@ pub struct AppContext {
     /// Whether `POST /api/initialize` has opened the secure store, and the network keys the data
     /// read from services is decrypted with. See [`crate::secure`].
     pub secure: crate::secure::SecureState,
+
+    /// While it is open, the MCP tools which change the secure store work.
+    pub mcp_admin_mode: McpAdminMode,
 }
 
 impl AppContext {
@@ -172,30 +176,32 @@ impl AppContext {
             AesKey::new(generate_random_token_secret_key().as_slice())
         };
 
-        let gateway_server =
-            if let Some(gateway_server_settings) = settings_model.get_gateway_server() {
-                let authorized_keys = gateway_server_settings.load_authorized_keys().unwrap();
-                let allowed_ip = gateway_server_settings.get_allowed_ip_list().unwrap();
-                // A port which can not be bound ends the startup, as the keys above do: a
-                // proxy with no gateway listener must not come up.
-                Some(
-                    TcpGatewayServer::new(
-                        format!("0.0.0.0:{}", gateway_server_settings.port,),
-                        authorized_keys,
-                        allowed_ip,
-                        gateway_server_settings.is_debug(),
-                    )
-                    .unwrap(),
+        // Before the gateway server and clients: the server lets in the keys the store
+        // authorizes, and a client which names a private key of the store takes it from here at
+        // every connect.
+        let secure = crate::secure::SecureState::new();
+
+        let gateway_server = if let Some(gateway_server_settings) =
+            settings_model.get_gateway_server()
+        {
+            let authorized_keys = gateway_server_settings.load_authorized_keys().unwrap();
+            let allowed_ip = gateway_server_settings.get_allowed_ip_list().unwrap();
+            // A port which can not be bound ends the startup, as the keys above do: a
+            // proxy with no gateway listener must not come up.
+            Some(
+                TcpGatewayServer::new(
+                    format!("0.0.0.0:{}", gateway_server_settings.port,),
+                    GatewayServerKeys::new(authorized_keys, secure.gateway_authorized_keys.clone()),
+                    allowed_ip,
+                    gateway_server_settings.is_debug(),
                 )
-            } else {
-                None
-            };
+                .unwrap(),
+            )
+        } else {
+            None
+        };
 
         let mut gateway_clients = HashMap::new();
-
-        // Before the gateway clients: one which names a private key of the secure store takes it
-        // from here at every connect.
-        let secure = crate::secure::SecureState::new();
 
         let ssh_registry = &settings_model.ssh;
         for (id, client_settings) in settings_model.gateway_clients.iter() {
@@ -262,7 +268,7 @@ impl AppContext {
             #[cfg(unix)]
             h1_uds_pools: H1PoolRegistry::new(),
             gateway_server,
-            gateway_clients,
+            gateway_clients: GatewayClients::new(gateway_clients),
             http_control_addr,
             http_control_unix_socket,
             http_control_header_read_timeout,
@@ -281,6 +287,7 @@ impl AppContext {
             cloudflare_ip_ranges: crate::cloudflare::CloudflareIpRanges::new(),
             cloudflare_deviations: crate::cloudflare::DeviationJournal::new(),
             secure,
+            mcp_admin_mode: McpAdminMode::new(),
         }
     }
 

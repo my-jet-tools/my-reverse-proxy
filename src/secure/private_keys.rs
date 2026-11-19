@@ -2,11 +2,14 @@ use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
 use ed25519_dalek::SigningKey;
+use rand_core::RngCore;
 use ssh_key::{private::Ed25519Keypair, PrivateKey};
+use zeroize::Zeroizing;
 
 /// The private keys of the secure store, by their ids: what a gateway client which names one with
-/// `private_key:` signs its handshake with. They are installed over the encrypted API of the
-/// control port (`/api/private-keys/v1/...`), kept in the store, and here from initialize on.
+/// `private_key:` signs its handshake with. They are installed or generated over the encrypted
+/// API of the control port (`/api/private-keys/v1/...`) - generated over MCP too, in its admin
+/// mode - kept in the store, and here from initialize on.
 pub struct PrivateKeys {
     keys: ArcSwap<HashMap<String, Arc<SigningKey>>>,
 }
@@ -89,33 +92,48 @@ pub fn parse_openssh_ed25519(text: &str, passphrase: Option<&str>) -> Result<Sig
 /// The public half of `key` as a line of an `authorized_keys` file of a gateway server:
 /// `ssh-ed25519 AAAA...`.
 pub fn openssh_public_key(key: &SigningKey) -> String {
-    let public = ssh_key::PublicKey::from(ssh_key::public::KeyData::Ed25519(
-        ssh_key::public::Ed25519PublicKey(key.verifying_key().to_bytes()),
-    ));
+    super::openssh_verifying_key(&key.verifying_key())
+}
 
-    public
-        .to_openssh()
-        .expect("an Ed25519 public key is always written in OpenSSH form")
+/// A new Ed25519 key, out of the random source of the operating system.
+pub fn generate_signing_key() -> SigningKey {
+    let mut seed = Zeroizing::new([0u8; 32]);
+    rand_core::OsRng.fill_bytes(&mut *seed);
+    SigningKey::from_bytes(&seed)
+}
+
+/// `key` as an OpenSSH private key: what `gateway_keygen` writes, and what
+/// `POST /api/private-keys/v1/set` of another proxy installs. It is not encrypted with a
+/// passphrase: it is only given in an answer encrypted with a network key.
+pub fn openssh_private_key(key: &SigningKey, comment: &str) -> Zeroizing<String> {
+    let private_bytes = Zeroizing::new(key.to_bytes());
+
+    let keypair = Ed25519Keypair {
+        public: ssh_key::public::Ed25519PublicKey(key.verifying_key().to_bytes()),
+        private: ssh_key::private::Ed25519PrivateKey::from_bytes(&private_bytes),
+    };
+
+    PrivateKey::new(keypair.into(), comment)
+        .expect("an Ed25519 key pair is always an OpenSSH private key")
+        .to_openssh(ssh_key::LineEnding::LF)
+        .expect("an Ed25519 private key is always written in OpenSSH form")
 }
 
 #[cfg(test)]
 pub fn openssh_private_key_for_tests(seed: u8, passphrase: Option<&str>) -> String {
     let signing = SigningKey::from_bytes(&[seed; 32]);
 
-    let keypair = Ed25519Keypair {
-        public: ssh_key::public::Ed25519PublicKey(signing.verifying_key().to_bytes()),
-        private: ssh_key::private::Ed25519PrivateKey::from_bytes(&signing.to_bytes()),
+    let Some(passphrase) = passphrase else {
+        return openssh_private_key(&signing, "test").to_string();
     };
 
-    let mut key = PrivateKey::new(keypair.into(), "test").unwrap();
-
-    if let Some(passphrase) = passphrase {
-        key = key
-            .encrypt(&mut rand_core::OsRng, passphrase.as_bytes())
-            .unwrap();
-    }
-
-    key.to_openssh(ssh_key::LineEnding::LF).unwrap().to_string()
+    PrivateKey::from_openssh(openssh_private_key(&signing, "test").as_str())
+        .unwrap()
+        .encrypt(&mut rand_core::OsRng, passphrase.as_bytes())
+        .unwrap()
+        .to_openssh(ssh_key::LineEnding::LF)
+        .unwrap()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -166,6 +184,26 @@ mod tests {
         assert_eq!(
             public.key_data().ed25519().unwrap().0,
             key.verifying_key().to_bytes()
+        );
+    }
+
+    /// What is given for download opens as the key it is, as `set` of another proxy reads it.
+    #[test]
+    fn a_key_given_as_openssh_text_reads_back_as_the_same_key() {
+        let key = generate_signing_key();
+        let text = openssh_private_key(&key, "my-reverse-proxy london");
+
+        assert!(text.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+
+        let read = parse_openssh_ed25519(&text, None).unwrap();
+        assert_eq!(read.to_bytes(), key.to_bytes());
+    }
+
+    #[test]
+    fn every_generated_key_is_another() {
+        assert_ne!(
+            generate_signing_key().to_bytes(),
+            generate_signing_key().to_bytes()
         );
     }
 

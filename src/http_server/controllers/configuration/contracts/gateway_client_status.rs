@@ -12,7 +12,7 @@ pub struct GatewayClientStatus {
 impl GatewayClientStatus {
     pub async fn new() -> Vec<Self> {
         let mut result = Vec::new();
-        for (name, client_gateway) in &crate::app::APP_CTX.gateway_clients {
+        for (name, client_gateway) in crate::app::APP_CTX.gateway_clients.all().iter() {
             let itm = Self {
                 name: name.to_string(),
                 connections: GatewayConnection::new(

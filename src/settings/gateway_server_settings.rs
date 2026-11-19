@@ -7,6 +7,9 @@ use crate::types::WhiteListedIpList;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GatewayServerSettings {
     pub port: u16,
+    /// Files of OpenSSH public keys: who the server lets in, besides the keys the secure store
+    /// authorizes (`/api/gateway-authorized-keys/v1/...`). May be left out: then only those.
+    #[serde(default)]
     pub authorized_keys: Vec<String>,
     pub allowed_ip: Option<Vec<String>>,
     pub debug: Option<bool>,
@@ -17,10 +20,12 @@ impl GatewayServerSettings {
         self.debug.unwrap_or(false)
     }
 
+    /// The keys of the files of `authorized_keys`. None is no error: the server lets in the keys
+    /// the secure store authorizes then - nobody until it is initialized.
     pub fn load_authorized_keys(&self) -> Result<Vec<VerifyingKey>, String> {
         if self.authorized_keys.is_empty() {
-            return Err(
-                "Gateway server: 'authorized_keys' must contain at least one path".to_string(),
+            println!(
+                "Gateway server: no authorized_keys files - it lets in only the keys the secure store authorizes"
             );
         }
 

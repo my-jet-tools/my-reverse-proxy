@@ -27,6 +27,14 @@ pub struct SecureStoreModel {
     /// The private keys installed over the encrypted API, by their ids in order.
     #[prost(message, repeated, tag = "2")]
     pub private_keys: Vec<StoredPrivateKey>,
+    /// The connections to gateways set over the encrypted API or MCP, by their ids in order: a
+    /// gateway client each, from initialize on.
+    #[prost(message, repeated, tag = "3")]
+    pub gateway_connections: Vec<StoredGatewayConnection>,
+    /// The public keys the gateway server of this proxy lets in besides those of its
+    /// `authorized_keys` files, by their ids in order.
+    #[prost(message, repeated, tag = "4")]
+    pub gateway_authorized_keys: Vec<StoredAuthorizedKey>,
 }
 
 /// A private key of the store: what a gateway client names with `private_key:`.
@@ -37,6 +45,44 @@ pub struct StoredPrivateKey {
     /// The 32 bytes of the Ed25519 private key.
     #[prost(bytes = "vec", tag = "2")]
     pub ed25519: Vec<u8>,
+}
+
+/// A connection to a gateway: what an entry of `gateway_clients` of the settings says, with the
+/// handshake signed by a private key of the store.
+#[derive(Clone, PartialEq, Eq, ::prost::Message)]
+pub struct StoredGatewayConnection {
+    /// The gateway id: what the routes name (`gateway:<id>->...`), and the name the client gives
+    /// the server in its handshake.
+    #[prost(string, tag = "1")]
+    pub id: String,
+    /// `host:port` of the gateway server.
+    #[prost(string, tag = "2")]
+    pub remote_host: String,
+    /// The id of the private key of the store the handshake is signed with.
+    #[prost(string, tag = "3")]
+    pub private_key: String,
+    /// The compression level: 0 - off.
+    #[prost(uint32, tag = "4")]
+    pub compress: u32,
+    /// The connect timeout in milliseconds: 0 - the default one.
+    #[prost(uint64, tag = "5")]
+    pub connect_timeout_ms: u64,
+    #[prost(bool, tag = "6")]
+    pub allow_incoming_forward_connections: bool,
+    #[prost(string, repeated, tag = "7")]
+    pub sync_ssl_certificates: Vec<String>,
+    #[prost(bool, tag = "8")]
+    pub debug: bool,
+}
+
+/// A public key the gateway server lets in.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StoredAuthorizedKey {
+    #[prost(string, tag = "1")]
+    pub id: String,
+    /// The 32 bytes of the Ed25519 public key.
+    #[prost(bytes = "vec", tag = "2")]
+    pub ed25519_public: Vec<u8>,
 }
 
 /// What reading the store with a files key found.
@@ -203,6 +249,18 @@ mod tests {
             private_keys: vec![StoredPrivateKey {
                 id: "london".to_string(),
                 ed25519: vec![3u8; 32],
+            }],
+            gateway_connections: vec![StoredGatewayConnection {
+                id: "london".to_string(),
+                remote_host: "10.0.0.1:9000".to_string(),
+                private_key: "london".to_string(),
+                compress: 1,
+                sync_ssl_certificates: vec!["cert".to_string()],
+                ..Default::default()
+            }],
+            gateway_authorized_keys: vec![StoredAuthorizedKey {
+                id: "paris".to_string(),
+                ed25519_public: vec![4u8; 32],
             }],
         }
     }

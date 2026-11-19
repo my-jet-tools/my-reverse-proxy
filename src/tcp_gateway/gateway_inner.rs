@@ -3,10 +3,12 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-use ed25519_dalek::VerifyingKey;
 use parking_lot::Mutex;
 
-use super::{client::GatewaySigningKey, session::CompressionLevel, TcpGatewayConnection};
+use super::{
+    client::GatewaySigningKey, server::GatewayServerKeys, session::CompressionLevel,
+    TcpGatewayConnection,
+};
 
 pub struct TcpGatewayInner {
     pub gateway_id: Arc<String>,
@@ -15,7 +17,8 @@ pub struct TcpGatewayInner {
     connection: Mutex<HashMap<String, Arc<TcpGatewayConnection>>>,
     pub allow_incoming_forward_connections: bool,
     pub sync_ssl_certificates: Vec<String>,
-    pub authorized_keys: Option<Arc<Vec<VerifyingKey>>>,
+    /// A server: who it lets in.
+    pub authorized_keys: Option<Arc<GatewayServerKeys>>,
     /// A client: where it takes the key its handshake is signed with, at every connect.
     pub signing_key: Option<GatewaySigningKey>,
     /// A client: what the batches of its gateway connection are packed with, in both directions -
@@ -28,7 +31,7 @@ impl TcpGatewayInner {
     pub fn new_server(
         gateway_id: String,
         addr: String,
-        authorized_keys: Vec<VerifyingKey>,
+        authorized_keys: GatewayServerKeys,
     ) -> Self {
         Self {
             gateway_id: Arc::new(gateway_id),

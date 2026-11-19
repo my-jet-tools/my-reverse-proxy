@@ -18,5 +18,11 @@ pub use secure_state::*;
 mod private_keys;
 pub use private_keys::*;
 
+mod authorized_keys;
+pub use authorized_keys::*;
+
+mod gateway_connections;
+pub use gateway_connections::*;
+
 #[cfg(test)]
 mod reading_tests;

@@ -1,16 +1,18 @@
 # Secure parameters of my-reverse-proxy
 
-Status: draft, 2026-11-18. This document covers the proxy's own side: its keys, how it is
+Status: draft, 2026-11-20. This document covers the proxy's own side: its keys, how it is
 initialized, its store, and the operator's calls. The standard services follow to serve data to the
 proxy is [encrypted-service-data.md](encrypted-service-data.md).
 
 Built so far (`src/secure`): `/api/initialize` (over the control unix socket or the loopback), the
 store with the network keys, the reading of encrypted sources, `ip_white_lists` in real-time
-answers, the control port's servers decrypting encrypted calls and refusing replays, and the
-private keys of gateway clients (`/api/private-keys/v1/...`, `private_key:` of a client, and
-`bin/encrypted_call` to send the calls). Body encryption is FlUrl's and my-http-server's: the proxy
-has none of its own. Not built yet: the other parameters of the store, the operator's calls and the tool that
-encrypts them.
+answers, the control port's servers decrypting encrypted calls and refusing replays, the private
+keys of gateway clients (`/api/private-keys/v1/...`: installed, generated, given out;
+`private_key:` of a client), the connections to gateways and the keys the gateway server lets in
+(`/api/gateway-connections/v1/...`, `/api/gateway-authorized-keys/v1/...`), the admin mode of MCP
+(`/api/mcp/v1/admin-mode`), and `bin/encrypted_call` to send the calls. Body encryption is FlUrl's
+and my-http-server's: the proxy has none of its own. Not built yet: the other parameters of the
+store.
 
 ## Two keys
 
@@ -91,8 +93,14 @@ curl -X POST --unix-socket /var/run/my-reverse-proxy/control.sock http://localho
   - SSH credentials: passwords, passphrases, private keys (today these are files on disk) and the
     pass keys of `/api/SSH/InitPassKey` (today they live in memory only and are lost on restart);
   - the private key of a gateway client - built: a list of private keys by their ids, installed
-    with `POST /api/private-keys/v1/set`, removed with `.../delete`, listed (public halves only)
-    with `.../list`; a client names one with `private_key: <id>` and takes it at every connect;
+    with `POST /api/private-keys/v1/set`, generated with `.../generate` (an id which has a key is
+    refused), given out with `.../download` - the only answer which carries a private key - removed
+    with `.../delete`, listed (public halves only) with `.../list`; a client names one with
+    `private_key: <id>` and takes it at every connect;
+  - connections to gateways - built: what an entry of `gateway_clients` says, with the handshake
+    signed by a private key of the store, by their ids. See "Gateways" below;
+  - the public keys the gateway server lets in - built: by their ids, besides the
+    `authorized_keys` files. See "Gateways" below;
   - IP whitelists.
 - Everything in the store survives a restart. Today, uploaded certificates and SSH pass keys are
   held in memory only.
@@ -129,6 +137,40 @@ is in my-http-server's `docs/http-actions/encrypted-requests.md`. What the proxy
 - The operator encrypts the calls with a tool kept in this repository (like `gateway_keygen`). The
   tool reads the key from a local file, so the key never appears in a chat, and sends the body with
   FlUrl's `encrypted(&key)`.
+
+## Gateways
+
+| Route (encrypted, `POST`) | Body | Answer |
+|---|---|---|
+| `/api/private-keys/v1/generate` | `{id}` | `{id, public_key}`; `409` when the id has a key |
+| `/api/private-keys/v1/download` | `{id}` | `{id, private_key, public_key}`: the key in OpenSSH form; `404` when there is none |
+| `/api/gateway-connections/v1/set` | `{id, remote_host, private_key, compress?, connect_timeout?, allow_incoming_forward_connections?, sync_ssl_certificates?, debug?}` | the connection as kept |
+| `/api/gateway-connections/v1/delete` | `{id}` | `{id, deleted}` |
+| `/api/gateway-connections/v1/list` | `{}` | `{gateway_connections: [{..., connected}]}` |
+| `/api/gateway-authorized-keys/v1/set` | `{id, public_key}` | `{id, public_key}` |
+| `/api/gateway-authorized-keys/v1/delete` | `{id}` | `{id, deleted}` |
+| `/api/gateway-authorized-keys/v1/list` | `{}` | `{authorized_keys: [{id, public_key}]}` |
+
+- A connection of the store is a gateway client like one of the settings: started when it is set
+  and after every initialize, replaced when it is set again (its gateway connection closed and
+  opened anew), stopped when it is removed. The private key it names has to be in the store. The id
+  of a gateway client of the settings is refused with `409`; ids are what a route names,
+  `gateway:<id>->...`, so letters, digits, `-`, `_` and `.`.
+- The gateway server checks every handshake against the keys of its `authorized_keys` files and the
+  keys of the store as they are at that moment. `authorized_keys` may be left out: the server then
+  lets in the store's keys alone - nobody before initialize.
+- Store fields: `gateway_connections` (tag 3) and `gateway_authorized_keys` (tag 4) of the protobuf.
+
+## MCP admin mode
+
+- `POST /api/mcp/v1/admin-mode`, encrypted, `{"minutes": N}`: open for N minutes from now, 60 at
+  most, in place of the time it had left; 0 closes it; `{}` is 10. Answer `{open, seconds_left}`.
+  It is closed after every start, and no MCP tool opens it.
+- While it is open, the MCP tools which change the store work: `generate_private_key`,
+  `set_gateway_connection`, `delete_gateway_connection`, `set_gateway_authorized_key`,
+  `delete_gateway_authorized_key`. Closed, they answer that it is closed and how it is opened.
+- Reading is never gated: `get_mcp_admin_mode`, `get_public_key`, `get_gateway_connections`,
+  `get_gateway_authorized_keys`. No MCP tool gives a private key.
 
 ## Until initialize
 

@@ -13,8 +13,8 @@ pub struct EncryptedJsonHttpInput {
 }
 
 /// The key the request came encrypted with - what the answer is encrypted with. Only an encrypted
-/// request reads or changes the private keys: a plain one, or an empty one, which carries no
-/// encryption, is refused with `415`.
+/// request reads or changes the secure store, or opens the admin mode of MCP: a plain one, or an
+/// empty one, which carries no encryption, is refused with `415`.
 pub fn key_of_encrypted_request(ctx: &HttpContext) -> Result<BodyEncryptionKey, HttpFailResult> {
     ctx.request
         .get_encryption_info()
@@ -57,12 +57,13 @@ pub fn parse_call<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Why the secure store was not changed, as the answer: `503` - not initialized, `409` - the id is
+/// taken, `400` - what the call names is not there, `500` - the store can not be written.
 pub fn store_refusal(err: SecureStoreError) -> HttpFailResult {
     match err {
-        SecureStoreError::NotInitialized => HttpFailResult::from((
-            503u16,
-            "The proxy is not initialized: POST /api/initialize first".to_string(),
-        )),
+        SecureStoreError::NotInitialized => HttpFailResult::from((503u16, err.message())),
+        SecureStoreError::Conflict(reason) => HttpFailResult::from((409u16, reason)),
+        SecureStoreError::Invalid(reason) => HttpFailResult::as_validation_error(reason),
         SecureStoreError::Failed(reason) => HttpFailResult::as_fatal_error(reason),
     }
 }
