@@ -4,14 +4,20 @@ use ed25519_dalek::SigningKey;
 use serde::*;
 use ssh_key::{private::Ed25519Keypair, PrivateKey};
 
-use crate::tcp_gateway::session::CompressionLevel;
+use crate::tcp_gateway::{client::GatewaySigningKey, session::CompressionLevel};
 
 use super::SshConfigSettings;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GatewayClientSettings {
     pub remote_host: String,
-    pub ssh_credentials: String,
+    /// An entry of `ssh:` whose `private_key_file` the handshake is signed with. Either this or
+    /// `private_key`.
+    pub ssh_credentials: Option<String>,
+    /// A private key of the secure store, by its id: installed over the encrypted API
+    /// (`POST /api/private-keys/v1/set`) and taken at every connect - the client waits for it.
+    /// Either this or `ssh_credentials`.
+    pub private_key: Option<String>,
     /// The compression level of the gateway connection: 0 or nothing - off, from 1 on - a row
     /// of the table in docs/gateway-compression.md.
     pub compress: Option<u8>,
@@ -48,24 +54,57 @@ impl GatewayClientSettings {
         self.sync_ssl_certificates.clone().unwrap_or_default()
     }
 
-    pub fn load_signing_key(
+    /// Where the client takes the key of its handshake: the private key of the secure store
+    /// `private_key` names, or the file of the `ssh:` entry `ssh_credentials` names - read now.
+    pub fn get_signing_key(
         &self,
         client_id: &str,
         ssh_registry: &std::collections::HashMap<String, SshConfigSettings>,
+        private_keys: &std::sync::Arc<crate::secure::PrivateKeys>,
+    ) -> Result<GatewaySigningKey, String> {
+        let not_empty = |value: &Option<String>| {
+            value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+
+        match (
+            not_empty(&self.ssh_credentials),
+            not_empty(&self.private_key),
+        ) {
+            (Some(ssh_credentials), None) => self
+                .load_signing_key(client_id, &ssh_credentials, ssh_registry)
+                .map(GatewaySigningKey::from),
+            (None, Some(id)) => Ok(GatewaySigningKey::Stored {
+                id,
+                keys: private_keys.clone(),
+            }),
+            (Some(_), Some(_)) => Err(format!(
+                "Gateway client '{client_id}': both ssh_credentials and private_key are given - keep one of them"
+            )),
+            (None, None) => Err(format!(
+                "Gateway client '{client_id}': neither ssh_credentials nor private_key is given - one of them names the key of its handshake"
+            )),
+        }
+    }
+
+    fn load_signing_key(
+        &self,
+        client_id: &str,
+        ssh_credentials: &str,
+        ssh_registry: &std::collections::HashMap<String, SshConfigSettings>,
     ) -> Result<SigningKey, String> {
-        let ssh_entry = ssh_registry
-            .get(self.ssh_credentials.as_str())
-            .ok_or_else(|| {
-                format!(
-                "Gateway client '{client_id}': ssh_credentials '{}' not found in 'ssh:' registry",
-                self.ssh_credentials
+        let ssh_entry = ssh_registry.get(ssh_credentials).ok_or_else(|| {
+            format!(
+                "Gateway client '{client_id}': ssh_credentials '{ssh_credentials}' not found in 'ssh:' registry"
             )
-            })?;
+        })?;
 
         let key_path = ssh_entry.private_key_file.as_deref().ok_or_else(|| {
             format!(
-                "Gateway client '{client_id}': ssh entry '{}' has no private_key_file — gateway requires a private key, password-only entries are not supported",
-                self.ssh_credentials
+                "Gateway client '{client_id}': ssh entry '{ssh_credentials}' has no private_key_file — gateway requires a private key, password-only entries are not supported"
             )
         })?;
 
@@ -139,6 +178,44 @@ mod tests {
         let err = level_of(&format!("compress: {}", CompressionLevel::MAX + 1)).unwrap_err();
         assert!(err.contains("Gateway client 'london': compress:"), "{err}");
         assert!(err.contains("is not known"), "{err}");
+    }
+
+    /// `private_key` names a key of the secure store; `ssh_credentials` the file of an `ssh:` entry.
+    /// Exactly one of them.
+    #[test]
+    fn a_client_names_its_key_one_way() {
+        let private_keys = std::sync::Arc::new(crate::secure::PrivateKeys::new());
+        let ssh = std::collections::HashMap::new();
+
+        let settings: GatewayClientSettings =
+            serde_yaml::from_str("remote_host: 10.0.0.1:30000\nprivate_key: london\n").unwrap();
+        let key = settings
+            .get_signing_key("london", &ssh, &private_keys)
+            .unwrap();
+        assert!(matches!(key, GatewaySigningKey::Stored { ref id, .. } if id == "london"));
+
+        for yaml in [
+            "remote_host: 10.0.0.1:30000\nprivate_key: london\nssh_credentials: gateway\n",
+            "remote_host: 10.0.0.1:30000\n",
+            "remote_host: 10.0.0.1:30000\nprivate_key: ' '\n",
+        ] {
+            let settings: GatewayClientSettings = serde_yaml::from_str(yaml).unwrap();
+            let err = settings
+                .get_signing_key("london", &ssh, &private_keys)
+                .err()
+                .unwrap_or_else(|| panic!("{yaml}"));
+            assert!(err.contains("Gateway client 'london'"), "{err}");
+        }
+
+        // An ssh entry which is not there is an error of its own.
+        let settings: GatewayClientSettings =
+            serde_yaml::from_str("remote_host: 10.0.0.1:30000\nssh_credentials: gateway\n")
+                .unwrap();
+        let err = settings
+            .get_signing_key("london", &ssh, &private_keys)
+            .err()
+            .unwrap();
+        assert!(err.contains("not found in 'ssh:' registry"), "{err}");
     }
 
     /// It was a yes or a no before the levels: neither is a level, and the settings which

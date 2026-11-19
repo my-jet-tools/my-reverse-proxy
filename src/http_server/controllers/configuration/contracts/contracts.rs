@@ -23,6 +23,10 @@ pub struct CurrentConfigurationHttpModel {
     // serde_json; the ui restores a stable order by reading these back into a `BTreeMap`.
     pub users: HashMap<String, Vec<String>>,
     pub ip_lists: HashMap<String, Vec<String>>,
+    /// The ids of `ip_lists` which are remote: a url of `real_time_configurations` gives them -
+    /// their entries, or some of them - by their ids in order. Emptied after a url failed
+    /// `FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED` reads in a row, a list is still remote.
+    pub remote_ip_lists: Vec<String>,
     pub errors: HashMap<String, String>,
     pub remote_connections: HashMap<String, usize>,
     pub ssl_certs: Vec<SslCertificateInfoModel>,
@@ -153,12 +157,67 @@ impl CurrentConfigurationHttpModel {
             ports,
             users,
             ip_lists: ip_lists.into_iter().collect(),
+            remote_ip_lists: match crate::app::APP_CTX.applied_settings.load_full() {
+                Some(settings) => remote_ip_lists(&settings),
+                None => Vec::new(),
+            },
             errors: errors.into_iter().collect(),
             remote_connections,
             ssl_certs,
             gateway_server: GatewayServerStatus::new().await,
             gateway_clients: GatewayClientStatus::new().await,
         }
+    }
+}
+
+/// The ids of the ip lists a url of `real_time_configurations` gives, by their ids in order.
+fn remote_ip_lists(settings: &crate::settings_compiled::SettingsCompiled) -> Vec<String> {
+    let mut ids: Vec<String> = settings.dynamic_ip_white_lists.keys().cloned().collect();
+    ids.sort();
+    ids
+}
+
+#[cfg(test)]
+mod remote_ip_lists_tests {
+    use std::sync::Arc;
+
+    use crate::{settings::RealTimeConfigurationModel, settings_compiled::SettingsCompiled};
+
+    fn answer(yaml: &str) -> Arc<RealTimeConfigurationModel> {
+        Arc::new(
+            RealTimeConfigurationModel::parse(yaml.as_bytes())
+                .unwrap()
+                .unwrap(),
+        )
+    }
+
+    /// A list a url gives is remote - also when the files declare it too, and also when the url
+    /// failed five reads in a row and the list is emptied: it is still declared, and lets nobody
+    /// in.
+    #[test]
+    fn a_list_a_url_gives_is_remote() {
+        let mut settings = SettingsCompiled::default();
+        settings
+            .ip_white_lists
+            .insert("office".to_string(), vec!["10.0.0.1".to_string()]);
+        settings
+            .ip_white_lists
+            .insert("local".to_string(), vec!["127.0.0.1".to_string()]);
+
+        settings.set_real_time_answers(&[answer(
+            "ip_white_lists:\n  office:\n  - 10.0.0.0/24\n  vpn:\n  - 10.8.0.1\n",
+        )]);
+        assert_eq!(super::remote_ip_lists(&settings), ["office", "vpn"]);
+
+        // Emptied: what the url gave is gone, the list stays declared.
+        settings.set_real_time_answers(&[answer("ip_white_lists:\n  office: []\n  vpn: []\n")]);
+        assert_eq!(super::remote_ip_lists(&settings), ["office", "vpn"]);
+        assert_eq!(settings.get_ip_white_list("vpn"), Some(Vec::new()));
+        assert_eq!(
+            settings.get_ip_white_list("office"),
+            Some(vec!["10.0.0.1".to_string()])
+        );
+        assert!(!crate::types::WhiteListedIpList::new(&[]).is_whitelisted(&"10.8.0.1"));
     }
 }
 

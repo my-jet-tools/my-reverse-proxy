@@ -3,7 +3,6 @@ use std::{
     time::Duration,
 };
 
-use ed25519_dalek::SigningKey;
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 use tokio::net::TcpStream;
 
@@ -19,7 +18,8 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 pub struct TcpGatewayClientParams {
     pub id: String,
     pub remote_endpoint: String,
-    pub signing_key: SigningKey,
+    /// The key the handshake is signed with, or where it is taken from at every connect.
+    pub signing_key: GatewaySigningKey,
     /// What the batches of the gateway connection are packed with, in both directions: the
     /// server packs what it sends with the level its client asks for in its handshake.
     pub compression: CompressionLevel,
@@ -105,8 +105,38 @@ impl Drop for TcpGatewayClient {
     }
 }
 
+/// How often a client whose key the secure store does not have yet looks again.
+const KEY_WAIT_DELAY: Duration = Duration::from_secs(1);
+
 async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration, debug: bool) {
+    let signing_key_source = inner
+        .signing_key
+        .clone()
+        .expect("Gateway client missing signing_key");
+
+    // Said once each time the key goes missing, not at every look.
+    let mut told_key_is_missing = false;
+
     while inner.is_running() {
+        // The key first: without it there is nothing to connect with. A key of the secure store
+        // comes after initialize and its installation; until then the client waits.
+        let Some(signing_key) = signing_key_source.resolve() else {
+            if !told_key_is_missing {
+                println!(
+                    "Gateway:[{}] does not connect to '{}' yet: it waits for {}",
+                    inner.get_gateway_id(),
+                    inner.gateway_host.as_str(),
+                    signing_key_source.describe_missing()
+                );
+                told_key_is_missing = true;
+            }
+
+            tokio::time::sleep(KEY_WAIT_DELAY).await;
+            continue;
+        };
+
+        told_key_is_missing = false;
+
         println!(
             "Gateway:[{}] Connecting to remote gateway with host '{}' and with timeout: {:?}",
             inner.get_gateway_id(),
@@ -144,13 +174,6 @@ async fn connection_loop(inner: Arc<TcpGatewayInner>, connect_timeout: Duration,
                 continue;
             }
         };
-
-        let signing_key = inner
-            .signing_key
-            .as_ref()
-            .expect("Gateway client missing signing_key")
-            .as_ref()
-            .clone();
 
         let handshake = tokio::time::timeout(
             HANDSHAKE_TIMEOUT,

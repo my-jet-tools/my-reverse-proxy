@@ -6,8 +6,10 @@ proxy is [encrypted-service-data.md](encrypted-service-data.md).
 
 Built so far (`src/secure`): `/api/initialize` (over the control unix socket or the loopback), the
 store with the network keys, the reading of encrypted sources, `ip_white_lists` in real-time
-answers, and the control port's servers decrypting encrypted calls and refusing replays. Body
-encryption is FlUrl's and my-http-server's: the proxy has none of its own. Not built yet: the other parameters of the store, the operator's calls and the tool that
+answers, the control port's servers decrypting encrypted calls and refusing replays, and the
+private keys of gateway clients (`/api/private-keys/v1/...`, `private_key:` of a client, and
+`bin/encrypted_call` to send the calls). Body encryption is FlUrl's and my-http-server's: the proxy
+has none of its own. Not built yet: the other parameters of the store, the operator's calls and the tool that
 encrypts them.
 
 ## Two keys
@@ -88,7 +90,9 @@ curl -X POST --unix-socket /var/run/my-reverse-proxy/control.sock http://localho
   - the secret header of `request_with_header_only` (the zone secret);
   - SSH credentials: passwords, passphrases, private keys (today these are files on disk) and the
     pass keys of `/api/SSH/InitPassKey` (today they live in memory only and are lost on restart);
-  - the private key of a gateway client;
+  - the private key of a gateway client - built: a list of private keys by their ids, installed
+    with `POST /api/private-keys/v1/set`, removed with `.../delete`, listed (public halves only)
+    with `.../list`; a client names one with `private_key: <id>` and takes it at every connect;
   - IP whitelists.
 - Everything in the store survives a restart. Today, uploaded certificates and SSH pass keys are
   held in memory only.

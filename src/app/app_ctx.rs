@@ -193,10 +193,14 @@ impl AppContext {
 
         let mut gateway_clients = HashMap::new();
 
+        // Before the gateway clients: one which names a private key of the secure store takes it
+        // from here at every connect.
+        let secure = crate::secure::SecureState::new();
+
         let ssh_registry = &settings_model.ssh;
         for (id, client_settings) in settings_model.gateway_clients.iter() {
             let signing_key = client_settings
-                .load_signing_key(id.as_str(), ssh_registry)
+                .get_signing_key(id.as_str(), ssh_registry, &secure.private_keys)
                 .unwrap();
             let client = TcpGatewayClient::new(TcpGatewayClientParams {
                 id: id.to_string(),
@@ -276,7 +280,7 @@ impl AppContext {
             resolved_domain_ips: ResolvedDomainIps::new(),
             cloudflare_ip_ranges: crate::cloudflare::CloudflareIpRanges::new(),
             cloudflare_deviations: crate::cloudflare::DeviationJournal::new(),
-            secure: crate::secure::SecureState::new(),
+            secure,
         }
     }
 

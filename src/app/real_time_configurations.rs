@@ -20,6 +20,8 @@ struct UrlState {
     answer: Option<Arc<RealTimeConfigurationModel>>,
     /// Why the last read of the url failed - `None` once a read succeeds.
     last_error: Option<String>,
+    /// Reads which failed since the last one which did not.
+    failed_reads_in_a_row: u32,
 }
 
 impl RealTimeConfigurations {
@@ -85,9 +87,51 @@ impl RealTimeConfigurations {
     /// `url` is read. `true` if the read before had failed.
     pub fn clear_error(&self, url: &str) -> bool {
         match self.urls.lock().get_mut(url) {
-            Some(state) => state.last_error.take().is_some(),
+            Some(state) => {
+                state.failed_reads_in_a_row = 0;
+                state.last_error.take().is_some()
+            }
             None => false,
         }
+    }
+
+    /// A read of `url` failed. Once [`FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED`] have failed in a
+    /// row, the ip lists it gave are emptied - they stay declared, and let nobody in - until it
+    /// answers again: a whitelist is not served for ever from a source which is gone. Its hosts and
+    /// keys stay as they were.
+    ///
+    /// `true` if the lists were emptied by this read: what is served is to be put together anew.
+    ///
+    /// [`FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED`]: crate::consts::FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED
+    pub fn note_failed_read(&self, url: &str) -> bool {
+        let mut states = self.urls.lock();
+        let state = states.entry(url.to_string()).or_default();
+
+        state.failed_reads_in_a_row = state.failed_reads_in_a_row.saturating_add(1);
+
+        if state.failed_reads_in_a_row < crate::consts::FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED {
+            return false;
+        }
+
+        let Some(answer) = state.answer.as_ref() else {
+            return false;
+        };
+
+        if answer
+            .ip_white_lists
+            .values()
+            .all(|entries| entries.is_empty())
+        {
+            return false;
+        }
+
+        let mut emptied = answer.as_ref().clone();
+        for entries in emptied.ip_white_lists.values_mut() {
+            entries.clear();
+        }
+
+        state.answer = Some(Arc::new(emptied));
+        true
     }
 
     pub fn get_last_error(&self, url: &str) -> Option<String> {
@@ -102,6 +146,86 @@ impl RealTimeConfigurations {
 
     pub async fn wait_for_refresh_request(&self) {
         self.refresh_request.notified().await;
+    }
+}
+
+#[cfg(test)]
+mod failed_reads_tests {
+    use super::*;
+
+    fn answer(yaml: &str) -> Arc<RealTimeConfigurationModel> {
+        Arc::new(
+            RealTimeConfigurationModel::parse(yaml.as_bytes())
+                .unwrap()
+                .unwrap(),
+        )
+    }
+
+    const URL: &str = "http://ip-whitelister/api/export";
+
+    /// Four failed reads change nothing; the fifth empties the ip lists - and only them.
+    #[test]
+    fn the_ip_lists_of_a_url_which_fails_five_times_in_a_row_are_emptied() {
+        let urls = RealTimeConfigurations::new();
+        urls.set_answer(
+            URL,
+            answer("ip_white_lists:\n  office:\n  - 10.0.0.0/24\n  vpn:\n  - 10.8.0.1\napi_keys:\n  clients:\n  - key-1\n"),
+        );
+
+        for _ in 1..crate::consts::FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED {
+            assert!(!urls.note_failed_read(URL));
+        }
+
+        let before = urls.get_answers(&[URL.to_string()]);
+        assert_eq!(before[0].ip_white_lists["office"], ["10.0.0.0/24"]);
+
+        assert!(urls.note_failed_read(URL));
+
+        let after = urls.get_answers(&[URL.to_string()]);
+        assert!(after[0].ip_white_lists["office"].is_empty());
+        assert!(after[0].ip_white_lists["vpn"].is_empty());
+        assert_eq!(after[0].api_keys["clients"], before[0].api_keys["clients"]);
+
+        // Emptied already: nothing more to put together.
+        assert!(!urls.note_failed_read(URL));
+    }
+
+    /// A read which does not fail starts the count again; the next answer brings the lists back.
+    #[test]
+    fn a_read_which_does_not_fail_starts_the_count_again() {
+        let urls = RealTimeConfigurations::new();
+        let lists = answer("ip_white_lists:\n  office:\n  - 10.0.0.5\n");
+        urls.set_answer(URL, lists.clone());
+
+        for _ in 1..crate::consts::FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED {
+            assert!(!urls.note_failed_read(URL));
+        }
+
+        urls.clear_error(URL);
+
+        for _ in 1..crate::consts::FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED {
+            assert!(!urls.note_failed_read(URL));
+        }
+        assert!(urls.note_failed_read(URL));
+
+        // It answers again: what it gives is not what is kept, and takes its place.
+        assert!(!urls.has_same_answer(URL, &lists));
+        urls.clear_error(URL);
+        urls.set_answer(URL, lists);
+        assert_eq!(
+            urls.get_answers(&[URL.to_string()])[0].ip_white_lists["office"],
+            ["10.0.0.5"]
+        );
+    }
+
+    /// A url which never answered has nothing to empty.
+    #[test]
+    fn a_url_which_never_answered_has_no_lists_to_empty() {
+        let urls = RealTimeConfigurations::new();
+
+        for _ in 0..10 {
+            assert!(!urls.note_failed_read(URL));
+        }
     }
 }
 

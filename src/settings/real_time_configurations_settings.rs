@@ -283,7 +283,7 @@ mod tests {
     /// ip-whitelister's `GET /api/export`: ip lists and nothing else.
     #[test]
     fn the_answer_may_be_ip_white_lists_only() {
-        let yaml = "ip_white_lists:\n  office:\n  - 198.51.100.4\n  - 10.0.1.1-10.0.1.9\n  - '*'\n  empty: []\n";
+        let yaml = "ip_white_lists:\n  office:\n  - 198.51.100.4\n  - 10.0.1.1-10.0.1.9\n  - 10.0.2.0/24\n  - '*'\n  empty: []\n";
 
         let model = RealTimeConfigurationModel::parse(yaml.as_bytes())
             .unwrap()
@@ -292,7 +292,7 @@ mod tests {
         assert!(model.hosts.is_empty());
         assert_eq!(
             model.ip_white_lists["office"],
-            ["198.51.100.4", "10.0.1.1-10.0.1.9", "*"]
+            ["198.51.100.4", "10.0.1.1-10.0.1.9", "10.0.2.0/24", "*"]
         );
         assert!(model.ip_white_lists["empty"].is_empty());
     }
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn an_ip_list_with_an_entry_which_is_not_an_address_refuses_the_answer() {
         for content in [
-            "ip_white_lists:\n  office:\n  - 10.0.0.1/24\n",
+            "ip_white_lists:\n  office:\n  - 10.0.0.0/33\n",
             "ip_white_lists:\n  office:\n  - 2001:db8::1\n",
             "ip_white_lists:\n  office:\n  - 10.0.0.300\n",
             "ip_white_lists:\n  office:\n  - 10.0.0.1-\n",

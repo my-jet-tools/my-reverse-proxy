@@ -1,5 +1,8 @@
 use super::{IntoIp, WhitelistedIp};
 
+#[cfg(test)]
+use std::net::IpAddr;
+
 /// A list of `ip_white_lists`. `*` among the entries lets every address in; a list with no entry
 /// lets nobody in - as does a list an endpoint names and the settings do not declare (it is not
 /// in the live configuration: [`crate::configurations::WhiteListedIpListConfigurations`]).
@@ -12,58 +15,27 @@ pub struct WhiteListedIpList {
 /// The entry which lets every address in.
 pub const WHITE_LIST_EVERYBODY: &str = "*";
 
-/// Whether `entry` can be an entry of an ip list: an IPv4 address, a `from-to` range of them, or
-/// `*`. [`WhiteListedIpList::new`] panics on anything else, so a list from outside the settings
-/// files is checked with this first.
+/// Whether `entry` can be an entry of an ip list: an IPv4 address, a `from-to` range of them, a
+/// subnet (`10.0.0.0/24`), or `*` - see [`WhitelistedIp::parse`]. Every list is checked with this
+/// when it comes - from the settings files, from a url - so a wrong entry is an error with a word
+/// on it, not an address left out without one.
 pub fn check_ip_white_list_entry(entry: &str) -> Result<(), String> {
-    let entry = entry.trim();
-
-    if entry == WHITE_LIST_EVERYBODY {
-        return Ok(());
-    }
-
-    let is_valid = match entry.split_once('-') {
-        Some((from, to)) => {
-            from.trim().parse::<std::net::Ipv4Addr>().is_ok()
-                && to.trim().parse::<std::net::Ipv4Addr>().is_ok()
-                && from.trim() == from
-                && to.trim() == to
-        }
-        None => entry.parse::<std::net::Ipv4Addr>().is_ok(),
-    };
-
-    if is_valid {
-        Ok(())
-    } else {
-        Err(format!(
-            "'{entry}' is neither an IPv4 address, nor a from-to range of them, nor *"
-        ))
-    }
+    WhitelistedIp::parse(entry).map(|_| ())
 }
 
 impl WhiteListedIpList {
+    /// The list of `src`. An entry which is not one - every list is checked with
+    /// [`check_ip_white_list_entry`] when it comes, so it is never met here - is left out: it lets
+    /// nobody in, rather than taking the proxy down.
     pub fn new(src: &[String]) -> Self {
         let mut everybody = false;
         let mut items = Vec::new();
+
         for itm in src {
-            let itm = itm.trim();
-
-            if itm == WHITE_LIST_EVERYBODY {
-                everybody = true;
-                continue;
-            }
-
-            let mut parts = itm.split("-");
-
-            let left = parts.next().unwrap();
-
-            if let Some(right) = parts.next() {
-                let ip_from = left.get_ip_value();
-                let ip_to = right.get_ip_value();
-
-                items.push(WhitelistedIp::Range { ip_from, ip_to });
-            } else {
-                items.push(WhitelistedIp::SingleIp(left.get_ip_value()));
+            match WhitelistedIp::parse(itm) {
+                Ok(Some(item)) => items.push(item),
+                Ok(None) => everybody = true,
+                Err(err) => println!("An ip list entry is left out: {err}"),
             }
         }
 
@@ -71,7 +43,7 @@ impl WhiteListedIpList {
     }
 
     pub fn is_whitelisted(&self, ip: &impl IntoIp) -> bool {
-        // Before the address is read: an IPv6 one can not be compared with the entries.
+        // Before the address is read: `*` lets an IPv6 address in too, which no entry can.
         if self.everybody {
             return true;
         }
@@ -111,6 +83,40 @@ mod tests {
         assert!(list.is_whitelisted(&"127.0.0.10"));
 
         assert!(!list.is_whitelisted(&"127.0.0.4"));
+    }
+
+    #[test]
+    fn a_subnet_lets_its_addresses_in() {
+        let list = super::WhiteListedIpList::new(&[
+            "10.0.0.0/24".to_string(),
+            "192.168.1.7/32".to_string(),
+        ]);
+
+        assert!(list.is_whitelisted(&"10.0.0.0"));
+        assert!(list.is_whitelisted(&"10.0.0.255"));
+        assert!(!list.is_whitelisted(&"10.0.1.0"));
+        assert!(list.is_whitelisted(&"192.168.1.7"));
+        assert!(!list.is_whitelisted(&"192.168.1.8"));
+
+        // A client behind a dual-stack socket, and an IPv6 one: no panic.
+        assert!(list.is_whitelisted(&"::ffff:10.0.0.9".parse::<super::IpAddr>().unwrap()));
+        assert!(!list.is_whitelisted(&"2001:db8::1".parse::<super::IpAddr>().unwrap()));
+    }
+
+    /// A wrong entry never takes the proxy down: it is left out.
+    #[test]
+    fn a_wrong_entry_is_left_out_not_a_panic() {
+        let list = super::WhiteListedIpList::new(&[
+            "10.0.0.0/33".to_string(),
+            "garbage".to_string(),
+            "10.0.0.5".to_string(),
+        ]);
+
+        assert!(list.is_whitelisted(&"10.0.0.5"));
+        assert!(!list.is_whitelisted(&"10.0.0.6"));
+
+        assert!(super::check_ip_white_list_entry("10.0.0.0/24").is_ok());
+        assert!(super::check_ip_white_list_entry("10.0.0.0/33").is_err());
     }
 
     #[test]

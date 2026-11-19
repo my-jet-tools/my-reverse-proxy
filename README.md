@@ -259,7 +259,8 @@ give only the list of names it is served under - as if they were written in `add
   keys are taken as it writes them - no variable is put into them. A set under the id `none`, an empty key, or
   a key with `${` in it refuses the whole answer of that url.
 - **The entries of one ip list are put together** from the settings files and from every url, each once. An
-  entry which is not an IPv4 address, a `from-to` range of them, or `*` refuses the whole answer of that url.
+  entry which is not an IPv4 address, a `from-to` range of them, a subnet (`10.0.0.0/24`) or `*` refuses the
+  whole answer of that url.
   A list no settings file declares and no url gives any more is gone: an endpoint naming it lets nobody in.
 - **An answer may be encrypted** with a network key (`Content-Encoding: aes128gcm`, RFC 8188): the proxy tries
   its keys on it - see "Initialize: the files key and the network keys" below, and
@@ -277,9 +278,12 @@ give only the list of names it is served under - as if they were written in `add
   open picks up the change on its next request, and a new connection sees it right away. A dynamic host can
   be on a port of its own: that port's listener is started, and stopped once it has no hosts left. A read that
   gives the same as the read before changes nothing.
-- **A failed read changes nothing of that url.** If a url does not answer, answers with anything but `2xx`, or
-  with something that is not a real-time configuration, what it gave before - hosts and keys - stays served.
-  The failure is printed once, and so is the url coming back.
+- **A failed read changes nothing of that url** - but its ip lists, after five. If a url does not answer,
+  answers with anything but `2xx`, or with something that is not a real-time configuration, what it gave
+  before - hosts and keys - stays served. The failure is printed once, and so is the url coming back.
+- **Five failed reads in a row empty the ip lists of that url.** They stay declared, and let nobody in, until
+  the url answers again: a whitelist is not served for ever from a source which is gone. Its hosts and keys
+  stay. A read which does not fail - a blank answer too - starts the count again.
 - **A host of the settings files is never replaced**, by any of the urls. A dynamic host with the same id
   (letter case aside) is refused. So is a `type: tcp` dynamic host on a port that already has hosts, and an
   http host on a port of a `type: tcp` endpoint. A dynamic host that can not be compiled (a
@@ -306,6 +310,7 @@ give only the list of names it is served under - as if they were written in `add
 - `real_time_configurations` can be declared in one settings file only. `get_settings` /
   `get_applied_settings` (MCP) mark each host `dynamic`, and list each url with whether it has answered and
   its last read error, the refused hosts, and every set of keys with how many keys it has.
+  `GET /api/configuration/Current` (the admin ui) lists in `remote_ip_lists` the ids of `ip_lists` a url gives.
 
 Use `https://`: whoever can answer for a url decides where traffic for the hosts it names goes, and who gets
 through what its keys guard.
@@ -1892,7 +1897,15 @@ ip_white_lists:
   id_of_ip_list:
     - "10.0.0.5"
     - "10.0.0.1-10.0.0.5"
+    - "10.0.1.0/24"
 ```
+
+An entry is an IPv4 address, a `from-to` range of them (both ends in it), a subnet - `10.0.1.0/24`, a prefix of
+0 to 32 bits; `10.0.1.7/24` is the same subnet - or `*`, which lets every address in. An entry which is none of
+them fails the settings load, with the list it is in. The lists hold IPv4 addresses: an IPv6 client is in none of
+them (unless the list has `*`), and one behind a dual-stack socket (`::ffff:10.0.0.5`) is the IPv4 address it
+carries. The same entries are taken by `global_settings.ip_blocklist_white_list` and `allowed_ip` of the gateway
+server.
 
 Same rules can be applied to any location
 
@@ -2133,7 +2146,7 @@ gateway_server:
 ```
 
 - `authorized_keys` - mandatory. List of paths to OpenSSH public key files (one per allowed client). Must be Ed25519.
-- `allowed_ip` - optional. If present, only connections from the listed IPs are accepted; any other connection is closed right after `accept`, before the handshake. Entries are IPv4 addresses or `from-to` ranges, the same as in `ip_white_lists`. An invalid entry fails the startup.
+- `allowed_ip` - optional. If present, only connections from the listed IPs are accepted; any other connection is closed right after `accept`, before the handshake. Entries are IPv4 addresses, `from-to` ranges and subnets (`10.0.0.0/24`), the same as in `ip_white_lists`. An invalid entry fails the startup.
 
 ## Client side
 
@@ -2155,11 +2168,47 @@ gateway_clients:
       - another_ssl_cert
 ```
 
-- `ssh_credentials` - mandatory. Id of an entry in the `ssh:` registry that points to the client's private key (`private_key_file`). The key must be Ed25519; password-only ssh entries are not supported for gateway.
+- `ssh_credentials` - id of an entry in the `ssh:` registry that points to the client's private key (`private_key_file`). The key must be Ed25519; password-only ssh entries are not supported for gateway. Either this or `private_key`.
+- `private_key` - the id of a private key of the secure store, installed over the encrypted API (see "A gateway key in the secure store" below). Either this or `ssh_credentials`.
 - `compress` - is optional: the compression level of this gateway connection. `0`, the default, is no compression; `1` is LZ4, the fastest; `2`, `3`, `4` and `5` are Zstandard of its levels 1, 3, 6 and 9 - they pack better than LZ4 and slower, the higher the level the slower; `6`, `7`, `8` and `9` are the same Zstandard levels as one stream for the whole connection - every batch is packed with what went before it, so small requests and answers pack 3 to 5 times better than at `2`-`5`, at the cost of a stream kept on both ends. Everything that travels over the connection is packed with the level, in both directions: the client says it in its handshake, and the server packs what it sends to it with the same. The server has no setting of its own. What can not be made smaller - TLS, media, what is packed already - travels as it is. A level which is not in the table fails the startup. How much every level saves and how fast it is - measured on real data - and which one suits which link: [docs/gateway-compression.md](docs/gateway-compression.md).
 - allow_incoming_forward_connections - is optional. Without this parameters - no Forward connections are allowed through gateway from Server side to Client side. Forward connections from Client side to Server side need no setting.
 - sync_ssl_certificates - is optional. List of SSL certificate ids to pull from the remote Gateway Server. See the `SSL Certificate Sync via Gateway` section below.
 
+
+### A gateway key in the secure store
+
+The private key of a client need not be a file on the disk. It can be kept in the secure store (see
+"Initialize: the files key and the network keys") and named by its id:
+
+```yaml
+gateway_clients:
+  gateway_name:
+    remote_host: 10.0.0.0:30000
+    private_key: london        # in place of ssh_credentials
+```
+
+The client takes the key at every connect. Until the proxy is initialized and the key is installed it does
+not connect, and says once that it waits. A key installed, or replaced, is used by the next connect.
+
+The keys are installed over the encrypted API of the control port: every call is encrypted with a network
+key, and answered encrypted with the same key. Body encryption is supported by FlUrl and my-http-server;
+`bin/encrypted_call` is a client for it, which reads the network key from a file:
+
+```sh
+# install (or replace) the key `london` - an Ed25519 key in OpenSSH form, what gateway_keygen writes
+jq -n --rawfile key london.key '{id: "london", private_key: $key}' \
+  | encrypted_call http://127.0.0.1:8000 /api/private-keys/v1/set ~/.network-key
+# -> {"id":"london","public_key":"ssh-ed25519 AAAA..."}   the line for authorized_keys of the server
+
+echo '{}' | encrypted_call http://127.0.0.1:8000 /api/private-keys/v1/list ~/.network-key
+echo '{"id": "london"}' | encrypted_call http://127.0.0.1:8000 /api/private-keys/v1/delete ~/.network-key
+```
+
+- `passphrase` goes with a key encrypted with one: `{id, private_key, passphrase}`. The store keeps the key
+  itself, so the passphrase is not needed later.
+- The control port may be its unix socket: `http+unix:///var/run/my-reverse-proxy/control.sock`.
+- A call in plain text is refused with `415`, one before initialize with `503`. The answers never carry a
+  private key: only the public halves.
 
 To Setup location through gateway
 ```yaml

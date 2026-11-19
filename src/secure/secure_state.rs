@@ -1,23 +1,38 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwapOption;
+use ed25519_dalek::SigningKey;
 
 use super::*;
 
-/// The secure side of the proxy: whether it is initialized, the store it opened, and the network
-/// keys. See docs/secure-parameters.md.
+/// The secure side of the proxy: whether it is initialized, the store it opened, the network keys
+/// and the private keys. See docs/secure-parameters.md.
 pub struct SecureState {
-    /// Held by one initialize at a time.
-    initialize_lock: tokio::sync::Mutex<()>,
+    /// Held by whatever writes the store - an initialize, a private key installed or removed - one
+    /// at a time.
+    write_lock: tokio::sync::Mutex<()>,
     opened: ArcSwapOption<OpenedStore>,
     pub network_keys: NetworkKeys,
+    /// The private keys of the store. An `Arc` of its own: a gateway client takes its key from here
+    /// at every connect.
+    pub private_keys: Arc<PrivateKeys>,
 }
 
 /// The store `POST /api/initialize` opened, and the files key it opened it with: kept in memory
-/// until the process stops, and written nowhere.
+/// until the process stops, and written nowhere. `model` is what the file holds now.
 struct OpenedStore {
     path: String,
     files_key: SecureKey,
+    model: parking_lot::Mutex<SecureStoreModel>,
+}
+
+/// Why the store was not changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecureStoreError {
+    /// `POST /api/initialize` has not opened the store yet.
+    NotInitialized,
+    /// The store can not be written: the message says which file and why.
+    Failed(String),
 }
 
 /// What an initialize did.
@@ -54,9 +69,10 @@ pub enum InitializeError {
 impl SecureState {
     pub fn new() -> Self {
         Self {
-            initialize_lock: tokio::sync::Mutex::new(()),
+            write_lock: tokio::sync::Mutex::new(()),
             opened: ArcSwapOption::empty(),
             network_keys: NetworkKeys::new(),
+            private_keys: Arc::new(PrivateKeys::new()),
         }
     }
 
@@ -84,7 +100,7 @@ impl SecureState {
             None => None,
         };
 
-        let _initializing = self.initialize_lock.lock().await;
+        let _writing = self.write_lock.lock().await;
 
         if let Some(opened) = self.opened.load_full() {
             if !same_secure_key(&opened.files_key, &files_key) {
@@ -92,10 +108,13 @@ impl SecureState {
             }
 
             if let Some(network_keys) = network_keys {
-                let model = SecureStoreModel {
-                    network_keys: to_bytes(&network_keys),
-                };
-                write_store(opened.path.clone(), files_key, model).await?;
+                // Everything else the store holds stays as it is.
+                let mut model = opened.model.lock().clone();
+                model.network_keys = to_bytes(&network_keys);
+                write_store(opened.path.clone(), files_key, model.clone())
+                    .await
+                    .map_err(InitializeError::Failed)?;
+                *opened.model.lock() = model;
                 self.network_keys.set(network_keys);
             }
 
@@ -120,27 +139,116 @@ impl SecureState {
             SecureStoreLookup::Missing => {
                 let model = SecureStoreModel {
                     network_keys: to_bytes(network_keys.as_deref().unwrap_or_default()),
+                    private_keys: Vec::new(),
                 };
-                write_store(path.clone(), files_key.clone(), model.clone()).await?;
+                write_store(path.clone(), files_key.clone(), model.clone())
+                    .await
+                    .map_err(InitializeError::Failed)?;
                 (InitializeOutcome::Created, model)
             }
             SecureStoreLookup::Opened(mut model) => {
                 if let Some(network_keys) = network_keys.as_ref() {
                     model.network_keys = to_bytes(network_keys);
-                    write_store(path.clone(), files_key.clone(), model.clone()).await?;
+                    write_store(path.clone(), files_key.clone(), model.clone())
+                        .await
+                        .map_err(InitializeError::Failed)?;
                 }
                 (InitializeOutcome::Initialized, model)
             }
         };
 
         let network_keys = from_bytes(&path, &model.network_keys)?;
+        let private_keys =
+            private_keys_of(&path, &model.private_keys).map_err(InitializeError::Failed)?;
 
         self.network_keys.set(network_keys);
-        self.opened
-            .store(Some(Arc::new(OpenedStore { path, files_key })));
+        self.private_keys.set_all(private_keys);
+        self.opened.store(Some(Arc::new(OpenedStore {
+            path,
+            files_key,
+            model: parking_lot::Mutex::new(model),
+        })));
 
         Ok(outcome)
     }
+
+    /// Installs `key` under `id` - in place of the key the id had, if it had one - and writes the
+    /// store. A gateway client which names `id` signs its next connect with it.
+    pub async fn set_private_key(&self, id: &str, key: SigningKey) -> Result<(), SecureStoreError> {
+        self.change_private_keys(|model| {
+            model.private_keys.retain(|itm| itm.id != id);
+            model.private_keys.push(StoredPrivateKey {
+                id: id.to_string(),
+                ed25519: key.to_bytes().to_vec(),
+            });
+            model.private_keys.sort_by(|a, b| a.id.cmp(&b.id));
+            true
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Removes the key `id` and writes the store. `false`: there was no such key, and nothing is
+    /// written.
+    pub async fn delete_private_key(&self, id: &str) -> Result<bool, SecureStoreError> {
+        self.change_private_keys(|model| {
+            let before = model.private_keys.len();
+            model.private_keys.retain(|itm| itm.id != id);
+            model.private_keys.len() != before
+        })
+        .await
+    }
+
+    /// `change` the model the store holds; when it says it changed something, the store is written,
+    /// and only then are the private keys in memory replaced.
+    async fn change_private_keys(
+        &self,
+        change: impl FnOnce(&mut SecureStoreModel) -> bool,
+    ) -> Result<bool, SecureStoreError> {
+        let _writing = self.write_lock.lock().await;
+
+        let opened = self
+            .opened
+            .load_full()
+            .ok_or(SecureStoreError::NotInitialized)?;
+
+        let mut model = opened.model.lock().clone();
+
+        if !change(&mut model) {
+            return Ok(false);
+        }
+
+        let private_keys =
+            private_keys_of(&opened.path, &model.private_keys).map_err(SecureStoreError::Failed)?;
+
+        write_store(opened.path.clone(), opened.files_key.clone(), model.clone())
+            .await
+            .map_err(SecureStoreError::Failed)?;
+
+        *opened.model.lock() = model;
+        self.private_keys.set_all(private_keys);
+
+        Ok(true)
+    }
+}
+
+/// The private keys of the store as signing keys, by their ids.
+fn private_keys_of(
+    path: &str,
+    keys: &[StoredPrivateKey],
+) -> Result<HashMap<String, Arc<SigningKey>>, String> {
+    keys.iter()
+        .map(|itm| {
+            let bytes: [u8; 32] = itm.ed25519.as_slice().try_into().map_err(|_| {
+                format!(
+                    "the secure store {path} has a private key '{}' of {} bytes",
+                    itm.id,
+                    itm.ed25519.len()
+                )
+            })?;
+            Ok((itm.id.clone(), Arc::new(SigningKey::from_bytes(&bytes))))
+        })
+        .collect()
 }
 
 /// `network_keys` of the request: at least one, each base64 of 32 bytes. A key given twice is
@@ -189,13 +297,10 @@ async fn write_store(
     path: String,
     files_key: SecureKey,
     model: SecureStoreModel,
-) -> Result<(), InitializeError> {
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || write_secure_store(&path, &files_key, &model))
         .await
-        .map_err(|err| {
-            InitializeError::Failed(format!("writing the secure store did not end: {err}"))
-        })?
-        .map_err(InitializeError::Failed)
+        .map_err(|err| format!("writing the secure store did not end: {err}"))?
 }
 
 #[cfg(test)]
@@ -278,6 +383,71 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         assert!(opens_with(&again, 12) && !opens_with(&again, 11));
+    }
+
+    /// The private keys are kept by the store: a restart opens them, and new network keys given
+    /// to initialize leave them as they are.
+    #[tokio::test]
+    async fn the_private_keys_are_kept_by_the_store() {
+        let path = temporary_path("private-keys");
+        let _ = std::fs::remove_file(&path);
+
+        let state = SecureState::new();
+
+        // Nothing is installed before the store is open.
+        assert_eq!(
+            state
+                .set_private_key("london", SigningKey::from_bytes(&[7; 32]))
+                .await,
+            Err(SecureStoreError::NotInitialized)
+        );
+
+        state
+            .initialize(&path, &text(1), Some(&[text(10)]))
+            .await
+            .unwrap();
+
+        state
+            .set_private_key("london", SigningKey::from_bytes(&[7; 32]))
+            .await
+            .unwrap();
+        state
+            .set_private_key("berlin", SigningKey::from_bytes(&[8; 32]))
+            .await
+            .unwrap();
+        assert!(!state.delete_private_key("paris").await.unwrap());
+
+        // New network keys: the private keys stay.
+        state
+            .initialize(&path, &text(1), Some(&[text(11)]))
+            .await
+            .unwrap();
+
+        let restarted = SecureState::new();
+        restarted.initialize(&path, &text(1), None).await.unwrap();
+
+        let ids: Vec<String> = restarted
+            .private_keys
+            .list()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, ["berlin", "london"]);
+        assert_eq!(
+            restarted.private_keys.get("london").unwrap().to_bytes(),
+            [7; 32]
+        );
+        assert!(opens_with(&restarted, 11) && !opens_with(&restarted, 10));
+
+        assert!(restarted.delete_private_key("london").await.unwrap());
+
+        let again = SecureState::new();
+        again.initialize(&path, &text(1), None).await.unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(again.private_keys.get("london").is_none());
+        assert!(again.private_keys.get("berlin").is_some());
     }
 
     #[tokio::test]

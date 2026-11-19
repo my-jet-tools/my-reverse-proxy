@@ -3,10 +3,10 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use parking_lot::Mutex;
 
-use super::{session::CompressionLevel, TcpGatewayConnection};
+use super::{client::GatewaySigningKey, session::CompressionLevel, TcpGatewayConnection};
 
 pub struct TcpGatewayInner {
     pub gateway_id: Arc<String>,
@@ -16,7 +16,8 @@ pub struct TcpGatewayInner {
     pub allow_incoming_forward_connections: bool,
     pub sync_ssl_certificates: Vec<String>,
     pub authorized_keys: Option<Arc<Vec<VerifyingKey>>>,
-    pub signing_key: Option<Arc<SigningKey>>,
+    /// A client: where it takes the key its handshake is signed with, at every connect.
+    pub signing_key: Option<GatewaySigningKey>,
     /// A client: what the batches of its gateway connection are packed with, in both directions -
     /// it says so in its handshake. A server has no say of its own: it packs with the level each
     /// of its clients asks for.
@@ -45,7 +46,7 @@ impl TcpGatewayInner {
     pub fn new_client(
         gateway_id: String,
         addr: String,
-        signing_key: SigningKey,
+        signing_key: GatewaySigningKey,
         allow_incoming_forward_connections: bool,
         sync_ssl_certificates: Vec<String>,
         compression: CompressionLevel,
@@ -58,7 +59,7 @@ impl TcpGatewayInner {
             allow_incoming_forward_connections,
             sync_ssl_certificates,
             authorized_keys: None,
-            signing_key: Some(Arc::new(signing_key)),
+            signing_key: Some(signing_key),
             compression,
         }
     }

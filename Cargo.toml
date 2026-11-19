@@ -36,8 +36,10 @@ my-settings-reader = { tag = "0.5.0", git = "https://github.com/MyJetTools/my-se
 # Not the one my-settings-reader re-exports: that one is pulled with no TLS feature, and not
 # always from the same git url as this one - then it is a crate of its own, and an `https://`
 # request through it fails.
+# `encryption`: bin/encrypted_call sends the calls of the encrypted API with `encrypted(&key)`.
 flurl = { tag = "0.7.0", git = "https://github.com/MyJetTools/fl-url.git", features = [
     "with-ring-tls",
+    "encryption",
 ] }
 
 my-logger = { tag = "1.3.0", git = "https://github.com/MyJetTools/my-logger.git" }

@@ -24,6 +24,19 @@ pub struct SecureStoreModel {
     /// The network keys, 32 bytes each, the current one first.
     #[prost(bytes = "vec", repeated, tag = "1")]
     pub network_keys: Vec<Vec<u8>>,
+    /// The private keys installed over the encrypted API, by their ids in order.
+    #[prost(message, repeated, tag = "2")]
+    pub private_keys: Vec<StoredPrivateKey>,
+}
+
+/// A private key of the store: what a gateway client names with `private_key:`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StoredPrivateKey {
+    #[prost(string, tag = "1")]
+    pub id: String,
+    /// The 32 bytes of the Ed25519 private key.
+    #[prost(bytes = "vec", tag = "2")]
+    pub ed25519: Vec<u8>,
 }
 
 /// What reading the store with a files key found.
@@ -187,6 +200,10 @@ mod tests {
     fn model() -> SecureStoreModel {
         SecureStoreModel {
             network_keys: vec![vec![1u8; 32], vec![2u8; 32]],
+            private_keys: vec![StoredPrivateKey {
+                id: "london".to_string(),
+                ed25519: vec![3u8; 32],
+            }],
         }
     }
 

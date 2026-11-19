@@ -68,6 +68,8 @@ Cache-Control: no-store
   answers `503` with a sentence saying why, and never an empty answer. On a failed read
   my-reverse-proxy keeps what it read last. An empty whitelist would lock everybody out, and a
   missing certificate would break an endpoint. Any other status counts as a failed read.
+- Except the ip lists of a real-time configuration: after five failed reads in a row my-reverse-proxy
+  empties the lists that url gave, and they let nobody in until it answers again.
 
 ## How my-reverse-proxy reads the answer
 

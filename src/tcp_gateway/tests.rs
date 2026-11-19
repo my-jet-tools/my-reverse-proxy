@@ -4251,7 +4251,7 @@ fn start_client_at(
     TcpGatewayClient::new(TcpGatewayClientParams {
         id: name.to_string(),
         remote_endpoint: format!("127.0.0.1:{port}"),
-        signing_key: key.clone(),
+        signing_key: key.clone().into(),
         compression,
         allow_incoming_forward_connections: true,
         connect_timeout: CONNECT_TIMEOUT,

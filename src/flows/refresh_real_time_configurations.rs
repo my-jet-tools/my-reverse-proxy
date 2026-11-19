@@ -20,7 +20,8 @@ use super::put_together_port::*;
 /// only.
 ///
 /// A read of a url which fails changes nothing of it: what it gave before is served until a read
-/// of it succeeds. Neither does a blank answer, which is not told about either: the url said
+/// of it succeeds - but for its ip lists, which are emptied once
+/// [`crate::consts::FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED`] reads have failed in a row. Neither does a blank answer, which is not told about either: the url said
 /// nothing. Each url is on its own: one which is down does not hold up the others.
 pub async fn refresh_real_time_configurations() -> Option<Duration> {
     let applied = APP_CTX.applied_settings.load_full()?;
@@ -70,6 +71,14 @@ pub async fn refresh_real_time_configurations() -> Option<Duration> {
                     println!(
                         "Real-time configurations: can not read {url}: {err}. What it gave before is served."
                     );
+                }
+
+                if APP_CTX.real_time_configurations.note_failed_read(url) {
+                    println!(
+                        "Real-time configurations: {url} failed {} reads in a row: the ip lists it gave are empty now, and let nobody in until it answers again",
+                        crate::consts::FAILED_READS_BEFORE_IP_LISTS_ARE_EMPTIED
+                    );
+                    changed = true;
                 }
             }
         }
@@ -422,5 +431,54 @@ pub fn check_dynamic_host_fits(
                 config.host_endpoint.as_str()
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod ip_list_tests {
+    use std::sync::Arc;
+
+    use crate::{
+        app::APP_CTX, settings::RealTimeConfigurationModel, settings_compiled::SettingsCompiled,
+    };
+
+    fn with_answer(yaml: &str) -> SettingsCompiled {
+        let mut settings = SettingsCompiled::default();
+        let answer = RealTimeConfigurationModel::parse(yaml.as_bytes())
+            .unwrap()
+            .unwrap();
+        settings.set_real_time_answers(&[Arc::new(answer)]);
+        settings
+    }
+
+    async fn lets_in(id: &str, ip: &str) -> bool {
+        let ip: std::net::IpAddr = ip.parse().unwrap();
+        APP_CTX
+            .current_configuration
+            .get(|config| config.white_list_ip_list.is_white_listed(id, &ip))
+            .await
+    }
+
+    /// A list a url gives comes into the live configuration, and when the url failed five reads in
+    /// a row and the list is emptied, it lets nobody in. The id is the test's own: the live
+    /// configuration is shared by the tests which run at the same time.
+    #[tokio::test]
+    async fn an_emptied_list_lets_nobody_in() {
+        let id = format!("office_{}", uuid::Uuid::new_v4().simple());
+
+        let nothing = SettingsCompiled::default();
+        let given = with_answer(&format!("ip_white_lists:\n  {id}:\n  - 10.0.0.0/24\n"));
+        let emptied = with_answer(&format!("ip_white_lists:\n  {id}: []\n"));
+
+        super::refresh_changed_ip_lists(&nothing, &given).await;
+        assert!(lets_in(&id, "10.0.0.7").await);
+        assert!(!lets_in(&id, "10.0.1.7").await);
+
+        super::refresh_changed_ip_lists(&given, &emptied).await;
+        assert!(!lets_in(&id, "10.0.0.7").await);
+
+        // It answers again.
+        super::refresh_changed_ip_lists(&emptied, &given).await;
+        assert!(lets_in(&id, "10.0.0.7").await);
     }
 }

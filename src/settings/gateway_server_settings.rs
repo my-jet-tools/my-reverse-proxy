@@ -1,5 +1,3 @@
-use std::net::Ipv4Addr;
-
 use ed25519_dalek::VerifyingKey;
 use serde::*;
 use ssh_key::PublicKey;
@@ -53,29 +51,19 @@ impl GatewayServerSettings {
         Ok(keys)
     }
 
-    /// `allowed_ip` as a whitelist, `None` when it is not set. Entries are IPv4 addresses or
-    /// `from-to` ranges, the same as in `ip_white_lists`; an empty list restricts nothing.
+    /// `allowed_ip` as a whitelist, `None` when it is not set. Entries are IPv4 addresses,
+    /// `from-to` ranges and subnets (`10.0.0.0/24`), the same as in `ip_white_lists`; an empty
+    /// list restricts nothing.
     pub fn get_allowed_ip_list(&self) -> Result<Option<WhiteListedIpList>, String> {
         // Unlike a list of `ip_white_lists`, which lets nobody in when it is empty.
         let Some(items) = self.allowed_ip.as_ref().filter(|items| !items.is_empty()) else {
             return Ok(None);
         };
 
-        // `WhiteListedIpList` panics on an entry it can not parse - fail with a message saying
-        // which entry is wrong instead.
+        // A wrong entry fails the startup with a message saying which one it is.
         for itm in items {
-            let is_valid = match itm.split_once('-') {
-                Some((from, to)) => {
-                    from.parse::<Ipv4Addr>().is_ok() && to.parse::<Ipv4Addr>().is_ok()
-                }
-                None => itm.parse::<Ipv4Addr>().is_ok(),
-            };
-
-            if !is_valid {
-                return Err(format!(
-                    "Gateway server: invalid allowed_ip entry '{itm}' - an IPv4 address or an IPv4 from-to range is expected"
-                ));
-            }
+            crate::types::check_ip_white_list_entry(itm)
+                .map_err(|err| format!("Gateway server: invalid allowed_ip entry: {err}"))?;
         }
 
         Ok(Some(WhiteListedIpList::new(items)))

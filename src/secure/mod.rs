@@ -15,5 +15,8 @@ pub use secure_store::*;
 mod secure_state;
 pub use secure_state::*;
 
+mod private_keys;
+pub use private_keys::*;
+
 #[cfg(test)]
 mod reading_tests;

@@ -218,6 +218,72 @@ async fn initialize_is_served_on_the_control_port() {
     assert_eq!(response.body, b"False");
 }
 
+/// The private keys over the encrypted API: only an encrypted call is taken, and it is answered
+/// encrypted with its key. The store of the tests is never opened: an installation is refused
+/// for that.
+#[tokio::test]
+async fn the_private_keys_are_read_and_installed_encrypted_only() {
+    use my_http_server::{EncryptedBody, HttpBodyEncryptionKey};
+    use rust_extensions::date_time::DateTimeAsMicroseconds;
+
+    crate::secure::use_test_network_key();
+    let key = HttpBodyEncryptionKey::from_bytes(&crate::secure::TEST_NETWORK_KEY).unwrap();
+
+    let port = start_control_port().await;
+    let headers = "Content-Encoding: aes128gcm\r\n";
+
+    let encrypted = |json: &str| {
+        EncryptedBody {
+            salt: EncryptedBody::random_salt(),
+            timestamp: DateTimeAsMicroseconds::now(),
+            body: json.as_bytes().to_vec(),
+        }
+        .encrypt(&key)
+    };
+
+    // The list, answered encrypted with the key of the call.
+    let response = post_bytes(port, "/api/private-keys/v1/list", headers, &encrypted("{}")).await;
+    assert_eq!(
+        response.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let answer = key.decrypt(&response.body).unwrap();
+    let answer: serde_json::Value = serde_json::from_slice(&answer).unwrap();
+    assert!(answer["private_keys"].is_array(), "{answer}");
+
+    // An installation reaches the store, which is not open in the tests.
+    let call = serde_json::json!({
+        "id": "london",
+        "private_key": crate::secure::openssh_private_key_for_tests(3, None),
+    })
+    .to_string();
+    let response = post_bytes(port, "/api/private-keys/v1/set", headers, &encrypted(&call)).await;
+    assert_eq!(
+        response.status,
+        503,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+
+    // A key which is not one is refused for what it is - and not repeated.
+    let call = r#"{"id": "london", "private_key": "not a key"}"#;
+    let response = post_bytes(port, "/api/private-keys/v1/set", headers, &encrypted(call)).await;
+    assert_eq!(response.status, 400);
+    assert!(!String::from_utf8_lossy(&response.body).contains("not a key"));
+
+    // In plain text: refused, whatever it says.
+    for route in [
+        "/api/private-keys/v1/set",
+        "/api/private-keys/v1/delete",
+        "/api/private-keys/v1/list",
+    ] {
+        let response = post(port, route, "", r#"{"id": "london"}"#).await;
+        assert_eq!(response.status, 415, "{route}");
+    }
+}
+
 /// One POST with a JSON body on a connection of its own; the response is read up to the close.
 /// `headers` are more header lines, each ended with `\r\n`.
 async fn post(port: u16, target: &str, headers: &str, body: &str) -> Response {

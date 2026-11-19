@@ -1,5 +1,7 @@
 mod tcp_gateway_client;
 pub use tcp_gateway_client::*;
+mod gateway_signing_key;
+pub use gateway_signing_key::*;
 mod gateway_ping_loop;
 pub use gateway_ping_loop::*;
 mod client_packet_handler;

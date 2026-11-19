@@ -19,6 +19,16 @@ pub fn build_controllers() -> ControllersMiddleware {
 
     result.register_post_action(Arc::new(super::controllers::initialize::InitializeAction));
 
+    result.register_post_action(Arc::new(
+        super::controllers::private_keys::SetPrivateKeyAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::private_keys::DeletePrivateKeyAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::private_keys::ListPrivateKeysAction,
+    ));
+
     result.register_get_action(Arc::new(
         super::controllers::configuration::GetCurrentConfigAction,
     ));

@@ -285,6 +285,11 @@ impl SettingsCompiled {
             itm.get_debug_ip()?;
             itm.get_http_control_addr()?;
 
+            for entry in itm.ip_blocklist_white_list.iter().flatten() {
+                crate::types::check_ip_white_list_entry(entry)
+                    .map_err(|err| format!("global_settings.ip_blocklist_white_list: {err}"))?;
+            }
+
             let global_settings = GlobalSettings {
                 connection_settings: itm.connection_settings,
                 all_http_endpoints: if let Some(itm) = itm.all_http_endpoints {
@@ -420,10 +425,17 @@ impl SettingsCompiled {
     ) -> Result<(), String> {
         if let Some(ip_white_lists) = settings_model.ip_white_lists.take() {
             for (key, ip_list) in ip_white_lists {
-                self.ip_white_lists.insert(
-                    variables.apply_variables(key)?,
-                    super::populate_vec_of_string(ip_list, variables)?,
-                );
+                let key = variables.apply_variables(key)?;
+                let ip_list = super::populate_vec_of_string(ip_list, variables)?;
+
+                // A wrong entry fails the settings load with a word on it, rather than being left
+                // out of the list without one.
+                for entry in &ip_list {
+                    crate::types::check_ip_white_list_entry(entry)
+                        .map_err(|err| format!("ip_white_lists '{key}': {err}"))?;
+                }
+
+                self.ip_white_lists.insert(key, ip_list);
             }
         }
 
@@ -479,7 +491,8 @@ impl SettingsCompiled {
                     variables.apply_variables(key)?,
                     GatewayClientSettings {
                         remote_host: variables.apply_variables(itm.remote_host)?,
-                        ssh_credentials: variables.apply_variables(itm.ssh_credentials)?,
+                        ssh_credentials: variables.apply_variables_opt(itm.ssh_credentials)?,
+                        private_key: variables.apply_variables_opt(itm.private_key)?,
                         compress: itm.compress,
                         debug: itm.debug,
                         allow_incoming_forward_connections: itm.allow_incoming_forward_connections,
@@ -1175,5 +1188,49 @@ mod tests {
             );
             assert!(compiled.additional_host_errors.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod ip_list_tests {
+    use super::*;
+
+    fn compile(yaml: &str) -> Result<SettingsCompiled, String> {
+        let model = crate::settings::SettingsModel::parse_for_tests(yaml);
+        let mut result = SettingsCompiled::default();
+        result.populate(model, Vec::new())?;
+        Ok(result)
+    }
+
+    #[test]
+    fn a_subnet_is_an_entry_of_an_ip_list() {
+        let settings =
+            compile("ip_white_lists:\n  office:\n  - 10.0.0.0/24\n  - 192.168.1.7\n").unwrap();
+
+        assert_eq!(
+            settings.get_ip_white_list("office").unwrap(),
+            ["10.0.0.0/24", "192.168.1.7"]
+        );
+    }
+
+    /// A wrong entry used to panic the proxy when its list was loaded: it fails the settings load
+    /// now, with the list it is in.
+    #[test]
+    fn a_wrong_entry_fails_the_settings_load() {
+        let err = compile("ip_white_lists:\n  office:\n  - 10.0.0.0/33\n")
+            .err()
+            .unwrap();
+        assert!(err.contains("ip_white_lists 'office'"), "{err}");
+        assert!(err.contains("10.0.0.0/33"), "{err}");
+
+        let err = compile("global_settings:\n  ip_blocklist_white_list:\n  - 10.0.0.0/x\n")
+            .err()
+            .unwrap();
+        assert!(
+            err.contains("global_settings.ip_blocklist_white_list"),
+            "{err}"
+        );
+
+        assert!(compile("global_settings:\n  ip_blocklist_white_list:\n  - 10.0.0.0/8\n").is_ok());
     }
 }
