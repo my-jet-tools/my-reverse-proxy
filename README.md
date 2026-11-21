@@ -103,8 +103,9 @@ variables:
 
 ## Reaching a remote resource by ip (no A record needed)
 
-Several settings point at a resource the proxy loads: a local path, `ssh:user@host:port->/path`, or an
-`http://` / `https://` url it downloads.
+Several settings point at a resource the proxy loads: a local path, `ssh:user@host:port->/path`, an
+`http://` / `https://` url it downloads, or a service on a unix socket of the host (`http+unix://`, see "A
+service on a unix socket of this host" below).
 
 | Setting | What is loaded |
 | --- | --- |
@@ -159,6 +160,28 @@ The part after `@` must be an ip, optionally with a port (IPv6 in brackets: `[ad
 name there is refused, not resolved. The part before `@` is the bare domain - the port always goes after the
 ip. A malformed url is reported the same way as an unreachable source. The form applies to the resources in the table above when they are fetched directly - not
 behind `ssh:...->`, and not to `proxy_pass_to`, whose upstreams are connected to by a different path.
+
+### A service on a unix socket of this host
+
+The same settings read a service which listens on a unix socket of the host - certbot-api or ca-api in
+`/root/system-sockets`, the way the services of one host are wired: the socket file, then after a `:` the path
+and the query of the request, the form a service takes its `SETTINGS_URL` in:
+
+```yaml
+ssl_certificates:
+  - id: my_ssl_cert
+    certificate: http+unix:///root/system-sockets/certbot.http-sock:/api/certificates/v1/certificate?domain=x-fine.online
+    private_key: http+unix:///root/system-sockets/certbot.http-sock:/api/certificates/v1/private-key?domain=x-fine.online
+```
+
+- `unix://` and `unix+http://` are read the same way; after the scheme the path is absolute however many
+  slashes are written (`http+unix://root/...` is `/root/...`).
+- The request is the one an `http://` source gets - a `GET` with `Accept-Encoding: aes128gcm` - and an
+  encrypted answer opens with the network keys the same way.
+- It works for every resource of the table above (the gateway still reads its ssh key from a local file
+  only), and for `real_time_configurations.urls`.
+- A unix socket is a file of this host: one behind `ssh:...->` is refused. There are no unix sockets on
+  Windows.
 
 ## More names for one host (`additional_hosts`)
 

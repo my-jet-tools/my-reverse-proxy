@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Duration};
 use my_ssh::ssh_settings::OverSshConnectionSettings;
 use parking_lot::Mutex;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
 };
 
@@ -34,12 +34,9 @@ async fn load(source: &str) -> Result<Vec<u8>, String> {
     crate::scripts::load_file(&source, Duration::from_secs(2)).await
 }
 
-/// A server which answers every request with `body` - with `Content-Encoding` when it is given -
-/// and keeps the head of the last request it was sent.
-async fn serve(content_encoding: Option<&str>, body: Vec<u8>) -> (u16, Arc<Mutex<String>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-
+/// What a test server answers every request with: `body`, with `Content-Encoding` when it is
+/// given.
+fn response_of(content_encoding: Option<&str>, body: Vec<u8>) -> Vec<u8> {
     let mut response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/yaml\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -51,39 +48,78 @@ async fn serve(content_encoding: Option<&str>, body: Vec<u8>) -> (u16, Arc<Mutex
 
     let mut response = response.into_bytes();
     response.extend_from_slice(&body);
+    response
+}
 
+/// Keeps the head of the request, lower-cased, in `kept`, and answers with `response`.
+async fn answer(
+    mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    response: Vec<u8>,
+    kept: Arc<Mutex<String>>,
+) {
+    let mut head = Vec::new();
+    let mut buffer = [0u8; 4096];
+
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => head.extend_from_slice(&buffer[..read]),
+        }
+    }
+
+    *kept.lock() = String::from_utf8_lossy(&head).to_ascii_lowercase();
+
+    let _ = stream.write_all(&response).await;
+    let _ = stream.shutdown().await;
+}
+
+/// A server which answers every request with `body` - with `Content-Encoding` when it is given -
+/// and keeps the head of the last request it was sent.
+async fn serve(content_encoding: Option<&str>, body: Vec<u8>) -> (u16, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let response = response_of(content_encoding, body);
     let last_head = Arc::new(Mutex::new(String::new()));
     let kept = last_head.clone();
 
     tokio::spawn(async move {
-        loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-
-            let response = response.clone();
-            let kept = kept.clone();
-
-            tokio::spawn(async move {
-                let mut head = Vec::new();
-                let mut buffer = [0u8; 4096];
-
-                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
-                    match stream.read(&mut buffer).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(read) => head.extend_from_slice(&buffer[..read]),
-                    }
-                }
-
-                *kept.lock() = String::from_utf8_lossy(&head).to_ascii_lowercase();
-
-                let _ = stream.write_all(&response).await;
-                let _ = stream.shutdown().await;
-            });
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(answer(stream, response.clone(), kept.clone()));
         }
     });
 
     (port, last_head)
+}
+
+/// The same server on a unix socket: the path of its socket file, which the test removes.
+#[cfg(unix)]
+async fn serve_unix(
+    name: &str,
+    content_encoding: Option<&str>,
+    body: Vec<u8>,
+) -> (String, Arc<Mutex<String>>) {
+    // Short: a socket path has room for about 100 bytes.
+    let path = std::env::temp_dir()
+        .join(format!("mrp-{name}-{}.sock", std::process::id()))
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _ = std::fs::remove_file(&path);
+
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+
+    let response = response_of(content_encoding, body);
+    let last_head = Arc::new(Mutex::new(String::new()));
+    let kept = last_head.clone();
+
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(answer(stream, response.clone(), kept.clone()));
+        }
+    });
+
+    (path, last_head)
 }
 
 #[tokio::test]
@@ -191,4 +227,83 @@ async fn a_real_time_answer_is_decrypted_before_it_is_parsed() {
     .unwrap_err();
 
     assert!(err.contains("none of the 1 network keys"), "{err}");
+}
+
+/// A source on a unix socket of this host - certbot-api or ca-api in `/root/system-sockets` - is
+/// read like one over HTTP: the socket file, then after a `:` the path and the query of the
+/// request, the form SETTINGS_URL takes.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_source_on_a_unix_socket_is_read_and_decrypted() {
+    use_test_network_key();
+
+    let (socket, head) = serve_unix(
+        "cert",
+        Some("aes128gcm"),
+        encrypt_for_tests(&NETWORK_KEY, PEM),
+    )
+    .await;
+    let (plain_socket, _) = serve_unix("plain", None, PEM.to_vec()).await;
+
+    let from_socket = load(&format!(
+        "http+unix://{socket}:/api/certificates/v1/fullchain?domain=x-fine.online"
+    ))
+    .await;
+    let from_plain = load(&format!("http+unix://{plain_socket}:/cert.pem")).await;
+
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::remove_file(&plain_socket).unwrap();
+
+    assert_eq!(from_socket.unwrap(), PEM);
+    assert!(
+        head.lock()
+            .starts_with("get /api/certificates/v1/fullchain?domain=x-fine.online http/1.1"),
+        "{}",
+        head.lock()
+    );
+    assert!(head.lock().contains("accept-encoding: aes128gcm"));
+
+    assert_eq!(from_plain.unwrap(), PEM);
+}
+
+/// The socket is a file of this host: a source which names one behind ssh is refused, not tried
+/// on the ssh server.
+#[tokio::test]
+async fn a_unix_socket_behind_ssh_is_refused() {
+    let err = load("ssh:user@10.0.0.1:22->http+unix:///run/certbot.sock:/cert.pem")
+        .await
+        .unwrap_err();
+
+    assert!(err.contains("not over ssh"), "{err}");
+}
+
+/// A url of `real_time_configurations` may be a unix socket too, in the same form.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_real_time_answer_is_read_from_a_unix_socket() {
+    use_test_network_key();
+
+    let yaml = b"ip_white_lists:\n  office:\n  - 10.0.0.1\n";
+    let (socket, head) = serve_unix(
+        "real-time",
+        Some("aes128gcm"),
+        encrypt_for_tests(&NETWORK_KEY, yaml),
+    )
+    .await;
+
+    let model = crate::flows::read_real_time_configuration(
+        &format!("http+unix://{socket}:/api/hosts"),
+        Duration::from_secs(2),
+    )
+    .await;
+
+    std::fs::remove_file(&socket).unwrap();
+
+    let model = model.unwrap().unwrap();
+    assert_eq!(model.ip_white_lists["office"], ["10.0.0.1"]);
+    assert!(
+        head.lock().starts_with("get /api/hosts http/1.1"),
+        "{}",
+        head.lock()
+    );
 }

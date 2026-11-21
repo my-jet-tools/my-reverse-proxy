@@ -8,10 +8,13 @@ use rust_extensions::remote_endpoint::RemoteEndpoint;
 
 use crate::configurations::drive_path_with_backslashes;
 
-/// What `content_source` holds: a local file, a file over ssh, or an `http(s)://` url, directly or
-/// over ssh. Encrypted content is decrypted with the network keys: an answer which says it is
-/// encrypted (`Content-Encoding: aes128gcm`) has to open, and anything else is decrypted if one of
-/// the keys opens it, and taken as it is if none does - docs/encrypted-service-data.md.
+/// What `content_source` holds: a local file, a file over ssh, an `http(s)://` url, directly or
+/// over ssh, or a service on a unix socket of this host -
+/// `http+unix:///root/system-sockets/certbot.http-sock:/api/...?domain=...`, the socket file and,
+/// after a `:`, the path of the request. Encrypted content is decrypted with the network keys: an
+/// answer which says it is encrypted (`Content-Encoding: aes128gcm`) has to open, and anything else
+/// is decrypted if one of the keys opens it, and taken as it is if none does -
+/// docs/encrypted-service-data.md.
 pub async fn load_file(
     content_source: &OverSshConnectionSettings,
     connect_timeout: Duration,
@@ -64,6 +67,19 @@ async fn load_content(
                 )
                 .await
             }
+            rust_extensions::remote_endpoint::Scheme::UnixSocket => {
+                // The socket is a file of this host: there is nothing to reach it over ssh.
+                if content_source.ssh_credentials.is_some() {
+                    return Err(format!(
+                        "{}: a unix socket is read on this host, not over ssh",
+                        content_source.remote_resource_string
+                    ));
+                }
+
+                // FlUrl reads the form the services take their SETTINGS_URL in: the socket file,
+                // then after a `:` the path and the query of the request.
+                load_over_flurl(source.as_ref()).await
+            }
             _ => Err(format!(
                 "File can not be loaded from the url: {}",
                 remote_endpoint.as_str()
@@ -99,8 +115,13 @@ async fn load_from_http_or_https<'s>(
             .await;
     }
 
+    load_over_flurl(remote_endpoint.as_str()).await
+}
+
+/// A `GET` of `url` - `http(s)://`, or a unix socket - which asks for the answer encrypted.
+async fn load_over_flurl(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
     // FlUrl::new never panics: a malformed `https://domain@ip:port/...` source fails the request
-    let mut response = FlUrl::new(remote_endpoint.as_str())
+    let mut response = FlUrl::new(url)
         .with_header(
             "Accept-Encoding",
             my_http_server::AES128GCM_CONTENT_ENCODING,

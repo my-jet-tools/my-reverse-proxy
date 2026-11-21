@@ -28,8 +28,8 @@ decrypts the answer.
 | Where in its settings | What the answer holds, once decrypted |
 |---|---|
 | `real_time_configurations.urls` | A real-time configuration in YAML or JSON: `hosts`, `additional_hosts`, `api_keys` and `ip_white_lists` (ip-whitelister's `GET /api/export` answers with it), any of them may be left out. |
-| `ssl_certificates[].certificate` and `.private_key`, as `http://` or `https://` sources | PEM: the certificate chain, and the private key. |
-| `client_certificate_ca[].ca` and `.revocation_list`, as `http://` or `https://` sources | The CA certificate in PEM. The revocation list as an X.509 CRL in PEM, or as a YAML array of the revoked serials - decimal integers, `- 5`, `[]` when none is revoked - the way ca-api's `GET /api/revoked/v1/list` answers. |
+| `ssl_certificates[].certificate` and `.private_key`, as `http://`, `https://` or unix socket sources | PEM: the certificate chain, and the private key. |
+| `client_certificate_ca[].ca` and `.revocation_list`, as `http://`, `https://` or unix socket sources | The CA certificate in PEM. The revocation list as an X.509 CRL in PEM, or as a YAML array of the revoked serials - decimal integers, `- 5`, `[]` when none is revoked - the way ca-api's `GET /api/revoked/v1/list` answers. |
 
 The plain text of the answer is exactly what an unencrypted answer would be.
 
@@ -43,6 +43,9 @@ Accept-Encoding: aes128gcm
 ```
 
 - It is a plain GET, with no body and no key in it.
+- A service on a unix socket of the same host is read the same way. The url names the socket file,
+  then after a `:` the path: `http+unix:///root/system-sockets/<service>.http-sock:/<path>?<query>`,
+  the form of `SETTINGS_URL`.
 - The service does not have to authenticate it: the request carries nothing secret, and the answer
   is useless without a key.
 - my-reverse-proxy repeats it on its timer: `refresh_interval` for real-time configurations, the
