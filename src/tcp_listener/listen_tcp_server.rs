@@ -60,6 +60,25 @@ async fn accept_connections_loop(
                     continue;
                 }
 
+                // `max_connections` and `max_connections_per_ip`: a connection over them is
+                // closed as it is, before a byte of it is read.
+                let ip = addr.ip();
+                let slot = match crate::app::APP_CTX
+                    .connection_limits
+                    .take(ip, crate::app::APP_CTX.ip_blocklist.exempts(&ip))
+                {
+                    Ok(slot) => slot,
+                    Err(refusal) => {
+                        crate::app::APP_CTX.proxy_logs.write_port(
+                            listening_addr.port().to_string().as_str(),
+                            Some(ip.to_string()),
+                            format!("Dropped connection from {ip}: {refusal}"),
+                        );
+                        drop(tcp_stream);
+                        continue;
+                    }
+                };
+
                 connection_id += 1;
 
                 // The connection is served by a task of its own: a tcp endpoint connects to its
@@ -67,7 +86,13 @@ async fn accept_connections_loop(
                 // next connection on the port must not wait for that.
                 crate::app::spawn_named(
                     "tcp_accepted_connection",
-                    handle_accepted_connection(tcp_stream, addr, listening_addr, connection_id),
+                    handle_accepted_connection(
+                        tcp_stream,
+                        addr,
+                        listening_addr,
+                        connection_id,
+                        slot,
+                    ),
                 );
             }
             _ = stop_endpoint_feature => {
@@ -96,11 +121,14 @@ pub(super) async fn accept_connection(
     Ok((tcp_stream, addr))
 }
 
+/// `slot`: the connection's place among the ones held - it goes with the connection to whatever
+/// serves it, and is given back when that ends.
 async fn handle_accepted_connection(
     mut accepted_connection: tokio::net::TcpStream,
     socket_addr: SocketAddr,
     listening_host: SocketAddr,
     connection_id: u64,
+    slot: crate::app::ConnectionSlot,
 ) {
     let listen_port = listening_host.port();
 
@@ -154,6 +182,7 @@ async fn handle_accepted_connection(
                     accepted_connection,
                     socket_addr,
                     configuration,
+                    slot,
                 );
                 //super::http::handle_connection(accepted_connection, listening_addr, configuration)
                 //    .await;
@@ -163,6 +192,7 @@ async fn handle_accepted_connection(
                     (accepted_connection, socket_addr).into(),
                     listening_host.into(),
                     configuration,
+                    slot,
                 )
                 .await;
             }
@@ -173,6 +203,7 @@ async fn handle_accepted_connection(
                     listening_host,
                     configuration,
                     connection_id,
+                    slot,
                 );
             }
             crate::configurations::ListenHttpEndpointType::Https2 => {
@@ -182,6 +213,7 @@ async fn handle_accepted_connection(
                     listening_host,
                     configuration,
                     connection_id,
+                    slot,
                 );
             }
             crate::configurations::ListenHttpEndpointType::Mcp => {
@@ -191,6 +223,7 @@ async fn handle_accepted_connection(
                     listening_host,
                     configuration,
                     connection_id,
+                    slot,
                 );
             }
         },
@@ -202,6 +235,7 @@ async fn handle_accepted_connection(
                     configuration.clone(),
                     id,
                     remote_host.clone(),
+                    slot,
                 )
                 .await;
             }
@@ -214,6 +248,7 @@ async fn handle_accepted_connection(
                     configuration.clone(),
                     ssh_credentials,
                     remote_host.clone(),
+                    slot,
                 )
                 .await;
             }
@@ -222,6 +257,7 @@ async fn handle_accepted_connection(
                     (accepted_connection, socket_addr).into(),
                     configuration.clone(),
                     remote_host.clone(),
+                    slot,
                 )
                 .await;
             }
@@ -234,6 +270,7 @@ async fn handle_accepted_connection(
                 listening_host,
                 configuration,
                 connection_id,
+                slot,
             );
         }
     }

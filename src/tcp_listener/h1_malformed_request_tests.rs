@@ -4,12 +4,19 @@
 //!
 //! The endpoint and the upstream are the ones of `ambiguous_path_tests`: `/open`, `/secure`
 //! with an `api_keys_auth`, and `/`. The upstream records every request line it gets.
+//!
+//! The lines of a request head go upstream as they came, and the upstream finds where the
+//! request ends by them on its own: a head it could read another way than the proxy did is
+//! refused (see `Http1Headers::try_parse_request`).
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
 };
 
 use super::ambiguous_path_tests::{start_endpoint, H1Client, Upstream};
@@ -153,5 +160,222 @@ async fn a_chunk_size_which_does_not_fit_closes_the_connection() {
         }
 
         assert_serves(port).await;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Where a request ends: read one way only
+// ---------------------------------------------------------------------------------------------
+
+/// A request which an upstream reading by RFC 9112 ends elsewhere than the proxy: the upstream
+/// finds a second request in the body of the first, and serves it past the checks of the
+/// location - here `GET /secure/x` with no key of its `api_keys_auth`.
+#[tokio::test]
+async fn a_request_hidden_in_the_body_of_another_never_reaches_the_upstream() {
+    let mut leaked = Vec::new();
+
+    for framing in [
+        // The upstream goes by `Transfer-Encoding`; the proxy went by the one which came last.
+        "Transfer-Encoding: chunked\r\nContent-Length: {len}\r\n",
+        // `Transfer-Encoding` is a line of its own to the upstream - and a part of the value
+        // of `X-Note` to a reader which ends a line at CRLF only.
+        "X-Note: a\nTransfer-Encoding: chunked\r\nContent-Length: {len}\r\n",
+    ] {
+        let upstream = KeepAliveUpstream::start().await;
+        let port = start_endpoint(ListenHttpEndpointType::Http1, upstream.port).await;
+
+        let smuggled = format!("GET /secure/x HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n");
+        let body = format!("0\r\n\r\n{smuggled}");
+        let lines = framing.replace("{len}", &body.len().to_string());
+
+        let request =
+            format!("POST /open/x HTTP/1.1\r\nHost: localhost:{port}\r\n{lines}\r\n{body}");
+
+        send_and_read_for(port, request.as_bytes(), Duration::from_secs(1)).await;
+
+        let requests = upstream.requests();
+        if requests.iter().any(|line| line.contains("/secure")) {
+            leaked.push(format!("{lines:?}: the upstream got {requests:?}"));
+        }
+    }
+
+    assert!(leaked.is_empty(), "{leaked:#?}");
+}
+
+/// Heads which two readers could take two ways: the request is not sent on, and the connection
+/// is closed - as for every other head which does not parse.
+#[tokio::test]
+async fn a_head_which_could_be_read_two_ways_closes_the_connection() {
+    let upstream = Upstream::start().await;
+    let port = start_endpoint(ListenHttpEndpointType::Http1, upstream.port).await;
+
+    for lines in [
+        "Content-Length: 1\r\nTransfer-Encoding: chunked\r\n",
+        "Transfer-Encoding: chunked\r\nContent-Length: 1\r\n",
+        "Content-Length: 1\r\nContent-Length: 2\r\n",
+        "Content-Length: 1\r\nContent-Length: 1\r\n",
+        "Content-Length: +1\r\n",
+        "Content-Length: 1, 1\r\n",
+        "Content-Length: 99999999999999999999999\r\n",
+        "Transfer-Encoding: gzip, chunked\r\n",
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n",
+        "Transfer-Encoding : chunked\r\n",
+        "Transfer-Encoding:\r\n chunked\r\n",
+        "X-Note: a\nTransfer-Encoding: chunked\r\n",
+        "X-Note: a\rb\r\n",
+        "X-Note: a\0b\r\n",
+        "Host: localhost\r\n",
+        "A line with no colon\r\n",
+        ": a value with no name\r\n",
+    ] {
+        let request = format!("POST /open/x HTTP/1.1\r\nHost: localhost:{port}\r\n{lines}\r\n");
+
+        let received = send_and_read_to_the_close(port, request.as_bytes()).await;
+
+        assert!(
+            !received.starts_with(b"HTTP/1.1 200"),
+            "{lines:?}: {:?}",
+            String::from_utf8_lossy(&received)
+        );
+        assert_eq!(upstream.requests(), [""; 0], "{lines:?}");
+    }
+
+    assert_serves(port).await;
+}
+
+/// Sends `request` as it is and gives back what the proxy wrote within `time`, or before it
+/// closed the connection.
+async fn send_and_read_for(port: u16, request: &[u8], time: Duration) -> Vec<u8> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    stream.write_all(request).await.unwrap();
+
+    let mut received = Vec::new();
+    let _ = tokio::time::timeout(time, stream.read_to_end(&mut received)).await;
+
+    received
+}
+
+/// An upstream which reads a connection the way RFC 9112 lets a server read it - and the way
+/// Go's net/http does: request after request on one connection, `Transfer-Encoding: chunked`
+/// over `Content-Length`, and a lone LF taken for the end of a line (§2.2). It keeps the request
+/// lines it got, and answers each request with its target.
+struct KeepAliveUpstream {
+    port: u16,
+    request_lines: Arc<Mutex<Vec<String>>>,
+}
+
+impl KeepAliveUpstream {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let request_lines = Arc::new(Mutex::new(Vec::new()));
+        let recorded = request_lines.clone();
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(serve_requests(stream, recorded.clone()));
+            }
+        });
+
+        Self {
+            port,
+            request_lines,
+        }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.request_lines.lock().unwrap().clone()
+    }
+}
+
+async fn serve_requests(mut stream: TcpStream, recorded: Arc<Mutex<Vec<String>>>) -> Option<()> {
+    let mut received = Vec::new();
+
+    loop {
+        let request_line = next_line(&mut stream, &mut received).await?;
+        recorded.lock().unwrap().push(request_line.clone());
+
+        let mut chunked = false;
+        let mut length = 0;
+
+        loop {
+            let line = next_line(&mut stream, &mut received).await?;
+
+            if line.is_empty() {
+                break;
+            }
+
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+
+            if name.eq_ignore_ascii_case("transfer-encoding") {
+                chunked = value.trim().eq_ignore_ascii_case("chunked");
+            } else if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap_or(0);
+            }
+        }
+
+        if chunked {
+            loop {
+                let size_line = next_line(&mut stream, &mut received).await?;
+                let size = usize::from_str_radix(size_line.trim(), 16).ok()?;
+
+                if size == 0 {
+                    // The trailers, up to the empty line.
+                    while !next_line(&mut stream, &mut received).await?.is_empty() {}
+                    break;
+                }
+
+                take_bytes(&mut stream, &mut received, size + 2).await?;
+            }
+        } else {
+            take_bytes(&mut stream, &mut received, length).await?;
+        }
+
+        let target = request_line.split(' ').nth(1).unwrap_or_default();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+            target.len(),
+            target
+        );
+        stream.write_all(response.as_bytes()).await.ok()?;
+    }
+}
+
+/// The next line of `stream` - without its LF, and without a CR before it. `None`: the
+/// connection is over.
+async fn next_line(stream: &mut TcpStream, received: &mut Vec<u8>) -> Option<String> {
+    loop {
+        if let Some(end) = received.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = received.drain(..=end).collect();
+            let line = &line[..line.len() - 1];
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            return Some(String::from_utf8_lossy(line).into_owned());
+        }
+
+        read_more_of(stream, received).await?;
+    }
+}
+
+async fn take_bytes(stream: &mut TcpStream, received: &mut Vec<u8>, size: usize) -> Option<()> {
+    while received.len() < size {
+        read_more_of(stream, received).await?;
+    }
+
+    received.drain(..size);
+    Some(())
+}
+
+async fn read_more_of(stream: &mut TcpStream, received: &mut Vec<u8>) -> Option<()> {
+    let mut buffer = [0u8; 4096];
+
+    match tokio::time::timeout(TIMEOUT, stream.read(&mut buffer)).await {
+        Ok(Ok(read)) if read > 0 => {
+            received.extend_from_slice(&buffer[..read]);
+            Some(())
+        }
+        _ => None,
     }
 }

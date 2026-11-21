@@ -56,6 +56,19 @@ pub struct HttpEndpointInfo {
     /// How long a client of this endpoint is waited for - its request heads, its TLS handshake,
     /// its h2 PINGs (resolved cascade, global → endpoint).
     pub client_timeouts: crate::types::ClientTimeouts,
+    /// What of a request body the endpoint holds in memory before it sends it on - to an upstream
+    /// which takes a body in one piece: `max_buffered_request_body` (global → endpoint) and
+    /// `max_buffered_request_bodies_total` (global).
+    pub buffered_body_limits: crate::types::BufferedBodyLimits,
+    /// The limits of a client connection: settings of `global_settings`.
+    pub connection_settings: crate::types::ConnectionSettings,
+    /// `rate_limit` of the endpoint: the requests one client may make to all its locations.
+    pub rate_limit: Option<Arc<crate::types::RateLimiter>>,
+    /// `max_request_body` (global → endpoint): the most any request body may take, streamed or
+    /// held. `None`: no limit but the ones of [`Self::buffered_body_limits`].
+    pub max_request_body: Option<usize>,
+    /// `tls_min_version` (global → endpoint): the oldest TLS a client may connect with.
+    pub tls_min_version: crate::types::TlsMinVersion,
     /// `Some`: the endpoint was given an access setting it can not apply, and serves nobody.
     pub not_served_reason: Option<NotServedReason>,
     /// The host came from a url of `real_time_configurations`, not from a settings file: a read of the urls
@@ -97,6 +110,11 @@ pub struct HttpEndpointInfoParams {
     pub mcp_settings: McpEndpointSettings,
     pub timeouts: crate::types::HttpTimeouts,
     pub client_timeouts: crate::types::ClientTimeouts,
+    pub buffered_body_limits: crate::types::BufferedBodyLimits,
+    pub connection_settings: crate::types::ConnectionSettings,
+    pub rate_limit: Option<Arc<crate::types::RateLimiter>>,
+    pub max_request_body: Option<usize>,
+    pub tls_min_version: crate::types::TlsMinVersion,
     pub not_served_reason: Option<NotServedReason>,
     pub dynamic_host: bool,
 }
@@ -127,6 +145,11 @@ impl HttpEndpointInfo {
             mcp_settings,
             timeouts,
             client_timeouts,
+            buffered_body_limits,
+            connection_settings,
+            rate_limit,
+            max_request_body,
+            tls_min_version,
             not_served_reason,
             dynamic_host,
         } = params;
@@ -173,10 +196,32 @@ impl HttpEndpointInfo {
             mcp_settings,
             timeouts,
             client_timeouts,
+            buffered_body_limits,
+            connection_settings,
+            rate_limit,
+            max_request_body,
+            tls_min_version,
             not_served_reason,
             dynamic_host,
             additional_host_of: None,
         }
+    }
+
+    /// `rate_limit` of the endpoint, then of `location`, for a request of `client`: `Some` - it is
+    /// over one of them, and may come again in so many seconds (`Retry-After`). A client of a
+    /// unix socket has no address, and is not limited.
+    pub fn rate_limit_refusal(
+        &self,
+        location: &ProxyPassLocationConfig,
+        client: &crate::types::ConnectionIp,
+    ) -> Option<u64> {
+        let ip = client.get_ip_addr()?;
+
+        [self.rate_limit.as_deref(), location.rate_limit.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|limiter| limiter.take(ip).err())
+            .map(crate::types::retry_after_seconds)
     }
 
     /// `whitelisted_ip` and `whitelisted_country` of the endpoint, for the client at

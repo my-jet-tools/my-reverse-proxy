@@ -26,6 +26,7 @@ pub struct TimeoutsSettings {
     pub tls_handshake_timeout: Option<u64>,
     pub h2_keep_alive_interval: Option<u64>,
     pub h2_keep_alive_timeout: Option<u64>,
+    pub h2_idle_timeout: Option<u64>,
 }
 
 impl TimeoutsSettings {
@@ -45,6 +46,7 @@ impl TimeoutsSettings {
             tls_handshake_timeout: higher.tls_handshake_timeout.or(self.tls_handshake_timeout),
             h2_keep_alive_interval: higher.h2_keep_alive_interval.or(self.h2_keep_alive_interval),
             h2_keep_alive_timeout: higher.h2_keep_alive_timeout.or(self.h2_keep_alive_timeout),
+            h2_idle_timeout: higher.h2_idle_timeout.or(self.h2_idle_timeout),
         }
     }
 
@@ -84,6 +86,10 @@ impl TimeoutsSettings {
                 h2_keep_alive_timeout: ms_or(
                     self.h2_keep_alive_timeout,
                     crate::consts::DEFAULT_CLIENT_H2_KEEP_ALIVE_TIMEOUT,
+                ),
+                h2_idle_timeout: ms_or(
+                    self.h2_idle_timeout,
+                    crate::consts::DEFAULT_CLIENT_H2_IDLE_TIMEOUT,
                 ),
             },
         }

@@ -7,7 +7,8 @@
 //!   not while an answer is still on its way;
 //! - a connection to a TLS port that sends nothing is cut at `tls_handshake_timeout`;
 //! - an `https2` / `http2` connection that sends no request is cut at `header_read_timeout`;
-//! - a body the proxy waits for whole is answered `408` once it stops coming (`read_timeout`);
+//! - a body the proxy waits for whole is answered `408` once it stops coming (`read_timeout`),
+//!   and `413` once it is larger than `max_buffered_request_body` - or says it is;
 //! - `tcp` and `mcp` endpoints, which never read a head, are not cut by any of it.
 //!
 //! After each refusal an ordinary request on a new connection is served.
@@ -20,7 +21,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full, StreamBody};
 use hyper_util::rt::TokioIo;
 use my_tls::tokio_rustls::{
     client::TlsStream,
@@ -233,6 +234,368 @@ async fn https2_a_body_that_stops_coming_is_answered_408() {
     assert_eq!(site.get(&mut client, "/").await, (200, "ok".to_string()));
 }
 
+/// The body held whole is held in memory: not past `max_buffered_request_body`. One which says it
+/// is larger is refused before a byte of it is read.
+#[tokio::test]
+async fn https2_a_body_announced_over_max_buffered_request_body_is_answered_413() {
+    let site = Site::start("https2", "      max_buffered_request_body: 1Kb\n").await;
+
+    let mut client = site.connect_tls(b"http/1.1").await;
+    let head = format!(
+        "POST /echo HTTP/1.1\r\nHost: localhost:{}\r\ncontent-length: 1025\r\n\r\n",
+        site.port
+    );
+    client.write_all(head.as_bytes()).await.unwrap();
+
+    let (status, _) = tokio::time::timeout(NOT_AFTER, read_response(&mut client))
+        .await
+        .expect("no answer to a body announced too large");
+    assert_eq!(status, 413);
+
+    let mut client = site.connect_tls(b"http/1.1").await;
+    let request = format!(
+        "POST /echo HTTP/1.1\r\nHost: localhost:{}\r\ncontent-length: 1024\r\n\r\n{}",
+        site.port,
+        "x".repeat(1024)
+    );
+    client.write_all(request.as_bytes()).await.unwrap();
+
+    let answer = tokio::time::timeout(NOT_AFTER, read_response(&mut client))
+        .await
+        .expect("no answer in time");
+    assert_eq!(answer, (200, "1024".to_string()));
+}
+
+/// An h2 body says nothing of its size: it is counted as it comes, and refused once it is over.
+#[tokio::test]
+async fn https2_an_h2_body_over_max_buffered_request_body_is_answered_413() {
+    let site = Site::start("https2", "      max_buffered_request_body: 1Kb\n").await;
+
+    let response = site.h2_post("/echo", &[600, 600]).await;
+    assert_eq!(response.status(), 413);
+
+    let response = site.h2_post("/echo", &[600, 424]).await;
+    assert_eq!(response.status(), 200);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"1024");
+}
+
+/// An answer the client takes nothing of - an h2 stream whose window it keeps shut - cuts the
+/// connection at `write_timeout`, as nginx's `send_timeout` does: it would hold the answer and the
+/// upstream connection it is read from for as long as it likes.
+#[tokio::test]
+async fn https2_an_answer_the_client_does_not_take_cuts_the_connection() {
+    let site = Site::start("https2", "      write_timeout: 1000\n").await;
+    let (mut sender, connection) = site.h2_connect().await;
+
+    let request = hyper::Request::get(format!("https://localhost:{}/big", site.port))
+        .body(Empty::<Bytes>::new().boxed())
+        .unwrap();
+    let response = tokio::time::timeout(NOT_AFTER, sender.send_request(request))
+        .await
+        .expect("no answer in time")
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    // The body is never read: the window of the stream stays shut.
+    let started = Instant::now();
+    tokio::time::timeout(Duration::from_secs(6), connection)
+        .await
+        .expect("the connection was not cut")
+        .unwrap();
+    assert!(
+        started.elapsed() >= NOT_BEFORE,
+        "cut after {:?}",
+        started.elapsed()
+    );
+
+    drop(response);
+    let mut client = site.connect_tls(b"http/1.1").await;
+    assert_eq!(site.get(&mut client, "/").await, (200, "ok".to_string()));
+}
+
+/// An h2 connection with no request on it for `h2_idle_timeout` is closed with a GOAWAY -
+/// nginx's `keepalive_timeout`. A client which answers the PINGs does not hold it any longer.
+#[tokio::test]
+async fn https2_an_idle_h2_connection_is_closed() {
+    let site = Site::start("https2", "      h2_idle_timeout: 1000\n").await;
+    let (mut sender, connection) = site.h2_connect().await;
+
+    assert_eq!(
+        h2_get(&mut sender, site.port, "/").await,
+        (200, "ok".to_string())
+    );
+
+    let started = Instant::now();
+    tokio::time::timeout(NOT_AFTER, connection)
+        .await
+        .expect("an idle h2 connection is still open")
+        .unwrap();
+    assert!(
+        started.elapsed() >= NOT_BEFORE,
+        "closed after {:?}",
+        started.elapsed()
+    );
+}
+
+/// After `max_requests_per_connection` requests the connection is closed with a GOAWAY, once the
+/// last of them is answered - nginx's `keepalive_requests`.
+#[tokio::test]
+async fn https2_a_connection_is_closed_after_its_most_requests() {
+    let site = Site::start_with_global("https2", "", "  max_requests_per_connection: 2\n").await;
+    let (mut sender, connection) = site.h2_connect().await;
+
+    for _ in 0..2 {
+        assert_eq!(
+            h2_get(&mut sender, site.port, "/").await,
+            (200, "ok".to_string())
+        );
+    }
+
+    tokio::time::timeout(NOT_AFTER, connection)
+        .await
+        .expect("the connection is still open after its most requests")
+        .unwrap();
+}
+
+/// A request head larger than `max_request_head_size` is answered `431` - by the proxy's own
+/// http/1.1 pipeline on `http`, and by hyper for an http/1.1 client of `https2`. One within the
+/// limit is served.
+#[tokio::test]
+async fn a_request_head_over_max_request_head_size_is_answered_431() {
+    for endpoint_type in ["http", "https2"] {
+        let site =
+            Site::start_with_global(endpoint_type, "", "  max_request_head_size: 8Kb\n").await;
+
+        let head_of = |header_size: usize| {
+            format!(
+                "GET / HTTP/1.1\r\nHost: localhost:{}\r\nX-Big: {}\r\n\r\n",
+                site.port,
+                "x".repeat(header_size)
+            )
+        };
+
+        for (header_size, expected) in [(10 * 1024, 431), (4 * 1024, 200)] {
+            let request = head_of(header_size);
+
+            let (status, _) = if endpoint_type == "http" {
+                send_and_read(&mut site.connect().await, &request).await
+            } else {
+                send_and_read(&mut site.connect_tls(b"http/1.1").await, &request).await
+            };
+
+            assert_eq!(
+                status, expected,
+                "{endpoint_type}, a header of {header_size}"
+            );
+        }
+    }
+}
+
+/// After `max_requests_per_connection` requests the proxy's own http/1.1 pipeline closes the
+/// connection, once the last of them is answered.
+#[tokio::test]
+async fn http_a_connection_is_closed_after_its_most_requests() {
+    let site = Site::start_with_global("http", "", "  max_requests_per_connection: 2\n").await;
+
+    let mut client = site.connect().await;
+    for _ in 0..2 {
+        assert_eq!(site.get(&mut client, "/").await, (200, "ok".to_string()));
+    }
+
+    let mut buffer = [0u8; 16];
+    let read = tokio::time::timeout(NOT_AFTER, client.read(&mut buffer))
+        .await
+        .expect("the connection is still open after its most requests")
+        .unwrap_or(0);
+    assert_eq!(read, 0);
+
+    site.assert_served_on_a_new_connection().await;
+}
+
+/// `rate_limit` of an endpoint: past the requests it lets one client make, `429` with a
+/// `Retry-After` - on the proxy's own http/1.1 pipeline, and on hyper's for http/1.1 and h2.
+#[tokio::test]
+async fn a_client_over_the_rate_limit_of_the_endpoint_is_answered_429() {
+    for endpoint_type in ["http", "https2"] {
+        let site = Site::start(endpoint_type, "      rate_limit: 2/m\n").await;
+        let request = format!("GET / HTTP/1.1\r\nHost: localhost:{}\r\n\r\n", site.port);
+
+        for expected in [200, 200, 429] {
+            let response = if endpoint_type == "http" {
+                send_and_read_raw(&mut site.connect().await, &request).await
+            } else {
+                send_and_read_raw(&mut site.connect_tls(b"http/1.1").await, &request).await
+            };
+
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {expected}")),
+                "{endpoint_type}: {response}"
+            );
+            if expected == 429 {
+                assert!(
+                    response.to_ascii_lowercase().contains("\r\nretry-after: "),
+                    "{endpoint_type}: {response}"
+                );
+            }
+        }
+    }
+
+    let site = Site::start("https2", "      rate_limit: 1/m\n").await;
+    let (mut sender, _connection) = site.h2_connect().await;
+    assert_eq!(h2_get(&mut sender, site.port, "/").await.0, 200);
+    assert_eq!(h2_get(&mut sender, site.port, "/").await.0, 429);
+}
+
+/// `rate_limit` of a location is its own, on top of the endpoint's: the other locations are not
+/// held to it.
+#[tokio::test]
+async fn a_client_over_the_rate_limit_of_a_location_is_answered_429() {
+    let upstream = start_upstream().await;
+    let port = free_port().await;
+
+    apply_settings(&format!(
+        "hosts:\n  localhost:{port}:\n    endpoint:\n      type: http\n    locations:\n    - path: /limited\n      proxy_pass_to: http://127.0.0.1:{upstream}\n      rate_limit: 1/m\n    - proxy_pass_to: http://127.0.0.1:{upstream}\n"
+    ))
+    .await;
+    serve(port);
+
+    let get = |path: &str| format!("GET {path} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n");
+
+    for (path, expected) in [("/limited", 200), ("/limited", 429), ("/", 200), ("/", 200)] {
+        let (status, _) = send_and_read(&mut connect_to(port).await, &get(path)).await;
+        assert_eq!(status, expected, "{path}");
+    }
+}
+
+/// `max_request_body` - nginx's `client_max_body_size`: a body which says it is larger is
+/// answered `413` before anything goes upstream - on the proxy's own pipeline and on hyper's,
+/// where it holds a body held whole to it too. One within the limit is served.
+#[tokio::test]
+async fn a_body_announced_over_max_request_body_is_answered_413() {
+    for endpoint_type in ["http", "https2"] {
+        let site = Site::start(endpoint_type, "      max_request_body: 1Kb\n").await;
+
+        for (size, expected) in [(2048, 413), (512, 200)] {
+            let request = format!(
+                "POST /echo HTTP/1.1\r\nHost: localhost:{}\r\ncontent-length: {size}\r\n\r\n{}",
+                site.port,
+                "x".repeat(size)
+            );
+
+            let (status, body) = if endpoint_type == "http" {
+                send_and_read(&mut site.connect().await, &request).await
+            } else {
+                send_and_read(&mut site.connect_tls(b"http/1.1").await, &request).await
+            };
+
+            assert_eq!(status, expected, "{endpoint_type}, {size} bytes");
+            if expected == 200 {
+                assert_eq!(body, size.to_string());
+            }
+        }
+    }
+}
+
+/// A chunked body says nothing of its size: the proxy's own pipeline cuts it as it passes
+/// `max_request_body` - the connection is closed, and it is not answered `200`.
+#[tokio::test]
+async fn http_a_chunked_body_over_max_request_body_is_cut() {
+    let site = Site::start("http", "      max_request_body: 1Kb\n").await;
+
+    let chunk = "x".repeat(512);
+    let mut request = format!(
+        "POST /echo HTTP/1.1\r\nHost: localhost:{}\r\ntransfer-encoding: chunked\r\n\r\n",
+        site.port
+    );
+    for _ in 0..4 {
+        request.push_str(&format!("200\r\n{chunk}\r\n"));
+    }
+    request.push_str("0\r\n\r\n");
+
+    let response = send_and_read_raw(&mut site.connect().await, &request).await;
+    assert!(!response.starts_with("HTTP/1.1 200"), "{response}");
+
+    site.assert_served_on_a_new_connection().await;
+}
+
+/// `tls_min_version: 1.3` turns away a client of TLS 1.2 in the handshake - nginx's
+/// `ssl_protocols`. Without it TLS 1.2 is taken.
+#[tokio::test]
+async fn https2_tls_min_version_turns_away_older_tls() {
+    use my_tls::tokio_rustls::rustls::version::{TLS12, TLS13};
+
+    let site = Site::start("https2", "      tls_min_version: 1.3\n").await;
+    assert!(tls_connect_with(site.port, &[&TLS12]).await.is_err());
+
+    let mut client = tls_connect_with(site.port, &[&TLS13]).await.unwrap();
+    assert_eq!(site.get(&mut client, "/").await, (200, "ok".to_string()));
+
+    let site = Site::start("https2", "").await;
+    let mut client = tls_connect_with(site.port, &[&TLS12]).await.unwrap();
+    assert_eq!(site.get(&mut client, "/").await, (200, "ok".to_string()));
+}
+
+/// `access_log`: a line for every answer - of the proxy's own pipeline and of hyper's - with the
+/// request, the status and the bytes of the body.
+#[tokio::test]
+async fn every_answer_gets_a_line_in_the_access_log() {
+    let dir = std::env::temp_dir().join(format!(
+        "my-reverse-proxy-access-log-e2e-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("access.log");
+
+    crate::app::APP_CTX
+        .access_log
+        .apply(Some(crate::access_log::AccessLogSettings {
+            path: path.clone(),
+            max_size: 100 * 1024 * 1024,
+            files: 1,
+        }));
+
+    let marker = format!("/access-log-{}", free_port().await);
+
+    for endpoint_type in ["http", "https2"] {
+        let site = Site::start(endpoint_type, "").await;
+        let request = format!(
+            "GET {marker}-{endpoint_type} HTTP/1.1\r\nHost: localhost:{}\r\n\r\n",
+            site.port
+        );
+
+        let (status, _) = if endpoint_type == "http" {
+            send_and_read(&mut site.connect().await, &request).await
+        } else {
+            send_and_read(&mut site.connect_tls(b"http/1.1").await, &request).await
+        };
+        assert_eq!(status, 200);
+    }
+
+    // The lines go through the writer task: looked for a while.
+    let expected = ["http", "https2"].map(|endpoint_type| {
+        format!(" localhost \"GET {marker}-{endpoint_type} HTTP/1.1\" 200 2 ")
+    });
+
+    let mut log = String::new();
+    for _ in 0..50 {
+        log = std::fs::read_to_string(&path).unwrap_or_default();
+
+        if expected.iter().all(|line| log.contains(line.as_str())) {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    crate::app::APP_CTX.access_log.apply(None);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    for line in expected {
+        assert!(log.contains(line.as_str()), "{line} is not in:\n{log}");
+    }
+}
+
 /// No TLS here: the h2 connection sends its SETTINGS and waits for the client preface.
 #[tokio::test]
 async fn http2_a_client_which_sends_nothing_is_cut() {
@@ -402,10 +765,118 @@ impl Site {
             .expect("no answer in time")
     }
 
+    /// A new h2 connection: what sends its requests, and the task which ends with it.
+    async fn h2_connect(
+        &self,
+    ) -> (
+        hyper::client::conn::http2::SendRequest<BoxBody<Bytes, Infallible>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let tls = self.connect_tls(b"h2").await;
+        let (sender, connection) = hyper::client::conn::http2::handshake(
+            hyper_util::rt::TokioExecutor::new(),
+            TokioIo::new(tls),
+        )
+        .await
+        .unwrap();
+
+        let connection = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        (sender, connection)
+    }
+
+    /// A `POST` over h2 on a new connection, with a body of `frames` and no `content-length`.
+    async fn h2_post(
+        &self,
+        path: &str,
+        frames: &[usize],
+    ) -> hyper::Response<hyper::body::Incoming> {
+        let tls = self.connect_tls(b"h2").await;
+        let (mut sender, connection) = hyper::client::conn::http2::handshake(
+            hyper_util::rt::TokioExecutor::new(),
+            TokioIo::new(tls),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(connection);
+
+        let frames: Vec<Result<hyper::body::Frame<Bytes>, Infallible>> = frames
+            .iter()
+            .map(|size| Ok(hyper::body::Frame::data(Bytes::from(vec![b'x'; *size]))))
+            .collect();
+        let body = http_body_util::StreamBody::new(futures::stream::iter(frames));
+
+        let request = hyper::Request::post(format!("https://localhost:{}{path}", self.port))
+            .body(body)
+            .unwrap();
+
+        tokio::time::timeout(NOT_AFTER, sender.send_request(request))
+            .await
+            .expect("no answer in time")
+            .unwrap()
+    }
+
     async fn assert_served_on_a_new_connection(&self) {
         let mut client = self.connect().await;
         assert_eq!(self.get(&mut client, "/").await, (200, "ok".to_string()));
     }
+}
+
+/// Writes `request` and reads the answer to it: the status and the body.
+async fn send_and_read<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    request: &str,
+) -> (u16, String) {
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    tokio::time::timeout(NOT_AFTER, read_response(stream))
+        .await
+        .expect("no answer in time")
+}
+
+/// Writes `request` and gives back all the proxy wrote in answer: up to the close, or a second of
+/// silence.
+async fn send_and_read_raw<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    request: &str,
+) -> String {
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut received = Vec::new();
+    let mut buffer = [0u8; 4096];
+
+    while let Ok(Ok(read)) =
+        tokio::time::timeout(Duration::from_secs(1), stream.read(&mut buffer)).await
+    {
+        if read == 0 {
+            break;
+        }
+        received.extend_from_slice(&buffer[..read]);
+    }
+
+    String::from_utf8_lossy(&received).to_string()
+}
+
+/// A `GET` of `path` on an h2 connection: the status and the body.
+async fn h2_get(
+    sender: &mut hyper::client::conn::http2::SendRequest<BoxBody<Bytes, Infallible>>,
+    port: u16,
+    path: &str,
+) -> (u16, String) {
+    let request = hyper::Request::get(format!("https://localhost:{port}{path}"))
+        .body(Empty::<Bytes>::new().boxed())
+        .unwrap();
+
+    let response = tokio::time::timeout(NOT_AFTER, sender.send_request(request))
+        .await
+        .expect("no answer in time")
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+
+    (status, String::from_utf8_lossy(&body).to_string())
 }
 
 /// The status and the body, by `content-length` or by chunks.
@@ -499,19 +970,29 @@ async fn start_upstream() -> u16 {
 
             let service = hyper::service::service_fn(
                 |request: hyper::Request<hyper::body::Incoming>| async move {
-                    let body = match request.uri().path() {
+                    let body: BoxBody<Bytes, Infallible> = match request.uri().path() {
                         "/slow" => {
                             tokio::time::sleep(SLOW_ANSWER).await;
-                            "slow".to_string()
+                            Full::new(Bytes::from("slow")).boxed()
                         }
                         "/echo" => {
                             let body = request.into_body().collect().await.unwrap().to_bytes();
-                            body.len().to_string()
+                            Full::new(Bytes::from(body.len().to_string())).boxed()
                         }
-                        _ => "ok".to_string(),
+                        // 64 MB in pieces of 64 KB: more than a client takes without reading.
+                        "/big" => {
+                            let pieces = (0..1024).map(|_| {
+                                Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from(vec![
+                                    b'x';
+                                    64 * 1024
+                                ])))
+                            });
+                            StreamBody::new(futures::stream::iter(pieces)).boxed()
+                        }
+                        _ => Full::new(Bytes::from("ok")).boxed(),
                     };
 
-                    Ok::<_, Infallible>(hyper::Response::new(Full::new(Bytes::from(body))))
+                    Ok::<_, Infallible>(hyper::Response::new(body))
                 },
             );
 
@@ -624,6 +1105,28 @@ async fn tls_connect(port: u16, alpn: &[u8]) -> TlsStream<TcpStream> {
     .await
     .expect("no TLS handshake in time")
     .unwrap()
+}
+
+/// A TLS handshake of an http/1.1 client which speaks `versions` only.
+async fn tls_connect_with(
+    port: u16,
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> std::io::Result<TlsStream<TcpStream>> {
+    let mut config = rustls::ClientConfig::builder_with_protocol_versions(versions)
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+    let tcp_stream = connect_to(port).await;
+
+    tokio::time::timeout(
+        NOT_AFTER,
+        TlsConnector::from(Arc::new(config))
+            .connect(ServerName::try_from("localhost").unwrap(), tcp_stream),
+    )
+    .await
+    .expect("no TLS handshake in time")
 }
 
 /// The endpoint serves the proxy's self-signed certificate; what is under test is what happens

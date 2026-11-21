@@ -184,14 +184,49 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         }
     };
 
+    // `max_request_head_size`, chosen as `header_read_timeout` is.
+    let max_head_size = match http_connection_info.endpoint_info.as_ref() {
+        Some(endpoint_info) => endpoint_info.connection_settings.max_request_head_size,
+        None => {
+            http_connection_info
+                .listen_config
+                .connection_settings()
+                .max_request_head_size
+        }
+    };
+
     let request_headers = match h1_reader
-        .read_request_headers(header_read_timeout, queue_tx.in_flight())
+        .read_request_headers(header_read_timeout, max_head_size, queue_tx.in_flight())
         .await
     {
         Ok(h) => h,
-        // No bytes / transport gone / the head did not come in time — just close.
-        Err(_) => return ReaderStep::Close,
+        Err(ProxyServerError::RequestHeadTooLarge) => {
+            return respond_error(
+                queue_tx,
+                http_connection_info,
+                None,
+                ProxyServerError::RequestHeadTooLarge,
+            )
+            .await;
+        }
+        Err(err) => {
+            // A head which is not one of HTTP/1.1 - garbage, or one which could be read two
+            // ways (`Http1Headers::try_parse_request`) - counts against its source, as other
+            // malformed HTTP does. A head which did not come in time, or a peer which went
+            // away, does not. Either way the connection is closed without a word.
+            if matches!(err, ProxyServerError::HeadersParseError(_)) {
+                if let Some(ip) = http_connection_info.peer_ip.get_ip_addr() {
+                    crate::app::APP_CTX
+                        .ip_blocklist
+                        .register_failure(ip, crate::app::FailureSeverity::Soft);
+                }
+            }
+
+            return ReaderStep::Close;
+        }
     };
+
+    http_connection_info.requests = http_connection_info.requests.saturating_add(1);
 
     // Until the endpoint of this request tells otherwise, the request is of the peer - not of
     // the client of the request before it.
@@ -345,10 +380,35 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
 
     http_connection_info.set_request_client(client);
 
+    // The line of the access log, written with the answer: `ResponseSlot::access`.
+    http_connection_info.access = if crate::app::APP_CTX.access_log.is_on() {
+        let first_line = request_headers.get_first_line(h1_reader.loop_buffer.get_data());
+        let (method, target) = first_line.get_verb_and_path();
+
+        crate::app::APP_CTX.access_log.record(
+            http_connection_info.connection_ip.get_ip_log(),
+            request_host_for_metric
+                .as_deref()
+                .unwrap_or(end_point_info.host_endpoint.as_str()),
+            method,
+            target,
+            "HTTP/1.1",
+        )
+    } else {
+        None
+    };
+
     h1_reader.timeouts = end_point_info.timeouts;
     let write_timeout = end_point_info.timeouts.write_timeout;
-    let keep_alive = end_point_info.keep_alive;
+    // The last request `max_requests_per_connection` lets the connection serve closes it once
+    // it is answered - as an endpoint with `keep_alive: false` closes after each one.
+    let keep_alive = end_point_info.keep_alive
+        && http_connection_info.requests
+            < end_point_info
+                .connection_settings
+                .max_requests_per_connection;
     let endpoint_for_error = end_point_info.host_endpoint.as_str().to_string();
+    let max_request_body = end_point_info.max_request_body;
 
     // mTLS is enforced only during the TLS handshake (bound to the connection's
     // SNI). If this request was routed by Host to an endpoint that requires a
@@ -439,6 +499,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             write_timeout,
             is_head,
             keep_alive,
+            http_connection_info.access.take(),
         )
         .await;
     }
@@ -459,7 +520,14 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         OAuthGateOutcome::Proceed => {}
         OAuthGateOutcome::Close => return ReaderStep::Close,
         OAuthGateOutcome::Answered(bytes) => {
-            return match emit_single_response(queue_tx, write_timeout, bytes).await {
+            return match emit_single_response(
+                queue_tx,
+                write_timeout,
+                bytes,
+                http_connection_info.access.take(),
+            )
+            .await
+            {
                 ReaderStep::Continue if !keep_alive => ReaderStep::Close,
                 other => other,
             };
@@ -509,6 +577,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
                 write_timeout,
                 is_head,
                 keep_alive,
+                http_connection_info.access.take(),
             )
             .await;
         }
@@ -533,6 +602,37 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             ProxyServerError::NotAuthorized,
         )
         .await;
+    }
+
+    // `rate_limit` of the endpoint and of the location - nginx's `limit_req`. Before `authorize`:
+    // guessing a key is limited as well.
+    if let Some(retry_after) =
+        end_point_info.rate_limit_refusal(location, &http_connection_info.connection_ip)
+    {
+        return too_many_requests(
+            queue_tx,
+            write_timeout,
+            retry_after,
+            http_connection_info.access.take(),
+        )
+        .await;
+    }
+
+    // `max_request_body`: a body which says it is larger is refused before anything goes
+    // upstream. One which does not say is cut as it passes the limit (`BodyChannelSink`).
+    if let (Some(max_request_body), crate::h1_utils::HttpContentLength::Known(size)) = (
+        end_point_info.max_request_body,
+        request_headers.content_length,
+    ) {
+        if size > max_request_body {
+            return respond_error(
+                queue_tx,
+                http_connection_info,
+                Some(&endpoint_for_error),
+                ProxyServerError::RequestBodyTooLarge,
+            )
+            .await;
+        }
     }
 
     let identity = match h1_reader
@@ -707,6 +807,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             bytes,
             is_head,
             keep_alive && request_was_read,
+            http_connection_info.access.take(),
         )
         .await;
     }
@@ -753,6 +854,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
             answer.bytes,
             is_head,
             keep_alive && request_was_read,
+            http_connection_info.access.take(),
         )
         .await;
     }
@@ -787,6 +889,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
         .send(ResponseSlot {
             events: response_rx,
             write_timeout,
+            access: http_connection_info.access.take(),
         })
         .await
         .is_err()
@@ -835,7 +938,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
 
     // Stream the request body to the worker. When done, drop body_tx so the
     // worker's body_rx closes.
-    let mut body_sink = BodyChannelSink::new(body_tx);
+    let mut body_sink = BodyChannelSink::new(body_tx, max_request_body);
     match h1_reader
         .transfer_body(0, &mut body_sink, content_length)
         .await
@@ -859,6 +962,7 @@ async fn refuse_the_path<ReadPart: NetworkStreamReadPart + Send + Sync + 'static
     write_timeout: Duration,
     is_head: bool,
     keep_alive: bool,
+    access: Option<crate::access_log::AccessRecord>,
 ) -> ReaderStep {
     // The head is still in the loop buffer: `compile_headers` drops it on the
     // way to a location, and this request gets to none.
@@ -877,6 +981,7 @@ async fn refuse_the_path<ReadPart: NetworkStreamReadPart + Send + Sync + 'static
         crate::error_templates::BAD_REQUEST.to_vec(),
         is_head,
         keep_alive && request_was_read,
+        access,
     )
     .await
 }
@@ -898,12 +1003,13 @@ async fn emit_own_response(
     mut response: Vec<u8>,
     is_head: bool,
     connection_goes_on: bool,
+    access: Option<crate::access_log::AccessRecord>,
 ) -> ReaderStep {
     if is_head {
         cut_the_body_off(&mut response);
     }
 
-    match emit_single_response(queue_tx, write_timeout, response).await {
+    match emit_single_response(queue_tx, write_timeout, response, access).await {
         ReaderStep::Continue if !connection_goes_on => ReaderStep::Close,
         other => other,
     }
@@ -955,16 +1061,43 @@ fn headers_added_to_a_response(
 
 /// Push a single fully-formed response (already-built bytes) as one ordered
 /// slot and keep the connection open. Returns `Close` only if the writer is gone.
+/// `429 Too Many Requests` of a `rate_limit`, with its `Retry-After` - and the end of the
+/// connection: a body of the request, if it has one, was not read.
+async fn too_many_requests(
+    queue_tx: &ResponseQueue,
+    write_timeout: Duration,
+    retry_after: u64,
+    access: Option<crate::access_log::AccessRecord>,
+) -> ReaderStep {
+    let body = crate::error_templates::generate_layout_body(429, "Too Many Requests", None);
+
+    let mut head = crate::h1_utils::Http1HeadersBuilder::new();
+    head.push_response_first_line(429);
+    head.push_header("Retry-After", &retry_after.to_string());
+    head.push_content_length(body.len());
+    head.push_header("Connection", "close");
+    head.push_cl_cr();
+
+    let mut response = head.into_bytes();
+    response.extend_from_slice(&body);
+
+    let _ = emit_single_response(queue_tx, write_timeout, response, access).await;
+
+    ReaderStep::Close
+}
+
 async fn emit_single_response(
     queue_tx: &ResponseQueue,
     write_timeout: Duration,
     bytes: Vec<u8>,
+    access: Option<crate::access_log::AccessRecord>,
 ) -> ReaderStep {
     let (tx, rx) = mpsc::channel::<ResponseEvent>(2);
     if queue_tx
         .send(ResponseSlot {
             events: rx,
             write_timeout,
+            access,
         })
         .await
         .is_err()
@@ -1013,6 +1146,7 @@ async fn respond_error(
             .send(ResponseSlot {
                 events: rx,
                 write_timeout: crate::consts::DEFAULT_WRITE_TIMEOUT,
+                access: http_connection_info.access.clone(),
             })
             .await
             .is_ok()

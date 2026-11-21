@@ -4,7 +4,9 @@ use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 
 use crate::{
-    configurations::HttpListenPortConfiguration, http_proxy_pass::*, tcp_listener::ConnectionCut,
+    configurations::HttpListenPortConfiguration,
+    http_proxy_pass::*,
+    tcp_listener::{ConnectionCut, ConnectionLifetime, SendTimeout, WatchedResponseBody},
     types::ConnectionIp,
 };
 
@@ -19,6 +21,9 @@ pub struct HttpRequestHandler {
     connection_ip: ConnectionIp,
     /// What a request cuts the connection with: see [`ConnectionCut`].
     pub cut: Arc<ConnectionCut>,
+    /// The requests of the connection, and when it is closed for them: see
+    /// [`ConnectionLifetime`].
+    pub lifetime: Arc<ConnectionLifetime>,
 }
 
 impl HttpRequestHandler {
@@ -30,6 +35,7 @@ impl HttpRequestHandler {
             endpoints: LiveEndpointCache::new(listen_port_config),
             connection_ip,
             cut: ConnectionCut::new(),
+            lifetime: ConnectionLifetime::new(),
         }
     }
 
@@ -155,9 +161,13 @@ impl HttpRequestHandler {
         &self,
         req: hyper::Request<hyper::body::Incoming>,
     ) -> hyper::Result<hyper::Response<BoxBody<Bytes, String>>> {
+        let request = self.lifetime.request_started();
+        let mut access =
+            crate::access_log::record_of_hyper_request(&req, self.connection_ip.get_ip_log());
+
         let proxy_pass = match self.get_http_proxy_pass(&req).await {
             Ok(proxy_pass) => proxy_pass,
-            Err(rejected) => return Ok(*rejected),
+            Err(rejected) => return Ok(self.watched(*rejected, request, None, access)),
         };
 
         // Who the request is of. A `cloudflare: true` endpoint reached otherwise than through
@@ -170,7 +180,43 @@ impl HttpRequestHandler {
             return Ok(super::utils::answer_of_a_cut_connection());
         };
 
-        super::handle_requests::handle_requests(req, &proxy_pass, client, &self.cut).await
+        // Behind Cloudflare the client is the one of `CF-Connecting-IP`.
+        if let Some(access) = access.as_mut() {
+            access.set_client(client.ip.get_ip_log());
+        }
+
+        let response =
+            super::handle_requests::handle_requests(req, &proxy_pass, client, &self.cut).await?;
+
+        Ok(self.watched(response, request, Some(&proxy_pass), access))
+    }
+
+    /// `response` as it goes out: on the connection until it is out, and not held longer than
+    /// the endpoint's `write_timeout` by a client which takes nothing of it. See
+    /// [`WatchedResponseBody`].
+    fn watched(
+        &self,
+        response: hyper::Response<BoxBody<Bytes, String>>,
+        request: crate::tcp_listener::ActiveRequest,
+        proxy_pass: Option<&HttpProxyPass>,
+        access: Option<crate::access_log::AccessRecord>,
+    ) -> hyper::Response<BoxBody<Bytes, String>> {
+        use http_body_util::BodyExt;
+
+        let send_timeout = SendTimeout {
+            cut: self.cut.clone(),
+            timeout: proxy_pass
+                .map(|proxy_pass| proxy_pass.endpoint_info.timeouts.write_timeout)
+                .unwrap_or(crate::consts::DEFAULT_WRITE_TIMEOUT),
+            endpoint: proxy_pass.map(|proxy_pass| proxy_pass.endpoint_info.clone()),
+            ip: self.connection_ip.get_ip_log(),
+        };
+
+        let status = response.status().as_u16();
+
+        response.map(|body| {
+            WatchedResponseBody::new(body, request, send_timeout, access, status).boxed()
+        })
     }
 
     pub async fn dispose(&self) {

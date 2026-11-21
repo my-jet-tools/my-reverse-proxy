@@ -35,6 +35,9 @@ pub struct ResponseSlot {
     /// Client-side write timeout for this response (endpoint-scoped, known once
     /// the route is resolved).
     pub write_timeout: Duration,
+    /// The line of the access log of the request this answers: written by the writer once the
+    /// answer is out, with its status and the bytes of its body.
+    pub access: Option<crate::access_log::AccessRecord>,
 }
 
 /// Bounded capacity of a single response's event channel. Bounds memory for a
@@ -82,11 +85,19 @@ impl H1Writer for ChannelSink {
 /// closes the connection.
 pub struct BodyChannelSink {
     tx: mpsc::Sender<Vec<u8>>,
+    /// `max_request_body`: past so many bytes the body is cut - as a body which stopped coming
+    /// is. Counted as the body comes on the wire, the framing of its chunks with it.
+    max_size: Option<usize>,
+    passed: usize,
 }
 
 impl BodyChannelSink {
-    pub fn new(tx: mpsc::Sender<Vec<u8>>) -> Self {
-        Self { tx }
+    pub fn new(tx: mpsc::Sender<Vec<u8>>, max_size: Option<usize>) -> Self {
+        Self {
+            tx,
+            max_size,
+            passed: 0,
+        }
     }
 }
 
@@ -98,6 +109,14 @@ impl H1Writer for BodyChannelSink {
         buffer: &[u8],
         _timeout: Duration,
     ) -> Result<(), NetworkError> {
+        self.passed = self.passed.saturating_add(buffer.len());
+
+        if self.max_size.is_some_and(|max_size| self.passed > max_size) {
+            return Err(NetworkError::IoError(std::io::Error::other(
+                "the request body is larger than max_request_body",
+            )));
+        }
+
         self.tx
             .send(buffer.to_vec())
             .await

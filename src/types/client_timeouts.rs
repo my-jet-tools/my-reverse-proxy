@@ -15,6 +15,8 @@ pub struct ClientTimeouts {
     /// h2 PINGs to the client, and how long an answer may take.
     pub h2_keep_alive_interval: Duration,
     pub h2_keep_alive_timeout: Duration,
+    /// An h2 connection with no request on it for this long is closed with a GOAWAY.
+    pub h2_idle_timeout: Duration,
 }
 
 impl Default for ClientTimeouts {
@@ -24,6 +26,7 @@ impl Default for ClientTimeouts {
             tls_handshake_timeout: crate::consts::DEFAULT_TLS_HANDSHAKE_TIMEOUT,
             h2_keep_alive_interval: crate::consts::DEFAULT_CLIENT_H2_KEEP_ALIVE_INTERVAL,
             h2_keep_alive_timeout: crate::consts::DEFAULT_CLIENT_H2_KEEP_ALIVE_TIMEOUT,
+            h2_idle_timeout: crate::consts::DEFAULT_CLIENT_H2_IDLE_TIMEOUT,
         }
     }
 }
@@ -36,8 +39,11 @@ impl ClientTimeouts {
         Self {
             header_read_timeout: self.header_read_timeout.max(other.header_read_timeout),
             tls_handshake_timeout: self.tls_handshake_timeout.max(other.tls_handshake_timeout),
-            h2_keep_alive_interval: self.h2_keep_alive_interval.max(other.h2_keep_alive_interval),
+            h2_keep_alive_interval: self
+                .h2_keep_alive_interval
+                .max(other.h2_keep_alive_interval),
             h2_keep_alive_timeout: self.h2_keep_alive_timeout.max(other.h2_keep_alive_timeout),
+            h2_idle_timeout: self.h2_idle_timeout.max(other.h2_idle_timeout),
         }
     }
 }

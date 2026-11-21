@@ -33,6 +33,8 @@ pub struct ProxyPassLocationConfig {
     /// `strip_path` of the settings: the upstream gets the request target without the part of
     /// the path which picked this location (`crate::types::strip_location_path`).
     pub strip_path: bool,
+    /// `rate_limit` of the location: on top of the one of its endpoint.
+    pub rate_limit: Option<std::sync::Arc<crate::types::RateLimiter>>,
     /// The upstream of an h2 location as the h1 pipeline sends to it - built at the first
     /// request and kept for as long as these settings are. See [`Self::h2_upstream`].
     h2_upstream: tokio::sync::OnceCell<std::sync::Arc<HttpProxyPassContentSource>>,
@@ -48,6 +50,7 @@ impl ProxyPassLocationConfig {
         listen_host: &str,
         endpoint_api_keys_auth: Option<&str>,
         whitelisted_country: Option<std::sync::Arc<crate::types::CountryWhiteList>>,
+        rate_limit: Option<std::sync::Arc<crate::types::RateLimiter>>,
     ) -> Self {
         let mut modify_request_headers = ModifyHeadersConfig::default();
         let mut modify_response_headers = ModifyHeadersConfig::default();
@@ -77,6 +80,7 @@ impl ProxyPassLocationConfig {
                 endpoint_api_keys_auth,
             ),
             strip_path: location_settings.get_strip_path(),
+            rate_limit,
             h2_upstream: tokio::sync::OnceCell::new(),
         }
     }

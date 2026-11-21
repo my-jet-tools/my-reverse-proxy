@@ -95,6 +95,11 @@ pub struct LocationSettings {
     pub auth_header: Option<String>,
     pub allowed_hosts: Option<Vec<String>>,
     pub strip_path: Option<bool>,
+    /// The requests one client may make to the location - `10/s`, `600/m`, `100/h` - on top of
+    /// the `rate_limit` of its endpoint. Over it: `429`. See [`crate::types::RateLimiter`].
+    pub rate_limit: Option<String>,
+    /// The requests of `rate_limit` a client may make at once. Absent: the number of the rate.
+    pub rate_limit_burst: Option<u32>,
     #[serde(flatten)]
     pub timeouts: TimeoutsSettings,
 }

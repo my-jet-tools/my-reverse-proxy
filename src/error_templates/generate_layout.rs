@@ -39,6 +39,16 @@ pub static UPSTREAM_IS_NOT_HTTP: LazyLock<Vec<u8>> = LazyLock::new(|| {
     )
 });
 
+/// The head of a request is larger than `max_request_head_size`. The connection is closed after
+/// it: what follows the head was not read.
+pub static REQUEST_HEAD_TOO_LARGE: LazyLock<Vec<u8>> =
+    LazyLock::new(|| generate_layout_with_close(431, "Request Header Fields Too Large", None));
+
+/// The body of a request says it is larger than `max_request_body`. The connection is closed
+/// after it: the body was not read.
+pub static REQUEST_BODY_TOO_LARGE: LazyLock<Vec<u8>> =
+    LazyLock::new(|| generate_layout_with_close(413, "Payload Too Large", None));
+
 pub static NOT_AUTHORIZED_PAGE: LazyLock<Vec<u8>> =
     LazyLock::new(|| generate_layout(401, "Not authorized request", None));
 

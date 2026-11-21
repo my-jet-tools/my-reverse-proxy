@@ -9,6 +9,7 @@ pub async fn handle_connection(
     configuration: Arc<TcpEndpointHostConfig>,
     gateway_id: &Arc<String>,
     remote_endpoint: Arc<RemoteEndpointOwned>,
+    slot: crate::app::ConnectionSlot,
 ) {
     let connection_ip = accepted_server_connection.get_addr();
     if configuration.debug {
@@ -76,6 +77,7 @@ pub async fn handle_connection(
             proxy_connection,
             None,
             configuration.timeouts,
+            slot,
         ),
     );
 }

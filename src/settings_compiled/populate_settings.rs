@@ -311,10 +311,32 @@ impl SettingsCompiled {
                 debug_ip: itm.debug_ip,
                 pool_supervisor_interval: itm.pool_supervisor_interval,
                 secure_store_file: variables.apply_variables_opt(itm.secure_store_file)?,
+                max_buffered_request_body: variables
+                    .apply_variables_opt(itm.max_buffered_request_body)?,
+                max_buffered_request_bodies_total: variables
+                    .apply_variables_opt(itm.max_buffered_request_bodies_total)?,
+                max_requests_per_connection: itm.max_requests_per_connection,
+                max_request_head_size: variables.apply_variables_opt(itm.max_request_head_size)?,
+                h2_max_concurrent_streams: itm.h2_max_concurrent_streams,
+                h2_max_header_list_size: variables
+                    .apply_variables_opt(itm.h2_max_header_list_size)?,
+                max_request_body: variables.apply_variables_opt(itm.max_request_body)?,
+                tls_min_version: variables.apply_variables_opt(itm.tls_min_version)?,
+                access_log: variables.apply_variables_opt(itm.access_log)?,
+                access_log_max_size: variables.apply_variables_opt(itm.access_log_max_size)?,
+                access_log_files: itm.access_log_files,
+                max_connections: itm.max_connections,
+                max_connections_per_ip: itm.max_connections_per_ip,
                 timeouts: itm.timeouts,
             };
 
             global_settings.get_control_unix_socket()?;
+            global_settings.get_buffered_body_limits()?;
+            global_settings.get_connection_settings()?;
+            global_settings.get_connection_limits()?;
+            global_settings.get_max_request_body()?;
+            global_settings.get_tls_min_version()?;
+            global_settings.get_access_log()?;
 
             self.global_settings = Some(global_settings);
         }
@@ -610,6 +632,14 @@ pub fn compile_host(
             hsts: host_settings.endpoint.hsts,
             mcp_buffer_size: variables
                 .apply_variables_opt(host_settings.endpoint.mcp_buffer_size)?,
+            max_buffered_request_body: variables
+                .apply_variables_opt(host_settings.endpoint.max_buffered_request_body)?,
+            max_request_body: variables
+                .apply_variables_opt(host_settings.endpoint.max_request_body)?,
+            tls_min_version: variables
+                .apply_variables_opt(host_settings.endpoint.tls_min_version)?,
+            rate_limit: variables.apply_variables_opt(host_settings.endpoint.rate_limit)?,
+            rate_limit_burst: host_settings.endpoint.rate_limit_burst,
             timeouts: host_settings.endpoint.timeouts,
         },
         locations,
@@ -685,6 +715,8 @@ fn compile_locations(
             auth_header: None,
             allowed_hosts: location.allowed_hosts,
             strip_path: location.strip_path,
+            rate_limit: variables.apply_variables_opt(location.rate_limit)?,
+            rate_limit_burst: location.rate_limit_burst,
             timeouts: location.timeouts,
         });
     }

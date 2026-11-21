@@ -820,6 +820,60 @@ impl SettingsCompiled {
             .unwrap_or_default()
     }
 
+    /// The limits of the request bodies an endpoint holds in memory: `endpoint_max_body` - its own
+    /// `max_buffered_request_body` - else the one of `global_settings`, and the total of
+    /// `global_settings`.
+    pub fn get_buffered_body_limits(
+        &self,
+        endpoint_max_body: Option<&str>,
+    ) -> Result<crate::types::BufferedBodyLimits, String> {
+        let global = self.global_settings.as_ref();
+
+        crate::types::BufferedBodyLimits::resolve(
+            global.and_then(|g| g.max_buffered_request_body.as_deref()),
+            global.and_then(|g| g.max_buffered_request_bodies_total.as_deref()),
+            endpoint_max_body,
+        )
+    }
+
+    /// `max_request_body` of an endpoint whose own is `endpoint_max_request_body`: else the one
+    /// of `global_settings`.
+    pub fn get_max_request_body(
+        &self,
+        endpoint_max_request_body: Option<&str>,
+    ) -> Result<Option<usize>, String> {
+        crate::types::resolve_max_request_body(
+            self.global_settings
+                .as_ref()
+                .and_then(|g| g.max_request_body.as_deref()),
+            endpoint_max_request_body,
+        )
+    }
+
+    /// `access_log` of `global_settings`: `None` - no access log.
+    pub fn get_access_log(&self) -> Result<Option<crate::access_log::AccessLogSettings>, String> {
+        match self.global_settings.as_ref() {
+            Some(global_settings) => global_settings.get_access_log(),
+            None => Ok(None),
+        }
+    }
+
+    /// `max_connections` and `max_connections_per_ip`, out of `global_settings`.
+    pub fn get_connection_limits(&self) -> Result<crate::app::ConnectionLimitsSettings, String> {
+        match self.global_settings.as_ref() {
+            Some(global_settings) => global_settings.get_connection_limits(),
+            None => Ok(crate::app::ConnectionLimitsSettings::default()),
+        }
+    }
+
+    /// The limits of a client connection, out of `global_settings`.
+    pub fn get_connection_settings(&self) -> Result<crate::types::ConnectionSettings, String> {
+        match self.global_settings.as_ref() {
+            Some(global_settings) => global_settings.get_connection_settings(),
+            None => Ok(crate::types::ConnectionSettings::default()),
+        }
+    }
+
     pub fn get_pool_supervisor_interval(&self) -> std::time::Duration {
         let value = self
             .global_settings

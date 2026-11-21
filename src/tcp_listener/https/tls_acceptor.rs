@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use my_tls::tokio_rustls;
 
-use tokio_rustls::rustls::{
-    version::{TLS12, TLS13},
-    ServerConfig,
-};
+use tokio_rustls::rustls::ServerConfig;
 
 use super::*;
 use crate::configurations::*;
@@ -144,10 +141,11 @@ pub async fn create_config(
             http_endpoint_info.client_certificate_unlimited_expiration,
         ));
 
-        let mut server_config =
-            tokio_rustls::rustls::ServerConfig::builder_with_protocol_versions(&[&TLS12, &TLS13])
-                .with_client_cert_verifier(client_cert_verifier)
-                .with_cert_resolver(Arc::new(MyCertResolver::new(ssl_cert_key)));
+        let mut server_config = tokio_rustls::rustls::ServerConfig::builder_with_protocol_versions(
+            http_endpoint_info.tls_min_version.protocol_versions(),
+        )
+        .with_client_cert_verifier(client_cert_verifier)
+        .with_cert_resolver(Arc::new(MyCertResolver::new(ssl_cert_key)));
 
         //.with_cert_resolver(Arc::new(MyCertResolver::new(certified_key)));
 
@@ -161,10 +159,11 @@ pub async fn create_config(
         return Ok((server_config, http_endpoint_info, Some(client_cert_cell)));
     }
 
-    let mut server_config =
-        tokio_rustls::rustls::ServerConfig::builder_with_protocol_versions(&[&TLS12, &TLS13])
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(MyCertResolver::new(ssl_cert_key)));
+    let mut server_config = tokio_rustls::rustls::ServerConfig::builder_with_protocol_versions(
+        http_endpoint_info.tls_min_version.protocol_versions(),
+    )
+    .with_no_client_auth()
+    .with_cert_resolver(Arc::new(MyCertResolver::new(ssl_cert_key)));
 
     server_config.alpn_protocols =
         get_alpn_protocol(!http_endpoint_info.listen_endpoint_type.is_http1_or_mcp());

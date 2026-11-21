@@ -159,6 +159,20 @@ impl HttpListenPortConfiguration {
         })
     }
 
+    /// The limits of a client connection of the port before it is known which endpoint the
+    /// connection is for: the largest of its endpoints'. See [`Self::client_timeouts`].
+    pub fn connection_settings(&self) -> crate::types::ConnectionSettings {
+        let mut endpoints = self.endpoints.iter();
+
+        let Some(first) = endpoints.next() else {
+            return crate::types::ConnectionSettings::default();
+        };
+
+        endpoints.fold(first.connection_settings, |result, endpoint_info| {
+            result.largest(&endpoint_info.connection_settings)
+        })
+    }
+
     /// The endpoint a request for `server_name` is served by: the one with this very name - of a
     /// host, or of a name of its `additional_hosts` - and, if none has it, the endpoint without a
     /// name, which serves whatever no other endpoint of the port is named for. `None` for

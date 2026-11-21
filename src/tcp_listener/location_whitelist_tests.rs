@@ -1294,9 +1294,10 @@ async fn x_forwarded_user_is_the_cn_of_a_client_certificate() {
 }
 
 /// The h1 pipeline passes a head on as the client wrote it, so a client can spell the header in
-/// ways a lenient upstream still reads as it: whitespace before the colon, a folded line, `_` for
-/// `-`. None of them gets through. (hyper refuses such a head itself, so only this path is
-/// probed.)
+/// ways a lenient upstream still reads as it. `_` for `-` is a name of its own: the request is
+/// served, without it. Whitespace before the colon, or a folded line, is no header line at all:
+/// the request is refused, as nginx refuses it, and nothing of it reaches the upstream. (hyper
+/// refuses such a head itself, so only this path is probed.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn x_forwarded_user_spelled_to_slip_through_does_not_reach_the_upstream() {
     let upstream = Upstream::start().await;
@@ -1312,36 +1313,51 @@ async fn x_forwarded_user_spelled_to_slip_through_does_not_reach_the_upstream() 
     .await;
     serve(port);
 
-    let mut stream = connect(port).await;
-    let request = format!(
-        "GET / HTTP/1.1\r\nHost: localhost:{port}\r\nX-Forwarded-User : spaced\r\nX-Forwarded-User\t: tabbed\r\nX-Other: kept\r\n X-Forwarded-User: folded\r\nX_Forwarded_User: underscored\r\n\r\n"
-    );
-    stream.write_all(request.as_bytes()).await.unwrap();
+    /// The answer to a `GET /` with `lines` among its headers: up to the body of the upstream,
+    /// or up to the close.
+    async fn answer(port: u16, lines: &str) -> String {
+        let mut stream = connect(port).await;
+        let request = format!("GET / HTTP/1.1\r\nHost: localhost:{port}\r\n{lines}\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
 
-    let mut response = Vec::new();
-    let read_until_the_body = async {
-        let mut buffer = [0u8; 4096];
-        while !String::from_utf8_lossy(&response).contains(UPSTREAM_BODY) {
-            let read = stream.read(&mut buffer).await.unwrap();
-            if read == 0 {
-                break;
+        let mut response = Vec::new();
+        let read_until_the_body = async {
+            let mut buffer = [0u8; 4096];
+            while !String::from_utf8_lossy(&response).contains(UPSTREAM_BODY) {
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                response.extend_from_slice(&buffer[..read]);
             }
-            response.extend_from_slice(&buffer[..read]);
-        }
-    };
-    let _ = tokio::time::timeout(TIMEOUT, read_until_the_body).await;
+        };
+        let _ = tokio::time::timeout(TIMEOUT, read_until_the_body).await;
 
-    let response = String::from_utf8_lossy(&response).to_string();
+        String::from_utf8_lossy(&response).to_string()
+    }
+
+    let response = answer(port, "X-Other: kept\r\nX_Forwarded_User: underscored\r\n").await;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
     let requests = upstream.requests();
     assert_eq!(requests.len(), 1, "{requests:?}");
-
-    for spelling in ["spaced", "tabbed", "folded", "underscored"] {
-        assert!(!requests[0].contains(spelling), "{}", requests[0]);
-    }
+    assert!(!requests[0].contains("underscored"), "{}", requests[0]);
     assert_eq!(forwarded_user_lines(&requests[0]), Vec::<String>::new());
     assert!(requests[0].contains("x-other: kept"), "{}", requests[0]);
+
+    for lines in [
+        "X-Forwarded-User : spaced\r\n",
+        "X-Forwarded-User\t: tabbed\r\n",
+        "X-Other: kept\r\n X-Forwarded-User: folded\r\n",
+    ] {
+        let response = answer(port, lines).await;
+        assert!(
+            !response.starts_with("HTTP/1.1 200"),
+            "{lines:?}: {response}"
+        );
+    }
+
+    assert_eq!(upstream.requests().len(), 1, "{:?}", upstream.requests());
 }
 
 /// An endpoint of `endpoint`'s type in front of the upstream, with `endpoint_lines` added to it,

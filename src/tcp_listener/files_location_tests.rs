@@ -745,6 +745,7 @@ async fn start_host(
                         tcp_stream,
                         client_addr,
                         configuration.clone(),
+                        crate::app::ConnectionSlot::unlimited(),
                     );
                 }
                 ListenHttpEndpointType::Http2 => {
@@ -752,6 +753,7 @@ async fn start_host(
                         (tcp_stream, client_addr).into(),
                         listening_addr.into(),
                         configuration.clone(),
+                        crate::app::ConnectionSlot::unlimited(),
                     )
                     .await;
                 }
@@ -762,6 +764,7 @@ async fn start_host(
                         listening_addr,
                         configuration.clone(),
                         connection_id,
+                        crate::app::ConnectionSlot::unlimited(),
                     );
                 }
             }

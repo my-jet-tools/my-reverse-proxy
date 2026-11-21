@@ -9,6 +9,7 @@ pub async fn handle_connection(
 
     configuration: Arc<TcpEndpointHostConfig>,
     remote_host: Arc<RemoteEndpointOwned>,
+    slot: crate::app::ConnectionSlot,
 ) {
     let socket_addr = accepted_server_connection.get_addr();
 
@@ -57,6 +58,7 @@ pub async fn handle_connection(
             remote_tcp_connection_result,
             None,
             configuration.timeouts,
+            slot,
         ),
     );
 }

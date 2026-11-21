@@ -7,6 +7,7 @@ use timers::{
     ResolveDomainsIpTimer, SslCertsRefreshTimer, TrafficTimer,
 };
 
+mod access_log;
 mod api_keys;
 mod app;
 mod cloudflare;

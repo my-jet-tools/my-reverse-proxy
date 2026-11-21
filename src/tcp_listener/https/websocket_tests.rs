@@ -395,6 +395,7 @@ async fn start_https2_endpoint_with(upstream: &UpstreamSocket, endpoint_settings
                 listening_addr,
                 configuration.clone(),
                 connection_id,
+                crate::app::ConnectionSlot::unlimited(),
             );
         }
     });

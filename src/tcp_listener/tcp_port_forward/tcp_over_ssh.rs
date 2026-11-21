@@ -11,6 +11,7 @@ pub async fn handle_connection(
     configuration: Arc<TcpEndpointHostConfig>,
     ssh_credentials: &Arc<SshCredentials>,
     remote_endpoint: Arc<RemoteEndpointOwned>,
+    slot: crate::app::ConnectionSlot,
 ) {
     let ssh_session_handler = APP_CTX.ssh_sessions_pool.get(ssh_credentials);
 
@@ -63,6 +64,7 @@ pub async fn handle_connection(
             ssh_channel,
             None,
             configuration.timeouts,
+            slot,
         ),
     );
 }

@@ -188,6 +188,7 @@ async fn start_endpoint_with_location_ids(
                         tcp_stream,
                         client_addr,
                         configuration.clone(),
+                        crate::app::ConnectionSlot::unlimited(),
                     );
                 }
                 _ => {
@@ -195,6 +196,7 @@ async fn start_endpoint_with_location_ids(
                         (tcp_stream, client_addr).into(),
                         listening_addr.into(),
                         configuration.clone(),
+                        crate::app::ConnectionSlot::unlimited(),
                     )
                     .await;
                 }

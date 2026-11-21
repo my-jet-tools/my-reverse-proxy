@@ -23,6 +23,11 @@ pub struct HttpConnectionInfo {
     pub listen_config: Arc<HttpListenPortConfiguration>,
     /// `AppConfiguration::generation` at the moment `listen_config` was taken.
     config_generation: u64,
+    /// The requests read off the connection so far: see `max_requests_per_connection`.
+    pub requests: u32,
+    /// The line of the access log of the request being served, until its answer takes it
+    /// (`ResponseSlot::access`). `None` while the log is off.
+    pub access: Option<crate::access_log::AccessRecord>,
 }
 
 impl HttpConnectionInfo {
@@ -40,6 +45,8 @@ impl HttpConnectionInfo {
             endpoint_info,
             listen_config,
             config_generation: crate::app::APP_CTX.current_configuration.generation(),
+            requests: 0,
+            access: None,
         }
     }
 
@@ -98,18 +105,20 @@ pub async fn kick_h1_reverse_proxy_server(
     super::serve_reverse_proxy_pipelined(server_stream, http_connection_info).await;
 }
 
+/// `slot`: the connection's place among the ones held (`max_connections`), given back with it.
 pub fn kick_h1_tcp_reverse_proxy_server_from_http(
     accepted_connection: tokio::net::TcpStream,
     connection_ip: impl Into<ConnectionIp>,
     listen_config: Arc<HttpListenPortConfiguration>,
+    slot: crate::app::ConnectionSlot,
 ) {
     let http_connection_info =
         HttpConnectionInfo::new(connection_ip.into(), None, None, listen_config);
 
-    crate::app::spawn_named(
-        "h1_tcp_server_connection",
-        super::serve_reverse_proxy_pipelined(accepted_connection, http_connection_info),
-    );
+    crate::app::spawn_named("h1_tcp_server_connection", async move {
+        let _slot = slot;
+        super::serve_reverse_proxy_pipelined(accepted_connection, http_connection_info).await;
+    });
 }
 
 #[cfg(unix)]

@@ -62,6 +62,39 @@ impl Http1Headers {
         Ok(Self::parse_after_first_line(src, first_line_end))
     }
 
+    /// The head of a client's request: [`Self::try_parse`] - and an error for a head which could
+    /// be read another way than this one.
+    ///
+    /// The lines of a request head go upstream as they came (`compile_head`), and the upstream
+    /// finds where the request ends by them on its own. Where it could find another end than
+    /// the proxy does, it would read a second request out of the body of the first, and serve it
+    /// past every check of the location (request smuggling). So such a head is refused, as nginx
+    /// refuses it:
+    /// - `Content-Length` and `Transfer-Encoding` together - an upstream goes by the second;
+    /// - `Content-Length` twice, or one which is not a number;
+    /// - `Transfer-Encoding` twice, or other than `chunked`;
+    /// - a line which is not `name: value`: no colon, or a byte of no token in the name -
+    ///   whitespace before the colon, a folded line;
+    /// - a control character in a value: a lone LF, which an upstream may take for the end of a
+    ///   line (RFC 9112 §2.2), a lone CR, a NUL;
+    /// - `Host` twice: the proxy routes by one of them, the upstream may take the other.
+    pub fn try_parse_request(src: &[u8]) -> Result<Option<Self>, &'static str> {
+        let parsed = Self::try_parse(src)?;
+
+        // The head is whole once the empty line is there. Until then, more is read.
+        if src.find_sequence_pos(b"\r\n\r\n", 0).is_none() {
+            return Ok(None);
+        }
+
+        let Some(headers) = parsed else {
+            return Err("A request head which does not parse");
+        };
+
+        verify_request_lines(src, &headers)?;
+
+        Ok(Some(headers))
+    }
+
     fn parse_after_first_line(src: &[u8], first_line_end: usize) -> Option<Self> {
         const HOST_HEADER: &[u8] = b"host";
         const COOKIE_HEADER: &[u8] = b"cookie";
@@ -214,6 +247,99 @@ impl Http1Headers {
     }
 }
 
+/// The checks of [`Http1Headers::try_parse_request`] on the lines of a whole head.
+fn verify_request_lines(src: &[u8], headers: &Http1Headers) -> Result<(), &'static str> {
+    let mut content_lengths = 0;
+    let mut transfer_encodings = 0;
+    let mut hosts = 0;
+
+    let mut pos = headers.first_line_end + crate::consts::HTTP_CR_LF.len();
+    // Where the empty line which ends the head starts.
+    let end = headers.end - crate::consts::HTTP_CR_LF.len();
+
+    while pos < end {
+        let line_end = src
+            .find_sequence_pos(crate::consts::HTTP_CR_LF, pos)
+            .unwrap_or(end);
+        let line = &src[pos..line_end];
+        pos = line_end + crate::consts::HTTP_CR_LF.len();
+
+        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+            return Err("A header line with no colon");
+        };
+
+        let name = &line[..colon];
+        let value = &line[colon + 1..];
+
+        if name.is_empty() || !name.iter().all(|byte| is_token_byte(*byte)) {
+            return Err("A header name which is not a token");
+        }
+
+        if !value.iter().all(|byte| is_field_value_byte(*byte)) {
+            return Err("A control character in a header value");
+        }
+
+        if name.eq_ignore_ascii_case(b"content-length") {
+            content_lengths += 1;
+
+            let value = trim_whitespace(value);
+            if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+                return Err("A Content-Length which is not a number");
+            }
+        } else if name.eq_ignore_ascii_case(b"transfer-encoding") {
+            transfer_encodings += 1;
+
+            if !trim_whitespace(value).eq_ignore_ascii_case(b"chunked") {
+                return Err("A Transfer-Encoding other than chunked");
+            }
+        } else if name.eq_ignore_ascii_case(b"host") {
+            hosts += 1;
+        }
+    }
+
+    if content_lengths > 1 {
+        return Err("Content-Length twice");
+    }
+
+    if transfer_encodings > 1 {
+        return Err("Transfer-Encoding twice");
+    }
+
+    if content_lengths > 0 && transfer_encodings > 0 {
+        return Err("Content-Length and Transfer-Encoding together");
+    }
+
+    if hosts > 1 {
+        return Err("Host twice");
+    }
+
+    Ok(())
+}
+
+/// `tchar` of RFC 9110: what a header name is made of.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// What a header value may have in it (RFC 9110 §5.5): visible characters, space and tab, and
+/// the bytes above ASCII - no other control character.
+fn is_field_value_byte(byte: u8) -> bool {
+    matches!(byte, b'\t' | b' '..=b'~' | 0x80..=0xFF)
+}
+
+fn trim_whitespace(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t'))
+        .map_or(start, |pos| pos + 1);
+
+    &value[start..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +467,111 @@ mod optional_whitespace_tests {
 
         let host = headers.host_value.expect("host must be found");
         assert_eq!(&src[host.start..host.end], b"localhost:8801");
+    }
+}
+
+#[cfg(test)]
+mod request_framing_tests {
+    use super::*;
+
+    fn request(lines: &[u8]) -> Vec<u8> {
+        let mut src = b"POST /x HTTP/1.1\r\nHost: example.com\r\n".to_vec();
+        src.extend_from_slice(lines);
+        src.extend_from_slice(b"\r\n");
+        src
+    }
+
+    #[test]
+    fn a_head_read_one_way_only_is_taken() {
+        for (lines, framing) in [
+            (&b""[..], HttpContentLength::None),
+            (b"Content-Length: 5\r\n", HttpContentLength::Known(5)),
+            (b"content-length:5\r\n", HttpContentLength::Known(5)),
+            (b"Content-Length: \t007 \r\n", HttpContentLength::Known(7)),
+            (
+                b"Transfer-Encoding: Chunked\r\n",
+                HttpContentLength::Chunked,
+            ),
+            (
+                b"transfer-encoding:chunked \r\n",
+                HttpContentLength::Chunked,
+            ),
+            // A value may have tabs, and bytes above ASCII - UTF-8, a file name.
+            (b"X-Note: a\tb \xd1\x84\r\n", HttpContentLength::None),
+            (b"X-Empty:\r\n", HttpContentLength::None),
+            (b"X-Odd_Name.1~: v\r\n", HttpContentLength::None),
+        ] {
+            let src = request(lines);
+            let shown = String::from_utf8_lossy(lines);
+
+            let headers = Http1Headers::try_parse_request(&src)
+                .unwrap_or_else(|err| panic!("{shown:?}: {err}"))
+                .unwrap_or_else(|| panic!("{shown:?}: not whole"));
+
+            assert_eq!(headers.content_length, framing, "{shown:?}");
+            assert_eq!(headers.end, src.len(), "{shown:?}");
+        }
+    }
+
+    #[test]
+    fn a_head_which_could_be_read_two_ways_is_refused() {
+        for lines in [
+            "Content-Length: 1\r\nTransfer-Encoding: chunked\r\n",
+            "Transfer-Encoding: chunked\r\nContent-Length: 1\r\n",
+            "Content-Length: 1\r\nContent-Length: 2\r\n",
+            "Content-Length: 1\r\nContent-Length: 1\r\n",
+            "Content-Length: +1\r\n",
+            "Content-Length: -1\r\n",
+            "Content-Length: 1, 1\r\n",
+            "Content-Length: 1 1\r\n",
+            "Content-Length:\r\n",
+            "Content-Length: 99999999999999999999999\r\n",
+            "Transfer-Encoding: gzip, chunked\r\n",
+            "Transfer-Encoding: chunked, chunked\r\n",
+            "Transfer-Encoding: identity\r\n",
+            "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n",
+            "Transfer-Encoding : chunked\r\n",
+            "Transfer-Encoding\t: chunked\r\n",
+            " Transfer-Encoding: chunked\r\n",
+            "Transfer-Encoding:\r\n chunked\r\n",
+            "X-Note: a\nTransfer-Encoding: chunked\r\n",
+            "X-Note: a\rb\r\n",
+            "X-Note: a\0b\r\n",
+            "X-Note: a\x7fb\r\n",
+            "X Note: a\r\n",
+            "Host: other.example.com\r\n",
+            "A line with no colon\r\n",
+            ": a value with no name\r\n",
+        ] {
+            let src = request(lines.as_bytes());
+
+            assert!(
+                Http1Headers::try_parse_request(&src).is_err(),
+                "{lines:?} was taken"
+            );
+        }
+    }
+
+    #[test]
+    fn a_head_which_is_not_whole_yet_is_waited_for() {
+        for src in [
+            "POST /x HTTP/1.1\r\nHost: example.com\r\n".as_bytes(),
+            b"POST /x HTTP/1.1\r\nHost: example.com\r\nContent-Length: 1\r\nTransfer-Encoding: ch",
+            b"POST /x HTTP/1.1\r\nA line with no colon\r\n",
+        ] {
+            assert!(
+                matches!(Http1Headers::try_parse_request(src), Ok(None)),
+                "{:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+    }
+
+    #[test]
+    fn the_head_of_a_response_is_read_as_before() {
+        // An upstream is not held to the rules of a client's request.
+        let src = b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n";
+        let headers = Http1Headers::try_parse(src).unwrap().unwrap();
+        assert_eq!(headers.content_length, HttpContentLength::Known(2));
     }
 }

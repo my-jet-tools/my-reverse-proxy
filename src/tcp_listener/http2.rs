@@ -11,10 +11,12 @@ use crate::{
 
 use super::http_request_handler::http::HttpRequestHandler;
 
+/// `slot`: the connection's place among the ones held (`max_connections`), given back with it.
 pub async fn handle_connection(
     accepted_connection: AcceptedServerConnection,
     listen_host: ListenHost,
     configuration: Arc<HttpListenPortConfiguration>,
+    slot: crate::app::ConnectionSlot,
 ) {
     let listening_addr_str =
         listen_host.to_pretty_string(configuration.listen_endpoint_type.is_https());
@@ -22,6 +24,7 @@ pub async fn handle_connection(
     // Which endpoint of the port a connection is for is known only from its requests: until
     // then the port's client timeouts (the longest of its endpoints') apply.
     let client_timeouts = configuration.client_timeouts();
+    let connection_settings = configuration.connection_settings();
 
     // The h2 PINGs need a timer; a client which stopped answering them is cut. What comes before
     // the first request - the client preface, the first HEADERS - is timed below.
@@ -30,7 +33,9 @@ pub async fn handle_connection(
         .enable_connect_protocol()
         .timer(TokioTimer::new())
         .keep_alive_interval(client_timeouts.h2_keep_alive_interval)
-        .keep_alive_timeout(client_timeouts.h2_keep_alive_timeout);
+        .keep_alive_timeout(client_timeouts.h2_keep_alive_timeout)
+        .max_concurrent_streams(connection_settings.h2_max_concurrent_streams)
+        .max_header_list_size(connection_settings.h2_max_header_list_size);
     let http2_builder = Arc::new(http2_builder);
 
     let builder = http2_builder.clone();
@@ -51,6 +56,7 @@ pub async fn handle_connection(
 
     let connection_addr = accepted_connection.get_addr();
     crate::app::spawn_named("http2_server_connection", async move {
+        let _slot = slot;
         let io = match accepted_connection {
             AcceptedServerConnection::Tcp { network_stream, .. } => {
                 let io = TokioIo::new(network_stream);
@@ -71,6 +77,9 @@ pub async fn handle_connection(
         let http_request_handler_to_dispose = http_request_handler.clone();
         // A request which finds the connection must not go on cuts it: see `ConnectionCut`.
         let cut = http_request_handler.cut.clone();
+        // Closes the connection once it is idle, or served enough requests: see
+        // `ConnectionLifetime`.
+        let lifetime = http_request_handler.lifetime.clone();
 
         match io {
             TcpOrUnixSocket::Tcp(io) => {
@@ -86,6 +95,13 @@ pub async fn handle_connection(
                             req,
                         )
                     }),
+                );
+
+                let connection = lifetime.serve(
+                    connection,
+                    |connection| connection.graceful_shutdown(),
+                    client_timeouts.h2_idle_timeout,
+                    connection_settings.max_requests_per_connection,
                 );
 
                 let result = cut
@@ -114,6 +130,13 @@ pub async fn handle_connection(
                             req,
                         )
                     }),
+                );
+
+                let connection = lifetime.serve(
+                    connection,
+                    |connection| connection.graceful_shutdown(),
+                    client_timeouts.h2_idle_timeout,
+                    connection_settings.max_requests_per_connection,
                 );
 
                 let result = cut

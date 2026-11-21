@@ -864,6 +864,23 @@ hosts:
       type: http
 ```
 
+`http` and `https` are served by the proxy's own http/1.1 pipeline, which sends the lines of a
+request head on as they came. The upstream finds where the request ends by them on its own, so
+a head it could read another way than the proxy is refused - the connection is closed and
+nothing goes upstream, as nginx refuses it. Otherwise the upstream could find a second request
+inside the body of the first and serve it past the checks of the location (request smuggling):
+
+- `Content-Length` together with `Transfer-Encoding`;
+- `Content-Length` twice, or one which is not a plain number;
+- `Transfer-Encoding` twice, or anything but `chunked`;
+- a header line which is not `name: value`: no colon, whitespace or another non-token byte in
+  the name (`Name : value`, a folded line);
+- a control character in a header value - a lone LF or CR, a NUL;
+- `Host` twice.
+
+The request line has to be `METHOD SP target SP HTTP/1.1`, with no other whitespace and no
+control character.
+
 ### Http2
 ```yaml
 hosts:
@@ -874,7 +891,9 @@ hosts:
 
 ### Https
 
-Serves http/1.1 over TLS1.3 and TLS1.2
+Serves http/1.1 over TLS1.3 and TLS1.2 - or over TLS 1.3 alone with `tls_min_version: 1.3` (on the
+endpoint, or for every endpoint in `global_settings`; nginx's `ssl_protocols`). A client of an older
+TLS is turned away in the handshake.
 
 ```yaml
 hosts:
@@ -886,7 +905,7 @@ hosts:
 
 ### Https2
 
-Serves https/2 over TLS1.3 and TLS1.2
+Serves https/2 over TLS1.3 and TLS1.2 (`tls_min_version` as for `https`)
 Fallbacks to http/1.1 if client does not support http2
 
 ```yaml
@@ -1485,6 +1504,31 @@ unless `modify_http_headers` takes it off (see "API keys").
 
 
 
+## Access log (`access_log`)
+
+A line for every request the `http`, `https`, `http2` and `https2` endpoints answer, in a file -
+nginx's `access_log`. Off unless `global_settings` names the file:
+
+```yaml
+global_settings:
+  access_log: ~/logs/access.log     # ~ is the home directory
+  access_log_max_size: 100Mb        # turned over past it (default 100Mb)
+  access_log_files: 5               # turned-over files kept: access.log.1 ... access.log.5 (default 5)
+```
+
+```text
+2026-11-20T19:42:47.504+00:00 203.0.113.7 example.com "GET /api/x HTTP/2.0" 200 1532 23ms
+```
+
+The time the request came, its client - behind Cloudflare the one of `CF-Connecting-IP` - the
+host, the request, the status, the bytes of the body sent, and how long the answer took to its last
+byte. An answer which did not go out whole ends with ` cut`. A value of the request is written with
+escapes: a quote, a backslash or a control character can not start a line of its own.
+
+A request never waits for the file: the lines go through a queue to a writer of their own. When the
+disk can not keep up, the lines which do not fit are dropped, and the log tells how many in a line
+starting with `#`. A reload of the settings starts, moves or stops the log.
+
 ## Debugging endpoints
 
 Adding debug flag to endpoint will print all the traffic errors to the console
@@ -1933,6 +1977,35 @@ ip_white_lists:
   nobody: []
 ```
 
+
+## Rate limiting (`rate_limit`)
+
+How many requests one client may make - nginx's `limit_req`. Set on an endpoint (every location
+of it together) and/or on a location (its own, on top of the endpoint's):
+
+```yaml
+hosts:
+  example.com:443:
+    endpoint:
+      type: https2
+      rate_limit: 50/s          # one client, all locations together
+    locations:
+    - path: /login
+      proxy_pass_to: http://10.0.0.5:8080
+      rate_limit: 5/m           # and no more than 5 a minute here
+      rate_limit_burst: 5
+    - proxy_pass_to: http://10.0.0.5:8080
+```
+
+- `rate_limit`: `<requests>/s`, `/m` or `/h`.
+- `rate_limit_burst`: the requests a client may make at once; absent - the number of the rate (`5/m`
+  lets 5 come at once, then one every 12 seconds).
+- A request over it is answered `429 Too Many Requests` with a `Retry-After`; on `http` / `https` the
+  connection is closed after it.
+- A client is its address - behind Cloudflare (`cloudflare: true`) the one of `CF-Connecting-IP` -
+  and an IPv6 client its /64 network. A client of a unix socket is not limited.
+- Counted before `api_keys_auth`, so guessing a key is limited as well. A reload of the settings
+  starts every count anew.
 
 ## Country whitelisting
 
@@ -2483,7 +2556,7 @@ want to change, at the broadest level that makes sense.
 **Every timeout is an integer number of milliseconds.** `1000` = 1 second,
 `60000` = 1 minute. ⚠️ `5` means **5 milliseconds**, not 5 seconds — a common
 foot-gun. The only non-millisecond knobs are the **buffer sizes**, which take a
-raw byte count or a `Kb` / `Mb` suffix (e.g. `512Kb`, `1Mb`).
+raw byte count or a `Kb` / `Mb` / `Gb` suffix (e.g. `512Kb`, `1Mb`, `2Gb`).
 
 ### The timeout set
 
@@ -2501,11 +2574,12 @@ same unit. The **Levels** column says how far down the cascade each key is read:
 | `pool_ping_timeout` | ms | 1000 | global→endpoint→location | Per-probe timeout of the h2 liveness check. **h2 + liveness URL only.** |
 | `pool_hot_window` | ms | 3000 | global→endpoint→location | Idle window after a success during which the h2 probe is skipped. **h2 + liveness URL only.** |
 | `read_timeout` | ms | 180000 (3m) | global→endpoint | Idle read timeout on every byte pump — H1 request/response body transfer, MCP tunnel, TCP port-forward, WebSocket. A TCP port-forward or WebSocket session is torn down only when neither direction has moved bytes for this long; a one-way stream keeps it open. Doubles as dead-peer detection. On `http2` / `https2` it is also the longest silence inside a request body the proxy holds whole before sending it on (to an http/1.1 upstream): the client gets `408`. |
-| `write_timeout` | ms | 30000 (30s) | global→endpoint | Idle write timeout on every byte pump (same paths as `read_timeout`). |
+| `write_timeout` | ms | 30000 (30s) | global→endpoint | Idle write timeout on every byte pump (same paths as `read_timeout`). On `http2` / `https2` it is also how long a client may take nothing of an answer - an h2 stream whose window it keeps shut, an http/1.1 client which reads nothing: then the connection is cut (nginx's `send_timeout`). |
 | `header_read_timeout` | ms | 30000 (30s) | global→endpoint | The whole head of a request has to arrive within this, at whatever pace — `http`, `https`, `http2`, `https2` endpoints. Covers the wait of a keep-alive connection for its next request, and on `http2` / `https2` everything before the first request. See [Slow clients](#slow-clients). |
 | `tls_handshake_timeout` | ms | 10000 (10s) | global→endpoint | The TLS handshake of `https`, `https2` and `mcp` endpoints, from the accepted connection — the ClientHello included. |
 | `h2_keep_alive_interval` | ms | 30000 (30s) | global→endpoint | How often an h2 client of an `http2` / `https2` endpoint is sent a PING. |
 | `h2_keep_alive_timeout` | ms | 20000 (20s) | global→endpoint | How long the answer to that PING may take before the connection is closed. |
+| `h2_idle_timeout` | ms | 180000 (3m) | global→endpoint | An h2 connection of an `http2` / `https2` endpoint with no request on it for this long is closed with a GOAWAY (nginx's `keepalive_timeout`). A browser opens a new one when it needs it. |
 
 Keys that don't apply to a given endpoint type (e.g. `pool_size` on a `type: tcp`
 endpoint) are simply ignored there.
@@ -2531,6 +2605,8 @@ What cuts each of them, by default:
 | Finishes the TLS handshake (or connects to `http2`) and sends no request | `http2`, `https2` | `header_read_timeout` | 30 s |
 | Stops answering h2 PINGs (gone without a FIN) | `http2`, `https2` | `h2_keep_alive_interval` + `h2_keep_alive_timeout` | 30 s + 20 s |
 | Goes silent in the middle of a request body | `http`, `https`; `http2`, `https2` to an http/1.1 upstream | `read_timeout` (between two pieces) | 3 min |
+| Takes nothing of an answer - keeps its h2 window shut, or reads nothing | all four | `write_timeout` | 30 s |
+| Keeps an h2 connection open with no request on it | `http2`, `https2` | `h2_idle_timeout` | 3 min |
 
 What is deliberately **not** cut, so that long-lived exchanges keep working:
 
@@ -2541,20 +2617,88 @@ What is deliberately **not** cut, so that long-lived exchanges keep working:
 - A request body the proxy streams to an h2 upstream (an `http2` location) is not timed: a gRPC
   stream may rightly be silent for long, and its upstream sees every byte as it comes. A client
   that is gone is still noticed by the PINGs.
-- An h2 connection whose client answers the PINGs but sends nothing more stays open, as browsers
-  keep it.
+- An answer which waits for its upstream - an SSE stream between its events, a long poll - is not
+  timed by `write_timeout`: the client is not to blame for that. A client which pauses a large
+  download for longer than `write_timeout` is cut, as nginx cuts it at `send_timeout`.
 - `tcp` and `mcp` endpoints forward bytes and never read a head: only `tls_handshake_timeout`
   (for `mcp`) and `read_timeout` apply to them.
 
-The number of connections is not limited by the proxy. The head of a request is limited in size
-by the read buffer: 1 MB on `http` / `https`, hyper's limits on `http2` / `https2` (about 400 KB
-and 100 headers for http/1.1, 16 KB of h2 headers).
+The head of an http/1.1 request is limited by `max_request_head_size` (64 KB) - on `http` /
+`https`, and for the http/1.1 clients of `https2` - and answered `431` past it; the headers of an
+h2 request by `h2_max_header_list_size` (16 KB). A connection serves at most
+`max_requests_per_connection` requests (1000) and is then closed - an h2 one with a GOAWAY, once
+the requests on it are answered - and an h2 client may have `h2_max_concurrent_streams` (128) of
+them open at once. All four are keys of `global_settings`; see the table below.
+
+The connections themselves are limited too, as they are accepted - before a byte of them is read:
+at most `max_connections` at once on all the ports of `hosts` together (half the open files limit
+of the process, `ulimit -n`, unless given), and `max_connections_per_ip` from one address (1000).
+A connection over either is closed and written to the log of its port. The addresses of
+Cloudflare - it brings the connections of all its visitors - and of `ip_blocklist_white_list` are
+held to `max_connections` only. Unix sockets are of the host itself and are not limited.
 
 The **control port** (`global_settings.http_control_port`: the admin ui, the API, MCP) is served
 by `my-http-server`, which times the head of every http/1.1 request and the first bytes of a
 connection itself; it takes `header_read_timeout` from `global_settings`. An h2 client of it is
 not timed past its preface, and the other keys above do not apply there. It is not meant for the
 internet: it listens on `127.0.0.1` unless `http_control_port` names another address.
+
+### Request bodies held in memory
+
+Where the upstream can not take a request body as a stream, the proxy reads the whole body into
+memory and sends it on in one piece. On `http2` / `https2` endpoints that is the body of a request:
+
+- to a location whose upstream is not an h2 one - an h2 request to an http/1.1 upstream always;
+- to a location with `compress: true`;
+- of a websocket handshake (one with `sec-websocket-key`).
+
+A body streamed to an h2 upstream, and every body on `http` / `https` endpoints (the proxy's own
+pipeline), is not held: it goes through as it comes.
+
+A held body is limited twice:
+
+| Setting | Where (YAML) | Default | When it is reached |
+|---|---|---|---|
+| `max_buffered_request_body` | `global_settings`, `endpoint` (the endpoint wins) | `100Mb` | A larger body is answered `413 Payload Too Large`. One which says so in its `content-length` is refused before a byte of it is read. |
+| `max_buffered_request_bodies_total` | `global_settings` | `512Mb` | All held bodies together, every endpoint. A body which would take them over it is answered `503`, and the answer is written to the log of 5xx answers. |
+
+The total is what limits the memory: the first alone would not, since an h2 connection carries up
+to 200 requests at once and the connections are not counted. A body is counted as it arrives, and
+no longer once the upstream has answered. The default of `100Mb` is the upload limit of the Free
+and Pro plans of Cloudflare: what passes Cloudflare passes here.
+
+Sizes are a raw byte count or a number with `Kb`, `Mb` or `Gb`. `0`, a value which is not a size,
+and a `max_buffered_request_body` larger than `max_buffered_request_bodies_total` fail the
+settings load.
+
+```yaml
+global_settings:
+  max_buffered_request_body: 20Mb          # every endpoint which says nothing of its own
+  max_buffered_request_bodies_total: 1Gb
+
+hosts:
+  uploads.example.com:443:
+    endpoint:
+      type: https2
+      max_buffered_request_body: 500Mb     # this one takes large uploads
+    locations:
+      - proxy_pass_to: http://10.0.0.5:8080
+```
+
+#### Any request body (`max_request_body`)
+
+`max_request_body` (`global_settings`, `endpoint` - the endpoint wins) limits every request body,
+streamed or held - nginx's `client_max_body_size`. Unlike the two above it is not there by default:
+it is a rule of what a site takes, not a guard of the memory.
+
+- A body which says it is larger (`content-length`) is answered `413` before anything goes upstream
+  - on `http` / `https` the connection is closed after it.
+- A body which does not say - chunked, or an h2 one without `content-length` - is cut as it passes
+  the limit: on `http` / `https` the connection is closed, and an h2 upstream gets an error of the
+  body instead of the rest of it. (Counted as it comes on the wire: on `http` / `https` the framing
+  of the chunks is counted too.)
+- A body held in memory is held to the smaller of `max_request_body` and
+  `max_buffered_request_body`.
 
 ### Outside the cascade (fixed scope)
 
@@ -2565,6 +2709,16 @@ internet: it listens on `127.0.0.1` unless `http_control_port` names another add
 | `connect_to_remote_timeout` | `global_settings.connection_settings` | ms | 5000 | Connect timeout for **`type: tcp`** port-forward endpoints. |
 | `buffer_size` | `global_settings.connection_settings` | bytes/`Kb`/`Mb` | `512Kb` | Pump buffer for `type: tcp` port-forward endpoints. |
 | `mcp_buffer_size` | `endpoint` (`type: mcp`) | bytes/`Kb`/`Mb` | `512Kb` | Per-connection MCP read buffer (endpoint-scoped). |
+| `max_buffered_request_body` | `global_settings`, `endpoint` | bytes/`Kb`/`Mb`/`Gb` | `100Mb` | One request body held in memory. See [Request bodies held in memory](#request-bodies-held-in-memory). |
+| `max_buffered_request_bodies_total` | `global_settings` | bytes/`Kb`/`Mb`/`Gb` | `512Mb` | All request bodies held in memory at once. |
+| `max_request_body` | `global_settings`, `endpoint` | bytes/`Kb`/`Mb`/`Gb` | none | Any request body, streamed or held (nginx's `client_max_body_size`). See [Request bodies held in memory](#request-bodies-held-in-memory). |
+| `tls_min_version` | `global_settings`, `endpoint` | `1.2` / `1.3` | `1.2` | The oldest TLS a client of `https`, `https2` or `mcp` may connect with (nginx's `ssl_protocols`). |
+| `max_requests_per_connection` | `global_settings` | int | 1000 | Requests a client connection serves before it is closed - an h2 one with a GOAWAY (nginx's `keepalive_requests`). |
+| `max_request_head_size` | `global_settings` | bytes/`Kb`/`Mb` | `64Kb` | The head of an http/1.1 request, `8Kb` to `1Mb`; larger is answered `431`. |
+| `h2_max_concurrent_streams` | `global_settings` | int | 128 | Requests open at once on one h2 connection. |
+| `h2_max_header_list_size` | `global_settings` | bytes/`Kb`/`Mb` | `16Kb` | The decoded headers of one h2 request. |
+| `max_connections` | `global_settings` | int | half of `ulimit -n` | Client connections held at once on all the ports of `hosts` (nginx's `worker_connections`). |
+| `max_connections_per_ip` | `global_settings` | int | 1000 | ... of them from one address; Cloudflare and `ip_blocklist_white_list` aside (nginx's `limit_conn`). |
 | `connect_timeout` | `gateway_clients.<name>` | ms | 5000 | Connect timeout for a gateway-client link. |
 
 ### Example — defaults at global, override at endpoint and location
@@ -2597,6 +2751,8 @@ hosts:
 - **MCP tunnel / body transfer dropped on a long-idle peer** → raise `read_timeout` (on the endpoint or globally).
 - **WebSocket drops while idle (no app traffic)** → raise `read_timeout`, or make either side send a heartbeat shorter than `read_timeout`.
 - **`type: tcp` forward hangs connecting** → lower `connect_to_remote_timeout`.
+- **Uploads answered `413`** on `http2` / `https2` → raise `max_buffered_request_body` on the endpoint.
+- **Uploads answered `503` while many are on their way** → raise `max_buffered_request_bodies_total`.
 - **Gateway link slow to fail** → `connect_timeout` on the gateway client.
 - **Clients behind slow links cut while sending a request head** → raise `header_read_timeout`.
 - **Idle keep-alive connections closed too early / kept too long** → `header_read_timeout` (it is also the keep-alive idle time of http/1.1 clients).

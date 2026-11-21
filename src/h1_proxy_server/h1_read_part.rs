@@ -94,9 +94,13 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
     /// it takes: the client sends the next request only after it got that one.
     ///
     /// Only for requests: the head of an upstream's response is read with [`Self::read_headers`].
+    ///
+    /// A head larger than `max_head_size` - whole, or not whole yet - is
+    /// [`ProxyServerError::RequestHeadTooLarge`]: `max_request_head_size`.
     pub async fn read_request_headers(
         &mut self,
         header_read_timeout: Duration,
+        max_head_size: usize,
         in_flight: &crate::h1_proxy_server::pipeline::InFlightResponses,
     ) -> Result<Http1Headers, ProxyServerError> {
         let mut deadline: Option<tokio::time::Instant> = None;
@@ -106,8 +110,15 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
                 let buf = self.loop_buffer.get_data();
 
                 if !buf.is_empty() {
-                    match Http1Headers::try_parse(buf) {
+                    match Http1Headers::try_parse_request(buf) {
+                        Ok(Some(headers)) if headers.end > max_head_size => {
+                            return Err(ProxyServerError::RequestHeadTooLarge);
+                        }
                         Ok(Some(headers)) => return Ok(headers),
+                        // Not whole yet, and already larger than a whole one may be.
+                        Ok(None) if buf.len() > max_head_size => {
+                            return Err(ProxyServerError::RequestHeadTooLarge);
+                        }
                         Ok(None) => {}
                         // Reading on would not make the line a valid one.
                         Err(reason) => return Err(ProxyServerError::HeadersParseError(reason)),

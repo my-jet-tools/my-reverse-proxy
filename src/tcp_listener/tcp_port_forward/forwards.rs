@@ -8,7 +8,10 @@ pub async fn handle_port_forward<TRemoteNetworkStream: NetworkStream + Send + Sy
     remote_stream: TRemoteNetworkStream,
     ssh_session_handler: Option<SshSessionHandler>,
     timeouts: HttpTimeouts,
+    slot: crate::app::ConnectionSlot,
 ) {
+    // The connection is held while either of its pumps runs.
+    let slot = std::sync::Arc::new(slot);
     let (remote_reader, remote_writer) = remote_stream.split();
     let pumps = std::sync::Arc::new(crate::tcp_utils::ConnectionPumps::new(timeouts));
 
@@ -43,8 +46,10 @@ pub async fn handle_port_forward<TRemoteNetworkStream: NetworkStream + Send + Sy
         }
     };
 
-    crate::app::spawn_named(
-        server_to_remote,
+    let server_to_remote_slot = slot.clone();
+    let server_to_remote_pumps = pumps.clone();
+    crate::app::spawn_named(server_to_remote, async move {
+        let _slot = server_to_remote_slot;
         crate::tcp_utils::copy_streams(
             server_reader,
             remote_writer,
@@ -52,11 +57,12 @@ pub async fn handle_port_forward<TRemoteNetworkStream: NetworkStream + Send + Sy
             ssh_session_handler,
             None,
             None,
-            pumps.clone(),
-        ),
-    );
-    crate::app::spawn_named(
-        remote_to_server,
+            server_to_remote_pumps,
+        )
+        .await
+    });
+    crate::app::spawn_named(remote_to_server, async move {
+        let _slot = slot;
         crate::tcp_utils::copy_streams(
             remote_reader,
             server_writer,
@@ -65,6 +71,7 @@ pub async fn handle_port_forward<TRemoteNetworkStream: NetworkStream + Send + Sy
             None,
             None,
             pumps,
-        ),
-    );
+        )
+        .await
+    });
 }

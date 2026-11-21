@@ -56,6 +56,41 @@ pub struct GlobalSettings {
     /// creates. It has to be on a volume the proxy can write to. Absent:
     /// `~/.my-reverse-proxy-secure`.
     pub secure_store_file: Option<String>,
+    /// `max_buffered_request_body` of every endpoint which names none: the most of one request
+    /// body the proxy holds in memory. Absent: `100Mb`. See [`crate::types::BufferedBodyLimits`].
+    pub max_buffered_request_body: Option<String>,
+    /// The most all the request bodies held in memory at once may take, the endpoints together.
+    /// A body which would go over it is answered `503`. Absent: `512Mb`.
+    pub max_buffered_request_bodies_total: Option<String>,
+    /// After so many requests a client connection is closed - an h2 one with a GOAWAY. Absent:
+    /// 1000. See [`crate::types::ConnectionSettings`].
+    pub max_requests_per_connection: Option<u32>,
+    /// The most the head of an http/1.1 request may take. Absent: `64Kb`.
+    pub max_request_head_size: Option<String>,
+    /// The requests an h2 client may have open at once on one connection. Absent: 128.
+    pub h2_max_concurrent_streams: Option<u32>,
+    /// The most the decoded headers of an h2 request may take. Absent: `16Kb`.
+    pub h2_max_header_list_size: Option<String>,
+    /// `max_request_body` of every endpoint which names none: the most any request body may take.
+    /// Absent: no limit but the ones of the bodies held in memory.
+    pub max_request_body: Option<String>,
+    /// A line for every request the http/https endpoints answer goes to this file, `~` expanded -
+    /// nginx's `access_log`. Absent: no access log. See [`crate::access_log`].
+    pub access_log: Option<String>,
+    /// The access log is turned over past this size. Absent: `100Mb`.
+    pub access_log_max_size: Option<String>,
+    /// The turned-over files of the access log which are kept. Absent: 5.
+    pub access_log_files: Option<u32>,
+    /// `tls_min_version` of every endpoint which names none: `1.2` or `1.3`. Absent: `1.2`.
+    #[serde(default, deserialize_with = "crate::types::number_or_text")]
+    pub tls_min_version: Option<String>,
+    /// The client connections every port of `hosts` holds at once. A connection over it is
+    /// closed as it is accepted. Absent: half the open files limit of the process. See
+    /// [`crate::app::ConnectionLimits`].
+    pub max_connections: Option<usize>,
+    /// ... of them from one address - Cloudflare and `ip_blocklist_white_list` aside. Absent:
+    /// 1000.
+    pub max_connections_per_ip: Option<usize>,
     /// Lowest level of the timeout cascade — overridden by the endpoint, then
     /// the location.
     #[serde(flatten)]
@@ -91,6 +126,56 @@ impl GlobalSettings {
         }
 
         Ok(result)
+    }
+
+    /// The limits of the request bodies held in memory, for an endpoint which names no
+    /// `max_buffered_request_body` of its own. Errors on a value which is not a size, so a typo
+    /// fails the settings load.
+    pub fn get_buffered_body_limits(&self) -> Result<crate::types::BufferedBodyLimits, String> {
+        crate::types::BufferedBodyLimits::resolve(
+            self.max_buffered_request_body.as_deref(),
+            self.max_buffered_request_bodies_total.as_deref(),
+            None,
+        )
+    }
+
+    /// The limits of a client connection. Errors on a value out of its range, so a typo fails
+    /// the settings load.
+    pub fn get_connection_settings(&self) -> Result<crate::types::ConnectionSettings, String> {
+        crate::types::ConnectionSettings::resolve(
+            self.max_requests_per_connection,
+            self.max_request_head_size.as_deref(),
+            self.h2_max_concurrent_streams,
+            self.h2_max_header_list_size.as_deref(),
+        )
+    }
+
+    /// `max_request_body`, for an endpoint which names none. Errors on a value which is not a
+    /// size, and on `0`.
+    pub fn get_max_request_body(&self) -> Result<Option<usize>, String> {
+        crate::types::resolve_max_request_body(self.max_request_body.as_deref(), None)
+    }
+
+    /// `access_log`, `access_log_max_size` and `access_log_files`: `None` - no access log.
+    pub fn get_access_log(&self) -> Result<Option<crate::access_log::AccessLogSettings>, String> {
+        crate::access_log::AccessLogSettings::resolve(
+            self.access_log.as_deref(),
+            self.access_log_max_size.as_deref(),
+            self.access_log_files,
+        )
+    }
+
+    /// `tls_min_version`, for an endpoint which names none.
+    pub fn get_tls_min_version(&self) -> Result<crate::types::TlsMinVersion, String> {
+        crate::types::TlsMinVersion::resolve(self.tls_min_version.as_deref(), None)
+    }
+
+    /// `max_connections` and `max_connections_per_ip`. Errors on `0`.
+    pub fn get_connection_limits(&self) -> Result<crate::app::ConnectionLimitsSettings, String> {
+        crate::app::ConnectionLimitsSettings::resolve(
+            self.max_connections,
+            self.max_connections_per_ip,
+        )
     }
 
     /// `control_unix_socket` with `~` expanded - `None` when it is not given. An error on a

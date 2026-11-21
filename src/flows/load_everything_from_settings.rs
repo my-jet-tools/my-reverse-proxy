@@ -21,6 +21,14 @@ pub async fn load_everything_from_settings() -> Result<(), String> {
         .debug_ip
         .set(settings_model.get_debug_ip());
 
+    crate::app::APP_CTX
+        .connection_limits
+        .set(settings_model.get_connection_limits()?);
+
+    crate::app::APP_CTX
+        .access_log
+        .apply(settings_model.get_access_log()?);
+
     // Build the full new configuration into local maps first, then swap it into the live
     // configuration in a single write. This way endpoints that disappeared from the settings are
     // simply absent from the new maps (instead of lingering, as an in-place merge would leave them),

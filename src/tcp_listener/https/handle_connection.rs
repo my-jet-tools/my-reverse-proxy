@@ -9,16 +9,19 @@ use crate::types::ConnectionIp;
 
 use super::ClientCertificateData;
 
+/// `slot`: the connection's place among the ones held (`max_connections`), given back with it.
 pub fn handle_connection(
     accepted_tcp_stream: tokio::net::TcpStream,
     connection_ip: impl Into<ConnectionIp>,
     listening_addr: SocketAddr,
     configuration: Arc<HttpListenPortConfiguration>,
     connection_id: u64,
+    slot: crate::app::ConnectionSlot,
 ) {
     let connection_ip = connection_ip.into();
 
     crate::app::spawn_named("https_connection", async move {
+        let _slot = slot;
         let endpoint_port = listening_addr.port();
 
         let result = super::utils::lazy_accept_tcp_stream(
@@ -209,18 +212,22 @@ async fn serve_https2(
     // of an http/1.1 client, and the idle wait of a keep-alive connection for its next one - and
     // the h2 PINGs only with a timer. What comes before the first request is timed below.
     let client_timeouts = endpoint_info.client_timeouts;
+    let connection_settings = endpoint_info.connection_settings;
 
     let mut http_builder = Builder::new(TokioExecutor::new());
     http_builder
         .http1()
         .timer(TokioTimer::new())
-        .header_read_timeout(client_timeouts.header_read_timeout);
+        .header_read_timeout(client_timeouts.header_read_timeout)
+        .max_buf_size(connection_settings.max_request_head_size);
     http_builder
         .http2()
         .enable_connect_protocol()
         .timer(TokioTimer::new())
         .keep_alive_interval(client_timeouts.h2_keep_alive_interval)
-        .keep_alive_timeout(client_timeouts.h2_keep_alive_timeout);
+        .keep_alive_timeout(client_timeouts.h2_keep_alive_timeout)
+        .max_concurrent_streams(connection_settings.h2_max_concurrent_streams)
+        .max_header_list_size(connection_settings.h2_max_header_list_size);
 
     // Per-request HttpProxyPasses are built lazily by the handler (keyed by the
     // request's Host), so there is no pre-seeded entry to build here.
@@ -231,6 +238,9 @@ async fn serve_https2(
 
     let https_requests_handler_dispose = https_requests_handler.clone();
     let cut = https_requests_handler.cut.clone();
+    // Closes the connection once it is idle, or served enough requests: see
+    // `ConnectionLifetime`.
+    let lifetime = https_requests_handler.lifetime.clone();
 
     // `with_upgrades` is what lets an HTTP/1.1 client on this endpoint open a
     // websocket: Cloudflare reaches an origin this way even with "HTTP/2 to
@@ -249,6 +259,13 @@ async fn serve_https2(
                 req,
             )
         }),
+    );
+
+    let connection = lifetime.serve(
+        connection,
+        |connection| connection.graceful_shutdown(),
+        client_timeouts.h2_idle_timeout,
+        connection_settings.max_requests_per_connection,
     );
 
     // A request which finds the connection must not go on cuts it: see `ConnectionCut`.

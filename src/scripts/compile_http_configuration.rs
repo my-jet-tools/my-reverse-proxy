@@ -198,6 +198,31 @@ pub async fn compile_http_configuration(
     )
     .map_err(|err| format!("Endpoint '{}': {err}", host_endpoint.as_str()))?;
 
+    let rate_limit = match host_settings.endpoint.rate_limit.as_deref() {
+        Some(rate) => Some(Arc::new(
+            crate::types::RateLimiter::parse(rate, host_settings.endpoint.rate_limit_burst)
+                .map_err(|err| format!("Endpoint '{}': {err}", host_endpoint.as_str()))?,
+        )),
+        None => None,
+    };
+
+    let buffered_body_limits = settings_model
+        .get_buffered_body_limits(host_settings.endpoint.max_buffered_request_body.as_deref())
+        .map_err(|err| format!("Endpoint '{}': {err}", host_endpoint.as_str()))?;
+
+    let max_request_body = settings_model
+        .get_max_request_body(host_settings.endpoint.max_request_body.as_deref())
+        .map_err(|err| format!("Endpoint '{}': {err}", host_endpoint.as_str()))?;
+
+    let tls_min_version = crate::types::TlsMinVersion::resolve(
+        settings_model
+            .global_settings
+            .as_ref()
+            .and_then(|g| g.tls_min_version.as_deref()),
+        host_settings.endpoint.tls_min_version.as_deref(),
+    )
+    .map_err(|err| format!("Endpoint '{}': {err}", host_endpoint.as_str()))?;
+
     let http_endpoint_info = HttpEndpointInfo::new(HttpEndpointInfoParams {
         host_endpoint,
         listen_endpoint_type: http_type,
@@ -228,6 +253,11 @@ pub async fn compile_http_configuration(
         mcp_settings,
         timeouts: http_timeouts,
         client_timeouts: endpoint_resolved.client,
+        buffered_body_limits,
+        connection_settings: settings_model.get_connection_settings()?,
+        rate_limit,
+        max_request_body,
+        tls_min_version,
         not_served_reason,
         dynamic_host,
     });

@@ -137,6 +137,12 @@ pub struct AppContext {
 
     pub ip_blocklist: IpBlocklist,
 
+    /// The client connections held at once: `max_connections`, `max_connections_per_ip`.
+    pub connection_limits: ConnectionLimits,
+
+    /// `access_log`: a line for every request answered. Started by the settings load.
+    pub access_log: crate::access_log::AccessLog,
+
     pub traffic: TrafficAccumulator,
 
     pub resolved_domain_ips: ResolvedDomainIps,
@@ -282,6 +288,10 @@ impl AppContext {
             tls_session_resumption: crate::tcp_listener::https::TlsSessionResumption::new(),
             rps: Arc::new(RpsAccumulator::new()),
             ip_blocklist,
+            connection_limits: ConnectionLimits::new(
+                settings_model.get_connection_limits().unwrap(),
+            ),
+            access_log: crate::access_log::AccessLog::new(),
             traffic: TrafficAccumulator::new(),
             resolved_domain_ips: ResolvedDomainIps::new(),
             cloudflare_ip_ranges: crate::cloudflare::CloudflareIpRanges::new(),

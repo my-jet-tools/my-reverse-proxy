@@ -72,6 +72,12 @@ impl IpBlocklist {
     /// Cloudflare - it brings the requests of many clients at once, and blocking it would turn
     /// away every one of them. The client of a request through Cloudflare to a
     /// `cloudflare: true` endpoint is counted by its own address.
+    /// An address no limit is kept for on its own: of `ip_blocklist_white_list`, or of
+    /// Cloudflare - which brings the connections of all its visitors.
+    pub fn exempts(&self, ip: &IpAddr) -> bool {
+        self.is_exempt(ip)
+    }
+
     fn is_exempt(&self, ip: &IpAddr) -> bool {
         self.is_white_listed(ip)
             || crate::app::APP_CTX.cloudflare_ip_ranges.contains(*ip) == Some(true)

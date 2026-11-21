@@ -27,6 +27,9 @@ pub use rps_accumulator::*;
 mod ip_blocklist;
 pub use ip_blocklist::*;
 
+mod connection_limits;
+pub use connection_limits::*;
+
 mod traffic_accumulator;
 pub use traffic_accumulator::*;
 

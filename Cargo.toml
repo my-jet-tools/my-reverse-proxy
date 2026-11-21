@@ -107,6 +107,10 @@ zstd = { version = "0.14", default-features = false }
 
 mcp-server-middleware = { tag = "0.9.0", git = "https://github.com/my-ai-utils/mcp-server-middleware.git" }
 
+# The limit of open files of the process: the default of `global_settings.max_connections`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 ci-utils = { git = "https://github.com/MyJetTools/ci-utils.git", tag = "0.1.3" }
 

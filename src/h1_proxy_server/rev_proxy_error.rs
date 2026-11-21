@@ -9,6 +9,10 @@ pub enum ProxyServerError {
     BufferAllocationFail,
     ChunkHeaderParseError,
     HeadersParseError(&'static str),
+    /// The head of a request is larger than `max_request_head_size`: answered `431`.
+    RequestHeadTooLarge,
+    /// The body of a request says it is larger than `max_request_body`: answered `413`.
+    RequestBodyTooLarge,
     CanNotConnectToRemoteResource {
         remote_resource: String,
         err: NetworkError,
@@ -83,6 +87,19 @@ impl ProxyServerError {
                 page: None,
                 status_5xx: None,
                 register_ip_failure: true,
+            },
+
+            // A head larger than `max_request_head_size` - large cookies, as often as not.
+            Self::RequestHeadTooLarge => ErrorHandling {
+                page: Some(tpl::REQUEST_HEAD_TOO_LARGE.as_slice()),
+                status_5xx: None,
+                register_ip_failure: false,
+            },
+
+            Self::RequestBodyTooLarge => ErrorHandling {
+                page: Some(tpl::REQUEST_BODY_TOO_LARGE.as_slice()),
+                status_5xx: None,
+                register_ip_failure: false,
             },
 
             // Upstream could not be reached / written to → 5xx page.

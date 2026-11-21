@@ -368,6 +368,7 @@ async fn start_endpoint(
                 listening_addr,
                 configuration.clone(),
                 connection_id,
+                crate::app::ConnectionSlot::unlimited(),
             );
         }
     });

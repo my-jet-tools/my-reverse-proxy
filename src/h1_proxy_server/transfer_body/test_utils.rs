@@ -81,9 +81,17 @@ impl H1Writer for RelaySink {
 /// (a fast peer lands the head and a large part of the body in one read).
 pub fn preloaded_buffer(data: &[u8]) -> LoopBuffer {
     let mut loop_buffer = LoopBuffer::new();
-    let buffer = loop_buffer.get_mut().unwrap();
-    buffer[..data.len()].copy_from_slice(data);
-    loop_buffer.advance(data.len());
+    let mut rest = data;
+
+    // A read gets the room the buffer hands out, which grows as it fills.
+    while !rest.is_empty() {
+        let buffer = loop_buffer.get_mut().unwrap();
+        let size = buffer.len().min(rest.len());
+        buffer[..size].copy_from_slice(&rest[..size]);
+        loop_buffer.advance(size);
+        rest = &rest[size..];
+    }
+
     loop_buffer
 }
 

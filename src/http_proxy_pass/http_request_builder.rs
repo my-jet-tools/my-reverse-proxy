@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use flate2::{write::GzEncoder, Compression};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, header::*, Method, Request, Uri};
@@ -29,6 +29,9 @@ pub struct TransformedRequest {
     pub request: TransformedRequestBody,
     pub req_parts: Parts,
     pub web_socket_upgrade: Option<WebSocketUpgrade>,
+    /// What the body held in memory takes of all request bodies held: given back once the
+    /// upstream answered. Nothing for a body which is streamed, or for no body.
+    pub held_body: BufferedBodyShare,
 }
 
 /// The upstream request, in the only two shapes an upstream can take it.
@@ -83,6 +86,10 @@ pub struct HttpRequestBuilder {
     /// How long the client may go silent while it sends a body the proxy holds whole before it
     /// sends it on: the endpoint's `read_timeout`, set by [`Self::into_request`].
     body_idle_timeout: std::time::Duration,
+    /// How much of such a body may be held: the endpoint's, set by [`Self::into_request`].
+    body_limits: BufferedBodyLimits,
+    /// `max_request_body` of the endpoint: the most any body may take, streamed or held.
+    max_request_body: Option<usize>,
 }
 
 /// Whether the client side of this exchange is HTTP/1.x ON THE WIRE. The
@@ -194,6 +201,8 @@ impl HttpRequestBuilder {
             body,
             client,
             body_idle_timeout: crate::consts::DEFAULT_READ_TIMEOUT,
+            body_limits: BufferedBodyLimits::default(),
+            max_request_body: None,
         }
     }
 
@@ -211,6 +220,13 @@ impl HttpRequestBuilder {
         let client_uri = strip_location_path(&mut self.parts.uri, location);
 
         self.body_idle_timeout = proxy_pass.endpoint_info.timeouts.read_timeout;
+        self.body_limits = proxy_pass.endpoint_info.buffered_body_limits;
+        self.max_request_body = proxy_pass.endpoint_info.max_request_body;
+
+        // A body held whole is held to `max_request_body` too.
+        if let Some(max_request_body) = self.max_request_body {
+            self.body_limits.max_body = self.body_limits.max_body.min(max_request_body);
+        }
 
         let mut request = self.into_upstream_request(proxy_pass, location).await?;
 
@@ -246,12 +262,13 @@ impl HttpRequestBuilder {
         }
 
         if dest_http1.is_none() {
-            let (parts, body) = self.build_request(location, ip).await?;
+            let (parts, body, held_body) = self.build_request(location, ip).await?;
 
             return Ok(TransformedRequest {
                 req_parts: parts.clone(),
                 request: body.into_transformed(parts),
                 web_socket_upgrade: None,
+                held_body,
             });
         }
 
@@ -261,7 +278,7 @@ impl HttpRequestBuilder {
             return self.http2_to_http1(location, ip).await;
         }
 
-        let (parts, body) = self.build_request(location, ip.clone()).await?;
+        let (parts, body, held_body) = self.build_request(location, ip.clone()).await?;
 
         let mut web_socket_upgrade = None;
         // A handshake is never streamed (see build_request), so it is always the
@@ -295,6 +312,7 @@ impl HttpRequestBuilder {
             request: body.into_transformed(parts),
 
             web_socket_upgrade,
+            held_body,
         })
         //return Ok((location_index, ));
     }
@@ -382,6 +400,7 @@ impl HttpRequestBuilder {
                 upgrade_response,
                 on_upgrade,
             }),
+            held_body: BUFFERED_REQUEST_BODIES.share(),
         })
     }
 
@@ -491,6 +510,7 @@ impl HttpRequestBuilder {
                 upgrade_response,
                 on_upgrade,
             }),
+            held_body: BUFFERED_REQUEST_BODIES.share(),
         })
     }
 
@@ -532,7 +552,13 @@ impl HttpRequestBuilder {
             builder = builder.header(header.0, header.1);
         }
 
-        let bytes = collect_client_body(self.body, self.body_idle_timeout).await?;
+        let (bytes, held_body) = collect_client_body(
+            self.body,
+            self.body_idle_timeout,
+            self.body_limits,
+            &BUFFERED_REQUEST_BODIES,
+        )
+        .await?;
 
         let req_parts = self.parts.clone();
 
@@ -563,6 +589,7 @@ impl HttpRequestBuilder {
             req_parts,
             request: TransformedRequestBody::Buffered(request),
             web_socket_upgrade: None,
+            held_body,
         })
     }
 
@@ -613,11 +640,13 @@ impl HttpRequestBuilder {
     }
     */
 
+    /// The parts and the body of the upstream request - and what its body, when it is held in
+    /// memory, takes of all bodies held.
     async fn build_request(
         self,
         location: &ProxyPassLocation,
         ip: Option<String>,
-    ) -> Result<(Parts, BuiltBody), ProxyPassError> {
+    ) -> Result<(Parts, BuiltBody, BufferedBodyShare), ProxyPassError> {
         use http_body_util::BodyExt;
 
         let compress = location.compress;
@@ -651,6 +680,15 @@ impl HttpRequestBuilder {
             && !hyper::body::Body::is_end_stream(&self.body);
 
         if stream_the_body {
+            // `max_request_body`: a body which says it is larger goes nowhere.
+            if let (Some(max_request_body), Some(content_size)) =
+                (self.max_request_body, content_size)
+            {
+                if content_size > max_request_body {
+                    return Err(ProxyPassError::ClientBodyTooLarge);
+                }
+            }
+
             // h2 carries no chunked framing: an unknown length is simply not
             // announced, and the h1 header saying otherwise must not travel.
             parts.headers.remove(TRANSFER_ENCODING);
@@ -670,16 +708,29 @@ impl HttpRequestBuilder {
                 );
             }
 
+            // One which does not say, or says less than it brings, is cut as it passes the limit:
+            // the upstream gets an error of the body, not the rest of it.
+            let body = match self.max_request_body {
+                Some(max_request_body) => http_body_util::Limited::new(self.body, max_request_body)
+                    .map_err(|err| err.to_string())
+                    .boxed(),
+                None => self.body.map_err(|err| err.to_string()).boxed(),
+            };
+
             return Ok((
                 parts,
-                BuiltBody::Streamed {
-                    body: self.body.map_err(|err| err.to_string()).boxed(),
-                    content_size,
-                },
+                BuiltBody::Streamed { body, content_size },
+                BUFFERED_REQUEST_BODIES.share(),
             ));
         }
 
-        let bytes = collect_client_body(self.body, self.body_idle_timeout).await?;
+        let (bytes, held_body) = collect_client_body(
+            self.body,
+            self.body_idle_timeout,
+            self.body_limits,
+            &BUFFERED_REQUEST_BODIES,
+        )
+        .await?;
 
         let before_compress = bytes.len();
 
@@ -727,7 +778,7 @@ impl HttpRequestBuilder {
                 ),
             );
         }
-        Ok((parts, body))
+        Ok((parts, body, held_body))
     }
 
     /// `identity`: who the request is of.
@@ -970,11 +1021,32 @@ impl HttpRequestReader for Parts {
 /// so a client which sends its body a byte now and then can not hold the request forever. A
 /// body that is streamed to an h2 upstream is not timed here: a gRPC stream may rightly be
 /// silent for long, and its upstream sees every byte as it comes.
-async fn collect_client_body(
-    mut body: Incoming,
+///
+/// The body is held in memory until the upstream answered, so it is limited (see
+/// [`BufferedBodyLimits`]). A body which says it is larger than `limits.max_body` is refused before
+/// a byte of it is read, and one which comes larger as soon as it does: `413`. A body which would
+/// take the bodies held all together over `limits.max_total`: `503`. What it takes of `bodies`
+/// comes back with it, to be given back when that is dropped - at once, when it is refused.
+///
+/// The frames are copied into one buffer as they come: a frame can keep a larger buffer of hyper
+/// alive than its own length, and joining the frames at the end would hold the body twice.
+async fn collect_client_body<B>(
+    mut body: B,
     idle_timeout: std::time::Duration,
-) -> Result<Bytes, ProxyPassError> {
-    let mut chunks: Vec<Bytes> = Vec::new();
+    limits: BufferedBodyLimits,
+    bodies: &'static BufferedBodies,
+) -> Result<(Bytes, BufferedBodyShare), ProxyPassError>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    ProxyPassError: From<B::Error>,
+{
+    // `content-length`: known before anything of the body is read.
+    if body.size_hint().lower() > limits.max_body as u64 {
+        return Err(ProxyPassError::ClientBodyTooLarge);
+    }
+
+    let mut held = bodies.share();
+    let mut collected = BytesMut::new();
 
     loop {
         let frame = match tokio::time::timeout(idle_timeout, body.frame()).await {
@@ -984,18 +1056,22 @@ async fn collect_client_body(
         };
 
         // Trailers are dropped, as `Collected::to_bytes` drops them.
-        if let Ok(data) = frame.into_data() {
-            if !data.is_empty() {
-                chunks.push(data);
-            }
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+
+        if collected.len().saturating_add(data.len()) > limits.max_body {
+            return Err(ProxyPassError::ClientBodyTooLarge);
         }
+
+        if !held.take(data.len(), limits.max_total) {
+            return Err(ProxyPassError::BufferedBodiesFull);
+        }
+
+        collected.extend_from_slice(&data);
     }
 
-    if chunks.len() == 1 {
-        return Ok(chunks.pop().unwrap());
-    }
-
-    Ok(chunks.concat().into())
+    Ok((collected.freeze(), held))
 }
 
 #[cfg(test)]
@@ -1048,5 +1124,142 @@ mod tests {
         apply_upstream_path(&mut uri, "not a path", "test");
 
         assert_eq!(uri.to_string(), "https://mcp.example.com/logs-XXX");
+    }
+
+    // --- `collect_client_body`: the limits of a body held whole ---------------------------------
+
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
+    use hyper::body::{Frame, SizeHint};
+
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+    type Frames = futures::stream::Iter<std::vec::IntoIter<Result<Frame<Bytes>, std::io::Error>>>;
+
+    /// A body which comes in `frames`, saying nothing of its size - as an h2 body without a
+    /// `content-length` does.
+    fn frames(sizes: &[usize]) -> http_body_util::StreamBody<Frames> {
+        let frames: Vec<_> = sizes
+            .iter()
+            .map(|size| Ok(Frame::data(Bytes::from(vec![b'x'; *size]))))
+            .collect();
+
+        http_body_util::StreamBody::new(futures::stream::iter(frames))
+    }
+
+    /// A body which says how large it is - a `content-length` - and must not be read.
+    struct Announced(u64);
+
+    impl hyper::body::Body for Announced {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+            panic!("a body which says it is too large was read");
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            SizeHint::with_exact(self.0)
+        }
+    }
+
+    fn limits(max_body: usize, max_total: usize) -> BufferedBodyLimits {
+        BufferedBodyLimits {
+            max_body,
+            max_total,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_within_the_limit_is_collected_and_counted_until_it_is_dropped() {
+        static BODIES: BufferedBodies = BufferedBodies::new();
+
+        let (bytes, held) =
+            collect_client_body(frames(&[600, 0, 424]), IDLE, limits(1024, 4096), &BODIES)
+                .await
+                .unwrap();
+
+        assert_eq!(bytes.len(), 1024);
+        assert_eq!(held.bytes(), 1024);
+        assert_eq!(BODIES.held(), 1024);
+
+        drop(held);
+        assert_eq!(BODIES.held(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_body_which_comes_larger_than_the_limit_is_refused_and_gives_back_what_it_took() {
+        static BODIES: BufferedBodies = BufferedBodies::new();
+
+        let result =
+            collect_client_body(frames(&[600, 600]), IDLE, limits(1024, 4096), &BODIES).await;
+
+        assert!(matches!(result, Err(ProxyPassError::ClientBodyTooLarge)));
+        assert_eq!(BODIES.held(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_body_which_says_it_is_larger_than_the_limit_is_refused_before_it_is_read() {
+        static BODIES: BufferedBodies = BufferedBodies::new();
+
+        let result = collect_client_body(Announced(1025), IDLE, limits(1024, 4096), &BODIES).await;
+
+        assert!(matches!(result, Err(ProxyPassError::ClientBodyTooLarge)));
+    }
+
+    #[tokio::test]
+    async fn a_body_over_what_all_bodies_may_take_together_waits_for_none_and_is_refused() {
+        static BODIES: BufferedBodies = BufferedBodies::new();
+
+        let (_, first) = collect_client_body(frames(&[800]), IDLE, limits(1000, 1000), &BODIES)
+            .await
+            .unwrap();
+
+        let second =
+            collect_client_body(frames(&[100, 300]), IDLE, limits(1000, 1000), &BODIES).await;
+        assert!(matches!(second, Err(ProxyPassError::BufferedBodiesFull)));
+        assert_eq!(
+            BODIES.held(),
+            800,
+            "the refused one gave back its first frame"
+        );
+
+        drop(first);
+
+        let (_, third) =
+            collect_client_body(frames(&[100, 300]), IDLE, limits(1000, 1000), &BODIES)
+                .await
+                .unwrap();
+        assert_eq!(third.bytes(), 400);
+    }
+
+    #[tokio::test]
+    async fn a_body_which_stops_coming_is_408_and_gives_back_what_it_took() {
+        static BODIES: BufferedBodies = BufferedBodies::new();
+
+        // One frame, and then nothing more - for ever.
+        use futures::StreamExt;
+        let first: Result<Frame<Bytes>, std::io::Error> =
+            Ok(Frame::data(Bytes::from_static(b"some")));
+        let body = http_body_util::StreamBody::new(
+            futures::stream::iter(vec![first]).chain(futures::stream::pending()),
+        );
+
+        let result = collect_client_body(
+            body,
+            std::time::Duration::from_millis(100),
+            limits(1024, 4096),
+            &BODIES,
+        )
+        .await;
+
+        assert!(matches!(result, Err(ProxyPassError::ClientBodyTimeout)));
+        assert_eq!(BODIES.held(), 0);
     }
 }

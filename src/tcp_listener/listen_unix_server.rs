@@ -129,10 +129,12 @@ async fn handle_accepted_connection(
                 //    .await;
             }
             crate::configurations::ListenHttpEndpointType::Http2 => {
+                // A unix socket is of the host itself: no limit of connections is kept for it.
                 super::http2::handle_connection(
                     accepted_connection.into(),
                     listen_host.clone().into(),
                     configuration,
+                    crate::app::ConnectionSlot::unlimited(),
                 )
                 .await;
             }
@@ -163,6 +165,7 @@ async fn handle_accepted_connection(
                     configuration.clone(),
                     id,
                     remote_host.clone(),
+                    crate::app::ConnectionSlot::unlimited(),
                 )
                 .await;
             }
@@ -177,6 +180,7 @@ async fn handle_accepted_connection(
                     accepted_connection.into(),
                     configuration.clone(),
                     remote_host.clone(),
+                    crate::app::ConnectionSlot::unlimited(),
                 )
                 .await;
             }

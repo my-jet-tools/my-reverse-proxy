@@ -48,6 +48,25 @@ pub struct EndpointSettings {
     pub track_metrics_by_all_domains: Option<bool>,
     pub hsts: Option<bool>,
     pub mcp_buffer_size: Option<String>,
+    /// The most of one request body the proxy holds in memory before it sends it on - to an
+    /// upstream which takes a body in one piece. A larger body is answered `413`. Bytes, or a
+    /// number with `Kb` / `Mb` / `Gb`. Absent: the one of `global_settings`. See
+    /// [`crate::types::BufferedBodyLimits`].
+    pub max_buffered_request_body: Option<String>,
+    /// The most any request body to the endpoint may take - streamed to its upstream or held in
+    /// memory: nginx's `client_max_body_size`. A body which says it is larger is answered `413`
+    /// before anything goes upstream; one which comes larger is cut. Absent: the one of
+    /// `global_settings`, else no limit.
+    pub max_request_body: Option<String>,
+    /// The oldest TLS a client may connect with: `1.2` or `1.3`. Absent: the one of
+    /// `global_settings`, else `1.2`. See [`crate::types::TlsMinVersion`].
+    #[serde(default, deserialize_with = "crate::types::number_or_text")]
+    pub tls_min_version: Option<String>,
+    /// The requests one client may make to the endpoint - `10/s`, `600/m`, `100/h` - every
+    /// location of it together. Over it: `429`. See [`crate::types::RateLimiter`].
+    pub rate_limit: Option<String>,
+    /// The requests of `rate_limit` a client may make at once. Absent: the number of the rate.
+    pub rate_limit_burst: Option<u32>,
     #[serde(flatten)]
     pub timeouts: TimeoutsSettings,
 }

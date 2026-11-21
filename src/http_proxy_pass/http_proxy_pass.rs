@@ -196,6 +196,15 @@ impl HttpProxyPass {
                 ));
             }
 
+            // `rate_limit` of the endpoint and of the location - nginx's `limit_req`. Before
+            // `api_keys_auth`: guessing a key is limited as well.
+            if let Some(retry_after) = self
+                .endpoint_info
+                .rate_limit_refusal(&proxy_pass_location.config, &connection_ip)
+            {
+                return Err(ProxyPassError::TooManyRequests(retry_after));
+            }
+
             // The `api_keys_auth` gate of the location - the same rule as the h1 pipeline's
             // `H1Reader::authorize`: refused before anything is sent upstream, and an absent key
             // is indistinguishable from a wrong one.
@@ -256,6 +265,10 @@ impl HttpProxyPass {
                     .await
             }
         };
+
+        // The upstream answered: the body sent to it - with every retry of it - is gone, and is
+        // no longer counted among the bodies held.
+        drop(request.held_body);
 
         let result = match sent {
             Ok(result) => result,

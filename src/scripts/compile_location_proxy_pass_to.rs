@@ -129,6 +129,14 @@ pub async fn compile_location_proxy_pass_to(
     let whitelisted_country =
         super::get_location_whitelisted_country(settings_model, location_settings)?;
 
+    let rate_limit = match location_settings.rate_limit.as_deref() {
+        Some(rate) => Some(std::sync::Arc::new(
+            crate::types::RateLimiter::parse(rate, location_settings.rate_limit_burst)
+                .map_err(|err| format!("Endpoint '{listen_host}', location '{path}': {err}"))?,
+        )),
+        None => None,
+    };
+
     let result = ProxyPassLocationConfig::new(
         path,
         location_settings,
@@ -136,6 +144,7 @@ pub async fn compile_location_proxy_pass_to(
         listen_host,
         endpoint_api_keys_auth,
         whitelisted_country,
+        rate_limit,
     );
 
     Ok(result)

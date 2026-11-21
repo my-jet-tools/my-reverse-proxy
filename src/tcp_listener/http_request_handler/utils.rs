@@ -283,6 +283,49 @@ pub fn generate_tech_page(
                 .body(body)
                 .unwrap()
         }
+        // The body is left unread: an http/1.1 connection can not go on to a next request.
+        ProxyPassError::ClientBodyTooLarge => {
+            let body: Bytes = crate::error_templates::generate_layout_body(
+                413,
+                "Payload Too Large",
+                second_line_error,
+            )
+            .into();
+            let body = Full::new(body).map_err(crate::to_hyper_error).boxed();
+            hyper::Response::builder()
+                .status(hyper::StatusCode::PAYLOAD_TOO_LARGE)
+                .header(hyper::header::CONNECTION, "close")
+                .body(body)
+                .unwrap()
+        }
+        ProxyPassError::TooManyRequests(retry_after) => {
+            let body: Bytes = crate::error_templates::generate_layout_body(
+                429,
+                "Too Many Requests",
+                second_line_error,
+            )
+            .into();
+            let body = Full::new(body).map_err(crate::to_hyper_error).boxed();
+            hyper::Response::builder()
+                .status(hyper::StatusCode::TOO_MANY_REQUESTS)
+                .header(hyper::header::RETRY_AFTER, retry_after.to_string())
+                .body(body)
+                .unwrap()
+        }
+        ProxyPassError::BufferedBodiesFull => {
+            let body: Bytes = crate::error_templates::generate_layout_body(
+                503,
+                "Service Temporarily Unavailable",
+                second_line_error,
+            )
+            .into();
+            let body = Full::new(body).map_err(crate::to_hyper_error).boxed();
+            hyper::Response::builder()
+                .status(hyper::StatusCode::SERVICE_UNAVAILABLE)
+                .header(hyper::header::CONNECTION, "close")
+                .body(body)
+                .unwrap()
+        }
         ProxyPassError::NoLocationFound => {
             let body: Bytes =
                 crate::error_templates::generate_layout_body(404, "Not found", second_line_error)

@@ -34,7 +34,43 @@ pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 // answering is closed instead of being held until TCP itself gives up on it.
 pub const DEFAULT_CLIENT_H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_CLIENT_H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+// An h2 connection with no request on it for this long is closed with a GOAWAY - nginx's
+// `keepalive_timeout`. A browser opens a new one when it needs it.
+pub const DEFAULT_CLIENT_H2_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 pub const DEFAULT_MCP_BUFFER_SIZE: usize = 512 * 1024;
+
+// Request bodies the proxy holds whole in memory before it sends them on (see
+// `crate::types::BufferedBodyLimits`).
+//
+// One body: `max_buffered_request_body` (global → endpoint). The upload limit of the Free and Pro
+// plans of Cloudflare: what passes Cloudflare passes here.
+pub const DEFAULT_MAX_BUFFERED_REQUEST_BODY: usize = 100 * 1024 * 1024;
+// All of them at once, the endpoints together: `max_buffered_request_bodies_total` (global).
+pub const DEFAULT_MAX_BUFFERED_REQUEST_BODIES_TOTAL: usize = 512 * 1024 * 1024;
+
+// The limits of one client connection (see `crate::types::ConnectionSettings`), nginx-like.
+//
+// Requests one connection serves before it is closed: nginx's `keepalive_requests`.
+pub const DEFAULT_MAX_REQUESTS_PER_CONNECTION: u32 = 1000;
+// The head of an http/1.1 request. nginx allows about 32 KB; cookies of some apps are large.
+pub const DEFAULT_MAX_REQUEST_HEAD_SIZE: usize = 64 * 1024;
+// Requests open at once on one h2 connection: nginx's `http2_max_concurrent_streams`.
+pub const DEFAULT_H2_MAX_CONCURRENT_STREAMS: u32 = 128;
+// The decoded headers of one h2 request: the default of hyper.
+pub const DEFAULT_H2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
+
+// Client connections held at once (see `crate::app::ConnectionLimits`). `max_connections` is half
+// the open files limit of the process; these are its floor, and its value where the limit can not
+// be read.
+pub const MIN_DEFAULT_MAX_CONNECTIONS: usize = 256;
+pub const DEFAULT_MAX_CONNECTIONS_WITHOUT_RLIMIT: usize = 10_000;
+// From one address: generous enough for an office behind one NAT address, and far below what a
+// flood of connections from one address takes.
+pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 1000;
+
+// `access_log`: the file is turned over past this size, and so many turned-over files are kept.
+pub const DEFAULT_ACCESS_LOG_MAX_SIZE: usize = 100 * 1024 * 1024;
+pub const DEFAULT_ACCESS_LOG_FILES: u32 = 5;
 
 // H1/H2 upstream pool defaults (used when not overridden in the location config).
 pub const DEFAULT_POOL_SIZE: u8 = 5;

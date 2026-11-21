@@ -25,6 +25,15 @@ pub enum ProxyPassError {
     /// The client went silent in the middle of a request body the proxy waits for whole -
     /// longer than the endpoint's `read_timeout`. Answered `408`.
     ClientBodyTimeout,
+    /// A request body the proxy has to hold whole is larger than `max_buffered_request_body` - it
+    /// says so, or it came so. Answered `413`.
+    ClientBodyTooLarge,
+    /// The request bodies held whole already take what `max_buffered_request_bodies_total` lets
+    /// them all take: this one is not held on top of them. Answered `503`.
+    BufferedBodiesFull,
+    /// The client is over a `rate_limit`: answered `429`, with a `Retry-After` of so many
+    /// seconds.
+    TooManyRequests(u64),
     Disposed,
     GatewayError,
     NoWebSocketUpgrade,
