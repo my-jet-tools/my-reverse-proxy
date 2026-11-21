@@ -204,6 +204,7 @@ pub struct ConnectionSlot {
 
 impl ConnectionSlot {
     /// For a connection no limit is kept for: one of a unix socket, from the host itself.
+    #[cfg(any(unix, test))]
     pub fn unlimited() -> Self {
         Self {
             limits: None,

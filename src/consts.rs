@@ -62,6 +62,7 @@ pub const DEFAULT_H2_MAX_HEADER_LIST_SIZE: u32 = 16 * 1024;
 // Client connections held at once (see `crate::app::ConnectionLimits`). `max_connections` is half
 // the open files limit of the process; these are its floor, and its value where the limit can not
 // be read.
+#[cfg(any(unix, test))]
 pub const MIN_DEFAULT_MAX_CONNECTIONS: usize = 256;
 pub const DEFAULT_MAX_CONNECTIONS_WITHOUT_RLIMIT: usize = 10_000;
 // From one address: generous enough for an office behind one NAT address, and far below what a
