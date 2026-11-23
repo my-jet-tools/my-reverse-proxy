@@ -4,12 +4,14 @@ use serde::*;
 
 use crate::secure::StoredGatewayConnection;
 
-/// `Ok` while the admin mode of MCP is open; what a tool which changes the secure store answers
-/// when it is closed.
-pub fn admin_mode_is_open() -> Result<(), String> {
+/// `Ok` while the admin mode of MCP is open for where the session of `ctx` comes from; what a tool
+/// which changes the proxy answers otherwise.
+pub fn admin_mode_is_open_for(ctx: &ToolCallContext) -> Result<(), String> {
+    let session = crate::app::APP_CTX.mcp_session_callers.get(&ctx.session_id);
+
     crate::app::APP_CTX
         .mcp_admin_mode
-        .check(DateTimeAsMicroseconds::now())
+        .check_for(session, DateTimeAsMicroseconds::now())
 }
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]

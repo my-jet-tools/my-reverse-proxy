@@ -17,7 +17,7 @@ use crate::mcp::{
 };
 
 /// What MCP clients are told about the server as a whole.
-const MCP_INSTRUCTIONS: &str = "my-reverse-proxy diagnostic snapshots — pools, locations, and their correlation. A reload of the settings, and the secure store - private keys, connections to gateways, the keys the gateway server lets in - are changed only in ADMIN MODE: the tools marked so work only while the operator has opened it, for some minutes, with an encrypted call of the control port. No tool opens it: when one is refused, say so and ask the operator to open it, do not retry. get_mcp_admin_mode tells whether it is open; reading is never gated. A private key never leaves the proxy over MCP: only public keys do.";
+const MCP_INSTRUCTIONS: &str = "my-reverse-proxy diagnostic snapshots — pools, locations, and their correlation. A reload of the settings, and the secure store - private keys, connections to gateways, the keys the gateway server lets in - are changed only in ADMIN MODE: the tools marked so work only while the operator has opened it, for some minutes, with an encrypted call of the control port - and only for the MCP sessions which come from the address it was opened from. No tool opens it: when one is refused, say so and ask the operator to open it, do not retry. get_mcp_admin_mode tells whether it is open; reading is never gated. A private key never leaves the proxy over MCP: only public keys do.";
 
 /// The control port at the address of the settings: `global_settings.http_control_port` and
 /// `http_control_ip`, `127.0.0.1:8000` when they say nothing - and on the unix socket of
@@ -85,7 +85,7 @@ fn serve(mut http_server: MyHttpServer) {
     mcp.register_tool_call(Arc::new(LookupPoolHandler));
     mcp.register_tool_call(Arc::new(GetSettingsHandler));
     mcp.register_tool_call(Arc::new(GetAppliedSettingsHandler));
-    mcp.register_tool_call(Arc::new(ReloadSettingsHandler));
+    mcp.register_tool_call_with_context(Arc::new(ReloadSettingsHandler));
     mcp.register_tool_call(Arc::new(GetDynamicSettingsHandler));
     mcp.register_tool_call(Arc::new(SetDynamicSettingsHandler));
     mcp.register_tool_call(Arc::new(GetProxyLogsHandler));
@@ -95,16 +95,18 @@ fn serve(mut http_server: MyHttpServer) {
     mcp.register_tool_call(Arc::new(GetClientCaEndpointsStatusHandler));
     mcp.register_tool_call(Arc::new(GetClientCertificateCaHandler));
     mcp.register_tool_call(Arc::new(InitClientCertificateCaHandler));
-    mcp.register_tool_call(Arc::new(GetMcpAdminModeHandler));
+    mcp.register_tool_call_with_context(Arc::new(GetMcpAdminModeHandler));
     mcp.register_tool_call(Arc::new(GetPublicKeyHandler));
-    mcp.register_tool_call(Arc::new(GeneratePrivateKeyHandler));
+    mcp.register_tool_call_with_context(Arc::new(GeneratePrivateKeyHandler));
     mcp.register_tool_call(Arc::new(GetGatewayConnectionsHandler));
-    mcp.register_tool_call(Arc::new(SetGatewayConnectionHandler));
-    mcp.register_tool_call(Arc::new(DeleteGatewayConnectionHandler));
+    mcp.register_tool_call_with_context(Arc::new(SetGatewayConnectionHandler));
+    mcp.register_tool_call_with_context(Arc::new(DeleteGatewayConnectionHandler));
     mcp.register_tool_call(Arc::new(GetGatewayAuthorizedKeysHandler));
-    mcp.register_tool_call(Arc::new(SetGatewayAuthorizedKeyHandler));
-    mcp.register_tool_call(Arc::new(DeleteGatewayAuthorizedKeyHandler));
+    mcp.register_tool_call_with_context(Arc::new(SetGatewayAuthorizedKeyHandler));
+    mcp.register_tool_call_with_context(Arc::new(DeleteGatewayAuthorizedKeyHandler));
 
+    // Before MCP: where every request of an MCP session comes from, for the admin mode.
+    http_server.add_middleware(Arc::new(super::mcp_caller_recorder::McpCallerRecorder));
     http_server.add_middleware(Arc::new(mcp));
 
     http_server.add_middleware(controllers);

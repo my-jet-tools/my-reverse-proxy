@@ -1,7 +1,7 @@
 use mcp_server_middleware::*;
 use serde::*;
 
-use super::{admin_mode_is_open, AuthorizedKeyMcpModel};
+use super::{admin_mode_is_open_for, AuthorizedKeyMcpModel};
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct SetGatewayAuthorizedKeyInputData {
@@ -29,14 +29,15 @@ impl ToolDefinition for SetGatewayAuthorizedKeyHandler {
 }
 
 #[async_trait::async_trait]
-impl McpToolCall<SetGatewayAuthorizedKeyInputData, AuthorizedKeyMcpModel>
+impl McpToolCallEx<SetGatewayAuthorizedKeyInputData, AuthorizedKeyMcpModel>
     for SetGatewayAuthorizedKeyHandler
 {
     async fn execute_tool_call(
         &self,
         model: SetGatewayAuthorizedKeyInputData,
+        ctx: &ToolCallContext,
     ) -> Result<AuthorizedKeyMcpModel, String> {
-        admin_mode_is_open()?;
+        admin_mode_is_open_for(ctx)?;
 
         let id = crate::secure::check_gateway_connection_id(&model.id)?;
         let public = crate::secure::parse_openssh_ed25519_public(&model.public_key)?;

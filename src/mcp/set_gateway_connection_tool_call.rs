@@ -1,7 +1,7 @@
 use mcp_server_middleware::*;
 use serde::*;
 
-use super::{admin_mode_is_open, GatewayConnectionMcpModel};
+use super::{admin_mode_is_open_for, GatewayConnectionMcpModel};
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct SetGatewayConnectionInputData {
@@ -46,14 +46,15 @@ impl ToolDefinition for SetGatewayConnectionHandler {
 }
 
 #[async_trait::async_trait]
-impl McpToolCall<SetGatewayConnectionInputData, GatewayConnectionMcpModel>
+impl McpToolCallEx<SetGatewayConnectionInputData, GatewayConnectionMcpModel>
     for SetGatewayConnectionHandler
 {
     async fn execute_tool_call(
         &self,
         model: SetGatewayConnectionInputData,
+        ctx: &ToolCallContext,
     ) -> Result<GatewayConnectionMcpModel, String> {
-        admin_mode_is_open()?;
+        admin_mode_is_open_for(ctx)?;
 
         let connection =
             crate::scripts::set_gateway_connection(crate::secure::GatewayConnectionInput {

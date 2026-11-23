@@ -199,8 +199,14 @@ is in my-http-server's `docs/http-actions/encrypted-requests.md`. What the proxy
 ## MCP admin mode
 
 - `POST /api/mcp/v1/admin-mode`, encrypted, `{"minutes": N}`: open for N minutes from now, 60 at
-  most, in place of the time it had left; 0 closes it; `{}` is 10. Answer `{open, seconds_left}`.
-  It is closed after every start, and no MCP tool opens it.
+  most, in place of the time and the address it had; 0 closes it, from any address; `{}` is 10.
+  Answer `{open, seconds_left, ip, country}`. It is closed after every start, and no MCP tool
+  opens it.
+- It is open for the address of the call which opened it: the last entry of `X-Forwarded-For` when
+  the call comes from the loopback (the proxy relays it so), the peer address otherwise; the unix
+  socket and the bare loopback are `this host`. A middleware in front of MCP writes down where the
+  requests of each MCP session come from (`McpSessionCallers`), and a tool which needs admin mode
+  runs only for a session which has come from that address alone.
 - While it is open, the MCP tools which change the proxy work: `reload_settings`,
   `generate_private_key`, `set_gateway_connection`, `delete_gateway_connection`,
   `set_gateway_authorized_key`, `delete_gateway_authorized_key`. Closed, they answer that it is

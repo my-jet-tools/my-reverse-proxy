@@ -10,11 +10,11 @@ use super::{key_of_encrypted_request, parse_call, EncryptedJsonHttpInput};
     method: "POST",
     route: "/api/mcp/v1/admin-mode",
     summary: "Open or close the admin mode of MCP",
-    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key - no MCP tool opens the admin mode. Body: JSON `{\"minutes\": 10}`: it is open for that many minutes from now, 60 at most, in place of the time it had left; 0 closes it; `{}` opens it for 10. While it is open, the MCP tools which change the proxy work: reload_settings, generate_private_key, set_gateway_connection, delete_gateway_connection, set_gateway_authorized_key, delete_gateway_authorized_key. It is closed when the proxy starts. The answer is `{\"open\", \"seconds_left\"}`.",
+    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key - no MCP tool opens the admin mode. Body: JSON `{\"minutes\": 10}`: it is open for that many minutes from now, 60 at most, in place of the time and the address it had; 0 closes it, from any address; `{}` opens it for 10. It is open for the address this call comes from - `X-Forwarded-For` when the proxy relays it to the control port, `this host` for the unix socket and the bare loopback: while it is open, the MCP tools which change the proxy work for the MCP sessions from that address, and are refused for any other - reload_settings, generate_private_key, set_gateway_connection, delete_gateway_connection, set_gateway_authorized_key, delete_gateway_authorized_key. It is closed when the proxy starts. The answer is `{\"open\", \"seconds_left\", \"ip\", \"country\"}`.",
     controller: "Mcp",
     input_data: EncryptedJsonHttpInput,
     result:[
-        {status_code: 200, description: "`{\"open\", \"seconds_left\"}`, encrypted"},
+        {status_code: 200, description: "`{\"open\", \"seconds_left\", \"ip\", \"country\"}`, encrypted"},
         {status_code: 400, description: "The body opens with no key, is not the JSON above, or asks for more than 60 minutes"},
         {status_code: 415, description: "The body did not come encrypted - or the proxy has no network keys yet"},
     ]
@@ -41,19 +41,30 @@ async fn handle_request(
     let now = DateTimeAsMicroseconds::now();
     let admin_mode = &crate::app::APP_CTX.mcp_admin_mode;
 
-    admin_mode.open_for(minutes, now);
+    // Open for where this call comes from; closed by a call from anywhere.
+    let caller = crate::app::CallerIp::of_request(&ctx.request);
+
+    admin_mode.open_for(minutes, now, caller);
 
     if minutes == 0 {
-        println!("MCP admin mode is closed over the encrypted API");
+        println!(
+            "MCP admin mode is closed over the encrypted API, from {caller} ({})",
+            caller.country()
+        );
     } else {
-        println!("MCP admin mode is open for {minutes} minutes - opened over the encrypted API");
+        println!(
+            "MCP admin mode is open for {minutes} minutes for {caller} ({}) - opened over the encrypted API",
+            caller.country()
+        );
     }
 
-    let seconds_left = admin_mode.seconds_left(now);
+    let state = admin_mode.state(now);
 
     HttpOutput::as_json(McpAdminModeHttpModel {
-        open: seconds_left > 0,
-        seconds_left,
+        open: state.is_some(),
+        seconds_left: state.map(|itm| itm.seconds_left).unwrap_or(0),
+        ip: state.map(|itm| itm.opened_from.to_string()),
+        country: state.map(|itm| itm.opened_from.country()),
     })
     .encode(&key)
     .into_ok_result(false)
@@ -69,4 +80,7 @@ struct SetMcpAdminModeCall {
 struct McpAdminModeHttpModel {
     open: bool,
     seconds_left: i64,
+    /// The address it is open for: where the call which opened it came from.
+    ip: Option<String>,
+    country: Option<String>,
 }

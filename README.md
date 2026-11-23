@@ -2428,16 +2428,25 @@ hosts:
 
 The MCP tools which change the proxy work only while admin mode is open: `reload_settings`,
 `generate_private_key`, `set_gateway_connection`, `delete_gateway_connection`, `set_gateway_authorized_key`,
-`delete_gateway_authorized_key`. Only the operator opens it, with an encrypted call - no MCP tool does:
+`delete_gateway_authorized_key`. Only the operator opens it, with an encrypted call - no MCP tool does - and it
+is open for the address that call came from only:
 
 ```sh
-echo '{"minutes": 10}' | encrypted_call http://127.0.0.1:8000 /api/mcp/v1/admin-mode ~/.network-key
-# -> {"open":true,"seconds_left":600}
-echo '{"minutes": 0}' | encrypted_call http://127.0.0.1:8000 /api/mcp/v1/admin-mode ~/.network-key   # closes it
+echo '{"minutes": 10}' | encrypted_call https://admin.example.com /api/mcp/v1/admin-mode ~/.network-key
+# -> {"open":true,"seconds_left":600,"ip":"203.0.113.7","country":"DE"}
+echo '{"minutes": 0}' | encrypted_call https://admin.example.com /api/mcp/v1/admin-mode ~/.network-key   # closes it
 ```
 
-- It is open for the minutes given, 60 at most (`{}` - 10), in place of the time it had left, and closes by
-  itself. It is closed after every start.
+- An MCP session from another address is refused, and so is one which has come from more than one address:
+  the tools need the session to come from the address admin mode was opened from. Closing it is a call from any
+  address.
+- The address of a call is the one the proxy writes in `X-Forwarded-For` when it relays the call to the control
+  port (from its loopback); the header of anybody else is not believed. The unix socket, and the loopback with
+  no such header, are `this host`: opened from there, it is open for MCP sessions of this host only.
+- `get_mcp_admin_mode` tells the address it is open for and its country, where the session comes from, and
+  whether it is open for it.
+- It is open for the minutes given, 60 at most (`{}` - 10), in place of the time and the address it had, and
+  closes by itself. It is closed after every start.
 - Reading is never gated: `get_mcp_admin_mode`, `get_public_key`, `get_gateway_connections`,
   `get_gateway_authorized_keys`.
 - A private key never leaves the proxy over MCP: `generate_private_key` and `get_public_key` give public keys

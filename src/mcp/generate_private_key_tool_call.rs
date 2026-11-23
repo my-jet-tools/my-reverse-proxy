@@ -1,7 +1,7 @@
 use mcp_server_middleware::*;
 use serde::*;
 
-use super::{admin_mode_is_open, PublicKeyMcpModel};
+use super::{admin_mode_is_open_for, PublicKeyMcpModel};
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct GeneratePrivateKeyInputData {
@@ -19,12 +19,13 @@ impl ToolDefinition for GeneratePrivateKeyHandler {
 }
 
 #[async_trait::async_trait]
-impl McpToolCall<GeneratePrivateKeyInputData, PublicKeyMcpModel> for GeneratePrivateKeyHandler {
+impl McpToolCallEx<GeneratePrivateKeyInputData, PublicKeyMcpModel> for GeneratePrivateKeyHandler {
     async fn execute_tool_call(
         &self,
         model: GeneratePrivateKeyInputData,
+        ctx: &ToolCallContext,
     ) -> Result<PublicKeyMcpModel, String> {
-        admin_mode_is_open()?;
+        admin_mode_is_open_for(ctx)?;
 
         let id = crate::secure::check_private_key_id(&model.id)?;
 

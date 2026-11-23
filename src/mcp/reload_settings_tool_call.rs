@@ -3,7 +3,7 @@ use serde::*;
 
 use crate::app::APP_CTX;
 
-use super::{admin_mode_is_open, ConfigurationErrorEntry};
+use super::{admin_mode_is_open_for, ConfigurationErrorEntry};
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct ReloadSettingsInputData {}
@@ -39,12 +39,13 @@ impl ToolDefinition for ReloadSettingsHandler {
 }
 
 #[async_trait::async_trait]
-impl McpToolCall<ReloadSettingsInputData, ReloadSettingsResponse> for ReloadSettingsHandler {
+impl McpToolCallEx<ReloadSettingsInputData, ReloadSettingsResponse> for ReloadSettingsHandler {
     async fn execute_tool_call(
         &self,
         _model: ReloadSettingsInputData,
+        ctx: &ToolCallContext,
     ) -> Result<ReloadSettingsResponse, String> {
-        admin_mode_is_open()?;
+        admin_mode_is_open_for(ctx)?;
 
         let (ok, error) = match crate::flows::load_everything_from_settings().await {
             Ok(()) => (true, String::new()),

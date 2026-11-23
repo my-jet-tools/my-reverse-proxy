@@ -1,7 +1,7 @@
 use mcp_server_middleware::*;
 use serde::*;
 
-use super::{admin_mode_is_open, DeletedMcpModel};
+use super::{admin_mode_is_open_for, DeletedMcpModel};
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct DeleteGatewayAuthorizedKeyInputData {
@@ -19,14 +19,15 @@ impl ToolDefinition for DeleteGatewayAuthorizedKeyHandler {
 }
 
 #[async_trait::async_trait]
-impl McpToolCall<DeleteGatewayAuthorizedKeyInputData, DeletedMcpModel>
+impl McpToolCallEx<DeleteGatewayAuthorizedKeyInputData, DeletedMcpModel>
     for DeleteGatewayAuthorizedKeyHandler
 {
     async fn execute_tool_call(
         &self,
         model: DeleteGatewayAuthorizedKeyInputData,
+        ctx: &ToolCallContext,
     ) -> Result<DeletedMcpModel, String> {
-        admin_mode_is_open()?;
+        admin_mode_is_open_for(ctx)?;
 
         let id = model.id.trim().to_string();
 

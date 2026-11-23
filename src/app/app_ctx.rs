@@ -160,8 +160,12 @@ pub struct AppContext {
     /// read from services is decrypted with. See [`crate::secure`].
     pub secure: crate::secure::SecureState,
 
-    /// While it is open, the MCP tools which change the secure store work.
+    /// While it is open, the MCP tools which change the proxy work - for the address it was
+    /// opened from.
     pub mcp_admin_mode: McpAdminMode,
+
+    /// Where the requests of each MCP session come from.
+    pub mcp_session_callers: McpSessionCallers,
 }
 
 impl AppContext {
@@ -299,6 +303,7 @@ impl AppContext {
             cloudflare_deviations: crate::cloudflare::DeviationJournal::new(),
             secure,
             mcp_admin_mode: McpAdminMode::new(),
+            mcp_session_callers: McpSessionCallers::new(),
         }
     }
 
