@@ -35,6 +35,29 @@ pub struct SecureStoreModel {
     /// `authorized_keys` files, by their ids in order.
     #[prost(message, repeated, tag = "4")]
     pub gateway_authorized_keys: Vec<StoredAuthorizedKey>,
+    /// The gateway server set over the encrypted API: started from initialize on.
+    #[prost(message, optional, tag = "5")]
+    pub gateway_server: Option<StoredGatewayServer>,
+    /// The secure settings: a YAML document of the schema of the settings file - hosts with their
+    /// endpoints and locations, variables, lists - merged with the settings files like the dynamic
+    /// settings file, from initialize on. Empty - none.
+    #[prost(string, tag = "6")]
+    pub settings_yaml: String,
+}
+
+/// A gateway server: what `gateway_server` of the settings says, with no `authorized_keys`
+/// files - it lets in the keys the store authorizes.
+#[derive(Clone, PartialEq, Eq, ::prost::Message)]
+pub struct StoredGatewayServer {
+    /// It listens at `0.0.0.0:<port>`.
+    #[prost(uint32, tag = "1")]
+    pub port: u32,
+    /// Who may connect at all, before the handshake: entries of `ip_white_lists`. No entry -
+    /// anybody.
+    #[prost(string, repeated, tag = "2")]
+    pub allowed_ip: Vec<String>,
+    #[prost(bool, tag = "3")]
+    pub debug: bool,
 }
 
 /// A private key of the store: what a gateway client names with `private_key:`.
@@ -75,14 +98,20 @@ pub struct StoredGatewayConnection {
     pub debug: bool,
 }
 
-/// A public key the gateway server lets in.
+/// A public key the gateway server lets in: under one gateway name - its id - and from the
+/// addresses of its white list.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StoredAuthorizedKey {
+    /// The gateway name a client which signs with the key comes in under.
     #[prost(string, tag = "1")]
     pub id: String,
     /// The 32 bytes of the Ed25519 public key.
     #[prost(bytes = "vec", tag = "2")]
     pub ed25519_public: Vec<u8>,
+    /// Where it comes from: entries of `ip_white_lists` - addresses, ranges, subnets, `*`. No
+    /// entry - from nowhere.
+    #[prost(string, repeated, tag = "3")]
+    pub ip_white_list: Vec<String>,
 }
 
 /// What reading the store with a files key found.
@@ -261,7 +290,14 @@ mod tests {
             gateway_authorized_keys: vec![StoredAuthorizedKey {
                 id: "paris".to_string(),
                 ed25519_public: vec![4u8; 32],
+                ip_white_list: vec!["10.0.0.0/24".to_string()],
             }],
+            gateway_server: Some(StoredGatewayServer {
+                port: 30000,
+                allowed_ip: vec!["10.0.0.0/24".to_string()],
+                debug: false,
+            }),
+            settings_yaml: "hosts: {}\n".to_string(),
         }
     }
 

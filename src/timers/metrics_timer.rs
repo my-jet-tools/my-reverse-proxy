@@ -5,7 +5,7 @@ pub struct MetricsTimer;
 #[async_trait::async_trait]
 impl MyTimerTick for MetricsTimer {
     async fn tick(&self) -> RepeatTimerIteration {
-        if let Some(server_gateway) = crate::app::APP_CTX.gateway_server.as_ref() {
+        if let Some(server_gateway) = crate::app::APP_CTX.gateway_server.get() {
             server_gateway.timer_1s().await;
         }
 

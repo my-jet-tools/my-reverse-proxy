@@ -15,7 +15,7 @@ pub struct GeneratePrivateKeyHandler;
 
 impl ToolDefinition for GeneratePrivateKeyHandler {
     const FUNC_NAME: &'static str = "generate_private_key";
-    const DESCRIPTION: &'static str = "ADMIN MODE. Generates a new Ed25519 private key and keeps it in the secure store under `id`; returns its PUBLIC key only - a private key never leaves the proxy through MCP. Use it for a connection of this proxy to a gateway: (1) generate the key here, (2) let its public key in on the proxy which runs the gateway server - set_gateway_authorized_key there, or a line of its authorized_keys file, (3) set_gateway_connection here with private_key = this id. An id which has a key already is refused. Refused while admin mode is closed (see get_mcp_admin_mode): then ask the operator to open it, do not retry.";
+    const DESCRIPTION: &'static str = "ADMIN MODE. Generates a new Ed25519 private key and keeps it in the secure store under `id`; returns its PUBLIC key only - a private key never leaves the proxy through MCP. Use it for a connection of this proxy to a gateway: (1) generate the key here, (2) let its public key in on the proxy which runs the gateway server - set_gateway_authorized_key there, with id = the id of the connection of step 3 and this proxy's address in ip_white_list, (3) set_gateway_connection here with private_key = this id. An id which has a key already is refused. Refused while admin mode is closed (see get_mcp_admin_mode): then ask the operator to open it, do not retry.";
 }
 
 #[async_trait::async_trait]

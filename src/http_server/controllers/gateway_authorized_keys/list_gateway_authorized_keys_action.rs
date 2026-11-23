@@ -7,7 +7,7 @@ use super::{key_of_encrypted_request, EncryptedJsonHttpInput, GatewayAuthorizedK
     method: "POST",
     route: "/api/gateway-authorized-keys/v1/list",
     summary: "The keys of the secure store the gateway server lets in",
-    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key. The body is any JSON - `{}` - since an empty body carries no encryption. The answer is `{\"authorized_keys\": [{\"id\", \"public_key\"}]}`, by the ids in order. The keys of the `authorized_keys` files are not here.",
+    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key. The body is any JSON - `{}` - since an empty body carries no encryption. The answer is `{\"authorized_keys\": [{\"id\", \"public_key\", \"ip_white_list\"}]}`, by the ids in order: the gateway name each key comes in under, the key, and the addresses it comes from. The keys of the `authorized_keys` files are not here.",
     controller: "GatewayAuthorizedKeys",
     input_data: EncryptedJsonHttpInput,
     result:[
@@ -30,9 +30,10 @@ async fn handle_request(
         .gateway_authorized_keys
         .list()
         .iter()
-        .map(|(id, public)| GatewayAuthorizedKeyHttpModel {
-            id: id.clone(),
-            public_key: crate::secure::openssh_verifying_key(public),
+        .map(|itm| GatewayAuthorizedKeyHttpModel {
+            id: itm.id.clone(),
+            public_key: crate::secure::openssh_verifying_key(&itm.key),
+            ip_white_list: itm.ip_white_list.clone(),
         })
         .collect();
 

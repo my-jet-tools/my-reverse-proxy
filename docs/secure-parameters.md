@@ -8,8 +8,10 @@ Built so far (`src/secure`): `/api/initialize` (over the control unix socket or 
 store with the network keys, the reading of encrypted sources, `ip_white_lists` in real-time
 answers, the control port's servers decrypting encrypted calls and refusing replays, the private
 keys of gateway clients (`/api/private-keys/v1/...`: installed, generated, given out;
-`private_key:` of a client), the connections to gateways and the keys the gateway server lets in
-(`/api/gateway-connections/v1/...`, `/api/gateway-authorized-keys/v1/...`), the admin mode of MCP
+`private_key:` of a client), the gateway server, the connections to gateways and the keys the
+gateway server lets in (`/api/gateway-server/v1/...`, `/api/gateway-connections/v1/...`,
+`/api/gateway-authorized-keys/v1/...`), the secure settings - hosts in the store
+(`/api/secure-settings/v1/...`), the admin mode of MCP
 (`/api/mcp/v1/admin-mode`), and `bin/encrypted_call` to send the calls. Body encryption is FlUrl's
 and my-http-server's: the proxy has none of its own. Not built yet: the other parameters of the
 store.
@@ -142,15 +144,24 @@ is in my-http-server's `docs/http-actions/encrypted-requests.md`. What the proxy
 
 | Route (encrypted, `POST`) | Body | Answer |
 |---|---|---|
+| `/api/gateway-server/v1/set` | `{port, allowed_ip?, debug?}` | the server as kept; `409` when the port can not be had, or the settings have a gateway server |
+| `/api/gateway-server/v1/delete` | `{}` | `{deleted}` |
+| `/api/gateway-server/v1/get` | `{}` | `{secure_store, running: {source, listen, clients}}` |
 | `/api/private-keys/v1/generate` | `{id}` | `{id, public_key}`; `409` when the id has a key |
 | `/api/private-keys/v1/download` | `{id}` | `{id, private_key, public_key}`: the key in OpenSSH form; `404` when there is none |
 | `/api/gateway-connections/v1/set` | `{id, remote_host, private_key, compress?, connect_timeout?, allow_incoming_forward_connections?, sync_ssl_certificates?, debug?}` | the connection as kept |
 | `/api/gateway-connections/v1/delete` | `{id}` | `{id, deleted}` |
 | `/api/gateway-connections/v1/list` | `{}` | `{gateway_connections: [{..., connected}]}` |
-| `/api/gateway-authorized-keys/v1/set` | `{id, public_key}` | `{id, public_key}` |
+| `/api/gateway-authorized-keys/v1/set` | `{id, public_key, ip_white_list}` | `{id, public_key, ip_white_list}` |
 | `/api/gateway-authorized-keys/v1/delete` | `{id}` | `{id, deleted}` |
-| `/api/gateway-authorized-keys/v1/list` | `{}` | `{authorized_keys: [{id, public_key}]}` |
+| `/api/gateway-authorized-keys/v1/list` | `{}` | `{authorized_keys: [{id, public_key, ip_white_list}]}` |
 
+- The gateway server of the store is `gateway_server` of the settings with no `authorized_keys`
+  files - it lets in the keys of the store alone - listening at `0.0.0.0:<port>`. It is started
+  when it is set and after every initialize, and stopped when it is removed. Set on another port,
+  the new one listens before the one before stops, and a port which can not be had leaves the one
+  before untouched; on the same port the one before stops first. While the settings have a
+  `gateway_server`, the store's is refused.
 - A connection of the store is a gateway client like one of the settings: started when it is set
   and after every initialize, replaced when it is set again (its gateway connection closed and
   opened anew), stopped when it is removed. The private key it names has to be in the store. The id
@@ -159,16 +170,41 @@ is in my-http-server's `docs/http-actions/encrypted-requests.md`. What the proxy
 - The gateway server checks every handshake against the keys of its `authorized_keys` files and the
   keys of the store as they are at that moment. `authorized_keys` may be left out: the server then
   lets in the store's keys alone - nobody before initialize.
-- Store fields: `gateway_connections` (tag 3) and `gateway_authorized_keys` (tag 4) of the protobuf.
+- A key of the store is bound: its id is the gateway name the client comes in under, and its
+  `ip_white_list` (at least one entry of `ip_white_lists`: an address, a range, a subnet, `*`) the
+  addresses it comes from. Both are checked in the handshake, after the signature and before the
+  server answers: a client under another name or from another address fails its handshake. A key
+  of a file comes in under any name, from wherever `allowed_ip` lets in.
+- Store fields: `gateway_connections` (tag 3), `gateway_authorized_keys` (tag 4) and
+  `gateway_server` (tag 5) of the protobuf; an authorized key has its `ip_white_list` as tag 3.
+
+## Secure settings
+
+| Route (encrypted, `POST`) | Body | Answer |
+|---|---|---|
+| `/api/secure-settings/v1/get` | `{}` | the document, YAML text - nothing when there is none |
+| `/api/secure-settings/v1/set` | the whole document, YAML; blank - remove it | `{bytes_kept}` |
+
+- One YAML document of the schema of the settings file - hosts with their endpoints and locations,
+  variables, lists - kept in the store (`settings_yaml`, tag 6), set and read as a whole.
+- Merged with the settings files like the dynamic settings file, after it
+  (`SettingsCompiled::load_settings`): a host of the document replaces one of the files with the
+  same id; the variables of every file and of the document are one set.
+- `set` compiles the settings with the document first (`load_settings_with_secure`) - a document
+  which is not settings YAML, or with which they do not compile, is refused with `400` and nothing
+  is kept, the error quoting nothing of it - then keeps it. Like the dynamic settings file, it is
+  applied by a reload: the MCP tool `reload_settings`, in admin mode. The initialize which opens the
+  store applies the settings with the document, as the files are applied at the start.
 
 ## MCP admin mode
 
 - `POST /api/mcp/v1/admin-mode`, encrypted, `{"minutes": N}`: open for N minutes from now, 60 at
   most, in place of the time it had left; 0 closes it; `{}` is 10. Answer `{open, seconds_left}`.
   It is closed after every start, and no MCP tool opens it.
-- While it is open, the MCP tools which change the store work: `generate_private_key`,
-  `set_gateway_connection`, `delete_gateway_connection`, `set_gateway_authorized_key`,
-  `delete_gateway_authorized_key`. Closed, they answer that it is closed and how it is opened.
+- While it is open, the MCP tools which change the proxy work: `reload_settings`,
+  `generate_private_key`, `set_gateway_connection`, `delete_gateway_connection`,
+  `set_gateway_authorized_key`, `delete_gateway_authorized_key`. Closed, they answer that it is
+  closed and how it is opened.
 - Reading is never gated: `get_mcp_admin_mode`, `get_public_key`, `get_gateway_connections`,
   `get_gateway_authorized_keys`. No MCP tool gives a private key.
 

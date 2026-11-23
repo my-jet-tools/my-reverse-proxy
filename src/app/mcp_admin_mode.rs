@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
 /// What a tool which changes something answers while the admin mode is closed.
-pub const MCP_ADMIN_MODE_IS_CLOSED: &str = "MCP admin mode is closed: this tool changes the secure store, and works only while the operator has opened admin mode - with an encrypted call of the control port, POST /api/mcp/v1/admin-mode. No MCP tool opens it: ask the operator to open it, and do not retry until then.";
+pub const MCP_ADMIN_MODE_IS_CLOSED: &str = "MCP admin mode is closed: this tool changes the proxy, and works only while the operator has opened admin mode - with an encrypted call of the control port, POST /api/mcp/v1/admin-mode. No MCP tool opens it: ask the operator to open it, and do not retry until then.";
 
-/// The admin mode of MCP: while it is open, the tools which change the secure store work - they
-/// generate private keys, set the connections to gateways and the keys the gateway server lets
-/// in. It is opened for some minutes by an encrypted call of the control port,
+/// The admin mode of MCP: while it is open, the tools which change the proxy work - they reload
+/// the settings, generate private keys, set the connections to gateways and the keys the gateway
+/// server lets in. It is opened for some minutes by an encrypted call of the control port,
 /// `POST /api/mcp/v1/admin-mode`, and closes by itself; no MCP tool opens it. It is closed when
 /// the proxy starts.
 pub struct McpAdminMode {

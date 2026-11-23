@@ -3461,13 +3461,17 @@ async fn a_client_pings_as_soon_as_it_is_connected() {
     let port = listener.local_addr().unwrap().port();
     let _client = start_client(NAME, &key, port, false);
 
-    let (mut stream, _) = tokio::time::timeout(TIMEOUT, listener.accept())
+    let (mut stream, peer) = tokio::time::timeout(TIMEOUT, listener.accept())
         .await
         .expect("the client did not connect")
         .unwrap();
-    let outcome = handshake::perform_server_handshake(&mut stream, &[key.verifying_key()])
-        .await
-        .unwrap();
+    let outcome = handshake::perform_server_handshake(
+        &mut stream,
+        &[handshake::AuthorizedClientKey::unbound(key.verifying_key())],
+        peer.ip(),
+    )
+    .await
+    .unwrap();
     let (_sealer, mut opener) = outcome.session_keys.into_server_ends();
 
     let connected = Instant::now();
@@ -3661,8 +3665,8 @@ async fn a_client_with_a_key_which_is_not_authorized_is_not_let_in() {
 }
 
 /// A key the secure store authorizes is let in from the next handshake on - no restart, and no
-/// `authorized_keys` file - and once it is removed from the store, a new handshake with it is
-/// refused while the connection it let in stays.
+/// `authorized_keys` file - under its own gateway name only; once it is removed from the store, a
+/// new handshake with it is refused while the connection it let in stays.
 #[tokio::test]
 async fn a_key_the_secure_store_authorizes_is_let_in_without_a_restart() {
     use base64::Engine;
@@ -3696,10 +3700,19 @@ async fn a_key_the_secure_store_authorizes_is_let_in_without_a_restart() {
     assert!(server.get_gateway_connection("from-store").is_none());
 
     secure
-        .set_gateway_authorized_key("from-store", key.verifying_key())
+        .set_gateway_authorized_key(
+            "from-store",
+            key.verifying_key(),
+            vec!["127.0.0.1".to_string()],
+        )
         .await
         .unwrap();
     wait_until(|| server.get_gateway_connection("from-store").is_some()).await;
+
+    // The same key under another name - say, to take the place of another client - is refused.
+    let _impostor = start_client("impostor", &key, port, false);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(server.get_gateway_connection("impostor").is_none());
 
     assert!(secure
         .delete_gateway_authorized_key("from-store")

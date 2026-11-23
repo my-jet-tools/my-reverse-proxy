@@ -52,6 +52,10 @@ async fn handle_request(
         None => crate::consts::DEFAULT_SECURE_STORE_FILE.to_string(),
     };
 
+    // Whether this call opens the store: what it keeps is applied then, as the settings files are
+    // at the start.
+    let opens_the_store = !crate::app::APP_CTX.secure.is_initialized();
+
     let outcome = crate::app::APP_CTX
         .secure
         .initialize(&store_file, &request.key, request.network_keys.as_deref())
@@ -62,7 +66,7 @@ async fn handle_request(
             InitializeError::Failed(reason) => HttpFailResult::as_fatal_error(reason),
         })?;
 
-    tokio::spawn(crate::flows::after_initialize());
+    tokio::spawn(crate::flows::after_initialize(opens_the_store));
 
     HttpOutput::as_text(outcome.as_str().to_string()).into_ok_result(true)
 }

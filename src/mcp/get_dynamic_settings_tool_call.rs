@@ -28,7 +28,7 @@ pub struct GetDynamicSettingsHandler;
 
 impl ToolDefinition for GetDynamicSettingsHandler {
     const FUNC_NAME: &'static str = "get_dynamic_settings";
-    const DESCRIPTION: &'static str = "Read the raw YAML of the dynamic settings file — the single settings file pointed to by `dynamic_configurations_file` that is editable over MCP. It is merged into the running configuration exactly like an `include:` file. Returns its resolved path and current content (empty if it does not exist yet). ALWAYS call this BEFORE set_dynamic_settings: edit the content this returns and write it back, instead of composing a new file from scratch — set_dynamic_settings is a full-file replace, so anything not present in what you send is lost. After writing, call reload_settings to apply.";
+    const DESCRIPTION: &'static str = "Read the raw YAML of the dynamic settings file — the single settings file pointed to by `dynamic_configurations_file` that is editable over MCP. It is merged into the running configuration exactly like an `include:` file. Returns its resolved path and current content (empty if it does not exist yet). ALWAYS call this BEFORE set_dynamic_settings: edit the content this returns and write it back, instead of composing a new file from scratch — set_dynamic_settings is a full-file replace, so anything not present in what you send is lost. After writing, call reload_settings to apply (it works in admin mode only).";
 }
 
 #[async_trait::async_trait]

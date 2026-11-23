@@ -24,6 +24,22 @@ pub struct PublicKeyMcpModel {
 }
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
+pub struct AuthorizedKeyMcpModel {
+    #[property(
+        description = "The gateway name a client which signs with the key comes in under: the id of its connection or gateway_clients entry."
+    )]
+    pub id: String,
+
+    #[property(description = "The public key in OpenSSH form, `ssh-ed25519 AAAA...`.")]
+    pub public_key: String,
+
+    #[property(
+        description = "The addresses the key is let in from: addresses, from-to ranges, subnets, `*` for any."
+    )]
+    pub ip_white_list: Vec<String>,
+}
+
+#[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct GatewayConnectionMcpModel {
     #[property(
         description = "The gateway id: what routes name as `gateway:<id>->host:port`, and the name the client gives the gateway server in its handshake."

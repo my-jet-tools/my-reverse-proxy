@@ -42,7 +42,7 @@ pub struct SetGatewayConnectionHandler;
 
 impl ToolDefinition for SetGatewayConnectionHandler {
     const FUNC_NAME: &'static str = "set_gateway_connection";
-    const DESCRIPTION: &'static str = "ADMIN MODE. Sets a connection of this proxy to a gateway server - an entry like those of gateway_clients of the settings, with the handshake signed by a private key of the secure store - and starts its client at once; it is kept in the secure store and started after every initialize. Setting an existing id replaces the connection: its client is restarted, and what went through the old gateway connection is closed. The gateway server has to let the key in: get_public_key gives the public key for it. Returns the connection as kept; get_gateway_connections then tells whether it connected. Refused while admin mode is closed (see get_mcp_admin_mode): then ask the operator to open it, do not retry.";
+    const DESCRIPTION: &'static str = "ADMIN MODE. Sets a connection of this proxy to a gateway server - an entry like those of gateway_clients of the settings, with the handshake signed by a private key of the secure store - and starts its client at once; it is kept in the secure store and started after every initialize. Setting an existing id replaces the connection: its client is restarted, and what went through the old gateway connection is closed. The gateway server has to let the key in under this id, from this proxy's address: set_gateway_authorized_key there, with the public key get_public_key gives. Returns the connection as kept; get_gateway_connections then tells whether it connected. Refused while admin mode is closed (see get_mcp_admin_mode): then ask the operator to open it, do not retry.";
 }
 
 #[async_trait::async_trait]

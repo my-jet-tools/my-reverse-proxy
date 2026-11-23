@@ -112,7 +112,8 @@ pub struct AppContext {
 
     pub ssh_cert_pass_keys: CertPassKeys,
 
-    pub gateway_server: Option<TcpGatewayServer>,
+    /// The gateway server of the settings, or the one of the secure store.
+    pub gateway_server: GatewayServerSlot,
     /// The gateway clients of the settings, and those of the connections of the secure store.
     pub gateway_clients: GatewayClients,
     /// The address the control port listens on (`global_settings.http_control_port` /
@@ -273,7 +274,7 @@ impl AppContext {
             h1_tls_pools: H1PoolRegistry::new(),
             #[cfg(unix)]
             h1_uds_pools: H1PoolRegistry::new(),
-            gateway_server,
+            gateway_server: GatewayServerSlot::new(gateway_server),
             gateway_clients: GatewayClients::new(gateway_clients),
             http_control_addr,
             http_control_unix_socket,
@@ -309,7 +310,7 @@ impl AppContext {
         &self,
         gateway_id: &str,
     ) -> Option<(Arc<TcpGatewayConnection>, u32)> {
-        if let Some(server_gateway) = self.gateway_server.as_ref() {
+        if let Some(server_gateway) = self.gateway_server.get() {
             if let Some(result) = server_gateway.get_gateway_connection(gateway_id) {
                 return Some((result, server_gateway.get_next_connection_id()));
             }
@@ -323,7 +324,7 @@ impl AppContext {
     }
 
     pub fn get_gateway_by_id(&self, gateway_id: &str) -> Option<Arc<TcpGatewayConnection>> {
-        if let Some(server_gateway) = self.gateway_server.as_ref() {
+        if let Some(server_gateway) = self.gateway_server.get() {
             if let Some(result) = server_gateway.get_gateway_connection(gateway_id) {
                 return Some(result);
             }

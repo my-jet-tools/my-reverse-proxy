@@ -7,7 +7,7 @@ use super::{key_of_encrypted_request, parse_call, store_refusal, EncryptedJsonHt
     method: "POST",
     route: "/api/gateway-authorized-keys/v1/delete",
     summary: "Stop letting a key in through the gateway server",
-    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key. Body: JSON `{\"id\": \"paris\"}`. The key is removed from the secure store: a gateway connection it let in stays up, and its next handshake is refused. The answer is `{\"id\", \"deleted\"}`: `false` when there was no such key.",
+    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key. Body: JSON `{\"id\": \"paris\"}` - the gateway name the key is let in under. The key is removed from the secure store: a gateway connection it let in stays up, and its next handshake is refused. The answer is `{\"id\", \"deleted\"}`: `false` when there was no such key.",
     controller: "GatewayAuthorizedKeys",
     input_data: EncryptedJsonHttpInput,
     result:[

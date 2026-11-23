@@ -77,3 +77,7 @@ mod get_client_ca_details;
 pub use get_client_ca_details::*;
 mod gateway_connections;
 pub use gateway_connections::*;
+mod gateway_server;
+pub use gateway_server::*;
+mod secure_settings;
+pub use secure_settings::*;

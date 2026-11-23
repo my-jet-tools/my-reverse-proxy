@@ -299,18 +299,80 @@ impl SecureState {
         .await
     }
 
-    /// Lets `key` in through the gateway server under `id` - in place of the key the id had - and
-    /// writes the store. The next handshake takes it.
+    /// The secure settings document of the store: none before initialize, or when it is blank.
+    pub fn secure_settings(&self) -> Option<String> {
+        let opened = self.opened.load();
+        let opened = opened.as_ref()?;
+        let model = opened.model.lock();
+
+        if crate::settings::SettingsModel::is_blank_content(model.settings_yaml.as_bytes()) {
+            return None;
+        }
+
+        Some(model.settings_yaml.clone())
+    }
+
+    /// Keeps `content` as the secure settings document - in place of the one there was; a blank
+    /// one removes it.
+    pub async fn set_secure_settings(&self, content: String) -> Result<(), SecureStoreError> {
+        self.change_store(|model| {
+            if model.settings_yaml == content {
+                return Ok(false);
+            }
+
+            model.settings_yaml = content;
+            Ok(true)
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// The gateway server of the store: none before initialize, or when none is set.
+    pub fn gateway_server(&self) -> Option<StoredGatewayServer> {
+        let opened = self.opened.load();
+        let opened = opened.as_ref()?;
+        let model = opened.model.lock();
+        model.gateway_server.clone()
+    }
+
+    /// Keeps `server` in the store, in place of the one there was.
+    pub async fn set_gateway_server(
+        &self,
+        server: StoredGatewayServer,
+    ) -> Result<(), SecureStoreError> {
+        self.change_store(|model| {
+            if model.gateway_server.as_ref() == Some(&server) {
+                return Ok(false);
+            }
+
+            model.gateway_server = Some(server);
+            Ok(true)
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Removes the gateway server from the store. `false`: there was none.
+    pub async fn delete_gateway_server(&self) -> Result<bool, SecureStoreError> {
+        self.change_store(|model| Ok(model.gateway_server.take().is_some()))
+            .await
+    }
+
+    /// Lets a client which signs with `key` in through the gateway server under the gateway name
+    /// `id`, from the addresses of `ip_white_list` - in place of what the id had - and writes the
+    /// store. The next handshake takes it.
     pub async fn set_gateway_authorized_key(
         &self,
         id: &str,
         key: VerifyingKey,
+        ip_white_list: Vec<String>,
     ) -> Result<(), SecureStoreError> {
         self.change_store(|model| {
             model.gateway_authorized_keys.retain(|itm| itm.id != id);
             model.gateway_authorized_keys.push(StoredAuthorizedKey {
                 id: id.to_string(),
                 ed25519_public: key.to_bytes().to_vec(),
+                ip_white_list,
             });
             model
                 .gateway_authorized_keys
@@ -392,7 +454,7 @@ fn private_keys_of(
 fn authorized_keys_of(
     path: &str,
     keys: &[StoredAuthorizedKey],
-) -> Result<Vec<(String, VerifyingKey)>, String> {
+) -> Result<Vec<AuthorizedKey>, String> {
     keys.iter()
         .map(|itm| {
             let bytes: [u8; 32] = itm.ed25519_public.as_slice().try_into().map_err(|_| {
@@ -410,7 +472,11 @@ fn authorized_keys_of(
                 )
             })?;
 
-            Ok((itm.id.clone(), key))
+            Ok(AuthorizedKey::new(
+                itm.id.clone(),
+                key,
+                itm.ip_white_list.clone(),
+            ))
         })
         .collect()
 }
@@ -705,7 +771,7 @@ mod tests {
 
         let paris = SigningKey::from_bytes(&[9; 32]).verifying_key();
         state
-            .set_gateway_authorized_key("paris", paris)
+            .set_gateway_authorized_key("paris", paris, vec!["10.0.0.0/24".to_string()])
             .await
             .unwrap();
         assert!(!state.delete_gateway_authorized_key("rome").await.unwrap());
@@ -714,10 +780,45 @@ mod tests {
         restarted.initialize(&path, &text(1), None).await.unwrap();
 
         assert_eq!(restarted.gateway_connections(), [changed]);
+        let authorized = restarted.gateway_authorized_keys.list();
+        assert_eq!(authorized.len(), 1);
         assert_eq!(
-            restarted.gateway_authorized_keys.list().as_slice(),
-            [("paris".to_string(), paris)]
+            (authorized[0].id.as_str(), authorized[0].key),
+            ("paris", paris)
         );
+        assert_eq!(authorized[0].ip_white_list, ["10.0.0.0/24"]);
+        assert!(authorized[0].allowed_ip.is_whitelisted(&"10.0.0.7"));
+
+        let server = StoredGatewayServer {
+            port: 30000,
+            allowed_ip: vec!["10.0.0.0/24".to_string()],
+            debug: true,
+        };
+        assert_eq!(restarted.gateway_server(), None);
+        restarted.set_gateway_server(server.clone()).await.unwrap();
+
+        assert_eq!(restarted.secure_settings(), None);
+        let document = "hosts:\n  example.com:443:\n    endpoint:\n      type: https\n".to_string();
+        restarted
+            .set_secure_settings(document.clone())
+            .await
+            .unwrap();
+
+        let reopened = SecureState::new();
+        reopened.initialize(&path, &text(1), None).await.unwrap();
+        assert_eq!(reopened.gateway_server(), Some(server));
+        assert_eq!(reopened.secure_settings(), Some(document));
+
+        // A blank document is none.
+        restarted
+            .set_secure_settings(" \n".to_string())
+            .await
+            .unwrap();
+        assert_eq!(restarted.secure_settings(), None);
+
+        assert!(restarted.delete_gateway_server().await.unwrap());
+        assert!(!restarted.delete_gateway_server().await.unwrap());
+        assert_eq!(restarted.gateway_server(), None);
 
         assert!(restarted.delete_gateway_connection("london").await.unwrap());
         assert!(!restarted.delete_gateway_connection("london").await.unwrap());
@@ -733,6 +834,7 @@ mod tests {
 
         assert!(again.gateway_connections().is_empty());
         assert!(again.gateway_authorized_keys.list().is_empty());
+        assert_eq!(again.gateway_server(), None);
         assert!(again.private_keys.get("to-london").is_some());
     }
 

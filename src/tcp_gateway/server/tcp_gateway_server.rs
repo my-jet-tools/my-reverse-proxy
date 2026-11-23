@@ -16,6 +16,8 @@ pub struct TcpGatewayServer {
     next_connection_id: AtomicU32,
     /// The accept loop: it owns the listener, which is closed when the loop is aborted.
     listener_task: tokio::task::AbortHandle,
+    /// The same task, to wait for its end: the port is free again only once it is over.
+    listener_ended: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl TcpGatewayServer {
@@ -46,15 +48,45 @@ impl TcpGatewayServer {
         // initializer. spawn_named touches APP_CTX (prometheus counter), and
         // that re-entrant deref of the still-initializing APP_CTX would prevent
         // the accept loop from ever being scheduled.
-        let listener_task =
-            tokio::spawn(connection_loop(inner.clone(), listener, allowed_ip, debug))
-                .abort_handle();
+        let listener_ended =
+            tokio::spawn(connection_loop(inner.clone(), listener, allowed_ip, debug));
+        let listener_task = listener_ended.abort_handle();
 
         Ok(Self {
             inner,
             next_connection_id: AtomicU32::new(0),
             listener_task,
+            listener_ended: parking_lot::Mutex::new(Some(listener_ended)),
         })
+    }
+
+    /// The address it listens at: `0.0.0.0:<port>`.
+    pub fn listen_addr(&self) -> &str {
+        self.inner.gateway_host.as_str()
+    }
+
+    /// Stops the server for good, and returns once its port is closed - another server may listen
+    /// at it then. The connections of its clients, and everything tunnelled through them, are
+    /// closed.
+    pub async fn shutdown(&self) {
+        println!(
+            "Stopping TCP Gateway Server at address: {}",
+            self.inner.gateway_host
+        );
+
+        self.inner.stop();
+        self.listener_task.abort();
+
+        let listener_ended = self.listener_ended.lock().take();
+
+        if let Some(listener_ended) = listener_ended {
+            // Cancelled: the listener is dropped with the task.
+            let _ = listener_ended.await;
+        }
+
+        for connection in self.inner.get_gateway_connections() {
+            connection.disconnect_gateway();
+        }
     }
 
     /// Ids of the connections the server opens carry [`SERVER_CONNECTION_ID_FLAG`], so they
@@ -157,7 +189,7 @@ async fn connection_loop(
         let tcp_gateway_clone = tcp_gateway.clone();
         crate::app::spawn_named(
             "tcp_gateway_server_inbound_handshake",
-            handle_inbound(tcp_gateway_clone, tcp_stream, debug),
+            handle_inbound(tcp_gateway_clone, tcp_stream, socket_addr.ip(), debug),
         );
     }
 }
@@ -176,7 +208,12 @@ pub fn is_ip_allowed(allowed_ip: &WhiteListedIpList, ip: IpAddr) -> bool {
     allowed_ip.is_whitelisted(&ip)
 }
 
-async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream, debug: bool) {
+async fn handle_inbound(
+    tcp_gateway: Arc<TcpGatewayInner>,
+    mut stream: TcpStream,
+    peer_ip: IpAddr,
+    debug: bool,
+) {
     // Every frame is written whole: there is nothing for the kernel to wait for.
     let _ = stream.set_nodelay(true);
 
@@ -191,7 +228,7 @@ async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream
 
     let handshake = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        perform_server_handshake(&mut stream, authorized_keys.as_slice()),
+        perform_server_handshake(&mut stream, authorized_keys.as_slice(), peer_ip),
     )
     .await;
 
@@ -199,7 +236,7 @@ async fn handle_inbound(tcp_gateway: Arc<TcpGatewayInner>, mut stream: TcpStream
         Ok(Ok(outcome)) => outcome,
         Ok(Err(err)) => {
             eprintln!(
-                "Gateway server handshake failed at {}: {err}",
+                "Gateway server handshake with {peer_ip} failed at {}: {err}",
                 tcp_gateway.gateway_host.as_str()
             );
             return;

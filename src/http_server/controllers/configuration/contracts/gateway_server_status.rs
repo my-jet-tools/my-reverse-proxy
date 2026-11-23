@@ -13,7 +13,7 @@ pub struct GatewayServerStatus {
 
 impl GatewayServerStatus {
     pub async fn new() -> Option<Self> {
-        let server_gateway = crate::app::APP_CTX.gateway_server.as_ref()?;
+        let server_gateway = crate::app::APP_CTX.gateway_server.get()?;
 
         let result = Self {
             connections: GatewayConnection::new(

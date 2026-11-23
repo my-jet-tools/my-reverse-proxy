@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use super::StoredGatewayConnection;
+use super::{StoredGatewayConnection, StoredGatewayServer};
 
 /// A connection to a gateway as a call of the encrypted API or of MCP sets it: what an entry of
 /// `gateway_clients` of the settings says, with the handshake signed by a private key of the
@@ -77,6 +77,43 @@ impl GatewayConnectionInput {
                 .allow_incoming_forward_connections
                 .unwrap_or(false),
             sync_ssl_certificates,
+            debug: self.debug.unwrap_or(false),
+        })
+    }
+}
+
+/// The gateway server as a call of the encrypted API sets it: what `gateway_server` of the
+/// settings says, with no `authorized_keys` files.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayServerInput {
+    /// It listens at `0.0.0.0:<port>`.
+    pub port: u64,
+    /// Who may connect at all, before the handshake; nothing or none - anybody.
+    pub allowed_ip: Option<Vec<String>>,
+    pub debug: Option<bool>,
+}
+
+impl GatewayServerInput {
+    /// What the store keeps, or why the call is refused.
+    pub fn check(self) -> Result<StoredGatewayServer, String> {
+        let port = match u16::try_from(self.port) {
+            Ok(port) if port > 0 => port as u32,
+            _ => return Err(format!("port {} is not a port", self.port)),
+        };
+
+        let mut allowed_ip = Vec::new();
+
+        for entry in self.allowed_ip.unwrap_or_default() {
+            let entry = entry.trim();
+            crate::types::check_ip_white_list_entry(entry)
+                .map_err(|err| format!("allowed_ip: {err}"))?;
+            allowed_ip.push(entry.to_string());
+        }
+
+        Ok(StoredGatewayServer {
+            port,
+            allowed_ip,
             debug: self.debug.unwrap_or(false),
         })
     }
@@ -186,6 +223,40 @@ mod tests {
         }
 
         assert!(check_gateway_connection_id("de-01_main.v2").is_ok());
+    }
+
+    #[test]
+    fn a_gateway_server_listens_at_a_port_and_takes_ip_list_entries() {
+        let server = GatewayServerInput {
+            port: 30000,
+            allowed_ip: Some(vec![" 10.0.0.0/24 ".to_string()]),
+            debug: None,
+        }
+        .check()
+        .unwrap();
+
+        assert_eq!(server.port, 30000);
+        assert_eq!(server.allowed_ip, ["10.0.0.0/24"]);
+        assert!(!server.debug);
+
+        for port in [0, 65536, 100_000] {
+            let err = GatewayServerInput {
+                port,
+                ..Default::default()
+            }
+            .check()
+            .unwrap_err();
+            assert!(err.contains("is not a port"), "{err}");
+        }
+
+        let err = GatewayServerInput {
+            port: 30000,
+            allowed_ip: Some(vec!["office".to_string()]),
+            debug: None,
+        }
+        .check()
+        .unwrap_err();
+        assert!(err.starts_with("allowed_ip"), "{err}");
     }
 
     #[test]

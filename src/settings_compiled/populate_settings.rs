@@ -3,13 +3,31 @@ use crate::settings::*;
 use super::{SettingsCompiled, VariablesCompiled};
 
 impl SettingsCompiled {
-    /// The settings files, and what the urls of `real_time_configurations` answered last - their
-    /// hosts next to the hosts of the files, their keys with the keys of the files.
+    /// The settings files, the secure settings of the store, and what the urls of
+    /// `real_time_configurations` answered last - their hosts next to the hosts of the files,
+    /// their keys with the keys of the files.
     pub async fn load_settings() -> Result<Self, String> {
+        let secure_settings = crate::app::APP_CTX.secure.secure_settings();
+        Self::load_settings_with_secure(secure_settings.as_deref()).await
+    }
+
+    /// [`Self::load_settings`] with `secure_settings` as the secure settings document: what a
+    /// document about to be kept compiles to. It is merged like the dynamic settings file, after
+    /// it: a host it has replaces a host of the files with the same id.
+    pub async fn load_settings_with_secure(secure_settings: Option<&str>) -> Result<Self, String> {
         let mut result = Self::default();
 
         let settings_model = crate::settings::SettingsModel::load_async(None).await?;
-        let include_settings = load_includes(&settings_model).await?;
+        let mut include_settings = load_includes(&settings_model).await?;
+
+        if let Some(content) = secure_settings {
+            if let Some(secure_settings) =
+                crate::settings::SettingsModel::parse_secure_settings(content)?
+            {
+                include_settings.push(secure_settings);
+            }
+        }
+
         result.populate(settings_model, include_settings)?;
 
         // Only what the urls the settings name now gave: a url taken out of the list gives
@@ -1219,6 +1237,71 @@ mod tests {
                 [("api.example.com:443", "example.com:443")]
             );
             assert!(compiled.additional_host_errors.is_empty());
+        }
+    }
+
+    /// The secure settings are merged like the dynamic settings file, after the files: their hosts
+    /// next to those of the files, with the variables of all of them, and a host of theirs takes
+    /// the place of one of the files with the same id.
+    #[test]
+    fn the_secure_settings_are_merged_after_the_files() {
+        let settings_model = SettingsModel::parse_for_tests(&format!(
+            "variables:\n  upstream: http://10.0.0.5:9000\nhosts:\n  example.com:443:\n{HOST}  old.example.com:443:\n{HOST}"
+        ));
+
+        let secure = SettingsModel::parse_secure_settings(
+            "hosts:\n  secret.example.com:443:\n    endpoint:\n      type: https2\n      ssl_certificate: wildcard\n    locations:\n    - proxy_pass_to: ${upstream}\n  old.example.com:443:\n    endpoint:\n      type: https2\n      ssl_certificate: wildcard\n    locations:\n    - proxy_pass_to: http://127.0.0.1:9100\n",
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut compiled = SettingsCompiled::default();
+        compiled.populate(settings_model, vec![secure]).unwrap();
+
+        assert_eq!(
+            sorted_hosts(&compiled),
+            [
+                "example.com:443",
+                "old.example.com:443",
+                "secret.example.com:443"
+            ]
+        );
+
+        let proxy_pass_to = |host: &str| {
+            compiled.hosts[host].locations[0]
+                .proxy_pass_to
+                .clone()
+                .unwrap_or_default()
+        };
+
+        assert_eq!(
+            proxy_pass_to("secret.example.com:443"),
+            "http://10.0.0.5:9000"
+        );
+        assert_eq!(
+            proxy_pass_to("old.example.com:443"),
+            "http://127.0.0.1:9100"
+        );
+    }
+
+    /// A document which is not settings YAML is refused, with no word of what it holds - a value of
+    /// it may be a secret; a blank one holds nothing.
+    #[test]
+    fn secure_settings_which_are_not_settings_are_refused_without_being_quoted() {
+        assert!(SettingsModel::parse_secure_settings(" \n")
+            .unwrap()
+            .is_none());
+
+        for content in [
+            "hosts: secret-token-value\n",
+            "variables:\n  token: [secret-token-value\n",
+        ] {
+            let err = SettingsModel::parse_secure_settings(content).unwrap_err();
+            assert!(
+                err.starts_with("The secure settings are not settings YAML"),
+                "{err}"
+            );
+            assert!(!err.contains("secret-token-value"), "{err}");
         }
     }
 }

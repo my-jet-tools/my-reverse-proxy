@@ -42,6 +42,9 @@ pub use real_time_configurations::*;
 mod gateway_clients;
 pub use gateway_clients::*;
 
+mod gateway_server_slot;
+pub use gateway_server_slot::*;
+
 mod mcp_admin_mode;
 pub use mcp_admin_mode::*;
 

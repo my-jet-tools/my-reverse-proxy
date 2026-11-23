@@ -2241,7 +2241,7 @@ gateway_server:
   debug: false       # optional, default false
 ```
 
-- `authorized_keys` - optional. List of paths to OpenSSH public key files (one per allowed client), read at startup. Must be Ed25519. Besides them the server lets in the keys the secure store authorizes - set over the encrypted API or MCP, counted from the next handshake on, with no restart (see "Gateways set over the API or MCP" below). With no files the server lets in only those: nobody until the proxy is initialized.
+- `authorized_keys` - optional. List of paths to OpenSSH public key files (one per allowed client), read at startup. Must be Ed25519. A key of a file comes in under any gateway name. Besides them the server lets in the keys the secure store authorizes - each under its own gateway name and from its own ip white list only, set over the encrypted API or MCP and counted from the next handshake on, with no restart (see "Gateways set over the API or MCP" below). With no files the server lets in only those: nobody until the proxy is initialized.
 - `allowed_ip` - optional. If present, only connections from the listed IPs are accepted; any other connection is closed right after `accept`, before the handshake. Entries are IPv4 addresses, `from-to` ranges and subnets (`10.0.0.0/24`), the same as in `ip_white_lists`. An invalid entry fails the startup.
 
 ## Client side
@@ -2321,49 +2321,113 @@ echo '{"id": "london"}' | encrypted_call http://127.0.0.1:8000 /api/private-keys
 
 ### Gateways set over the API or MCP
 
-A connection to a gateway, and the keys a gateway server lets in, can be kept in the secure store instead of
-the settings files: set over the encrypted API, or over MCP in its admin mode, and in effect at once - no
-settings file, no restart.
+The gateway server, a connection to a gateway, and the keys a gateway server lets in can be kept in the
+secure store instead of the settings files: set over the encrypted API (the connections and the keys over MCP
+in its admin mode too), and in effect at once - no settings file, no restart.
 
 | Route (encrypted, `POST`) | Body | Answer |
 |---|---|---|
+| `/api/gateway-server/v1/set` | `{port, allowed_ip?, debug?}` | the server as kept |
+| `/api/gateway-server/v1/delete` | `{}` | `{deleted}` |
+| `/api/gateway-server/v1/get` | `{}` | `{secure_store, running: {source, listen, clients}}` |
 | `/api/gateway-connections/v1/set` | `{id, remote_host, private_key, compress?, connect_timeout?, allow_incoming_forward_connections?, sync_ssl_certificates?, debug?}` | the connection as kept |
 | `/api/gateway-connections/v1/delete` | `{id}` | `{id, deleted}` |
 | `/api/gateway-connections/v1/list` | `{}` | `{gateway_connections: [{..., connected}]}` |
-| `/api/gateway-authorized-keys/v1/set` | `{id, public_key}` | `{id, public_key}` |
+| `/api/gateway-authorized-keys/v1/set` | `{id, public_key, ip_white_list}` | `{id, public_key, ip_white_list}` |
 | `/api/gateway-authorized-keys/v1/delete` | `{id}` | `{id, deleted}` |
-| `/api/gateway-authorized-keys/v1/list` | `{}` | `{authorized_keys: [{id, public_key}]}` |
+| `/api/gateway-authorized-keys/v1/list` | `{}` | `{authorized_keys: [{id, public_key, ip_white_list}]}` |
 
+- The gateway server is `gateway_server` of the settings with no `authorized_keys` files: it lets in the keys
+  of the store alone. It listens at `0.0.0.0:<port>` as soon as it is set and after every initialize. Set
+  again, it replaces the one before, whose clients are disconnected: on another port the new one listens
+  first, and a port which can not be had is refused with `409`, the one before running on untouched; on the
+  same port the one before stops first. Removed, its port is closed. While the settings have a
+  `gateway_server`, the one of the store is refused.
 - A connection has the fields of an entry of `gateway_clients`, and signs its handshake with the private key
   of the store `private_key` names - which has to be there. Its client starts as soon as it is set, and after
   every initialize from then on; routes name it as `gateway:<id>->...`. Set again, it is replaced: its client
   starts over, and what went through the old gateway connection is closed. Removed, its client stops and
   its gateway connection is closed. The id of a gateway client of the settings is refused with `409`.
-- An authorized key is let in by the gateway server from the next handshake on, besides the keys of its
-  `authorized_keys` files. Removed, it is refused at the next handshake; a connection it let in stays up.
+- An authorized key is bound: its `id` is the gateway name the client comes in under - the id of its
+  connection or of its `gateway_clients` entry - and `ip_white_list` the addresses it connects from (entries
+  of `ip_white_lists`: addresses, `from-to` ranges, subnets, `*` for any; at least one). A handshake under
+  another name, or from another address, is refused - so one client can not take the name, and the routes, of
+  another. The gateway server takes it from the next handshake on, besides the keys of its `authorized_keys`
+  files. Removed, it is refused at the next handshake; a connection it let in stays up.
 
 Two ways to connect proxy B to the gateway server of proxy A, with no file on either side:
 
 ```sh
+# The link is named `b` on both sides: routes name it as gateway:b->... on A and on B.
+
+# 0. The gateway server of A.
+echo '{"port": 30000}' | encrypted_call http://a:8000 /api/gateway-server/v1/set ~/.network-key-a
+
 # 1. The key made by A, given to B over the encrypted API.
-public_key=$(echo '{"id": "proxy-b"}' \
+public_key=$(echo '{"id": "for-b"}' \
   | encrypted_call http://a:8000 /api/private-keys/v1/generate ~/.network-key-a | jq -r .public_key)
-jq -n --arg key "$public_key" '{id: "proxy-b", public_key: $key}' \
+jq -n --arg key "$public_key" '{id: "b", public_key: $key, ip_white_list: ["203.0.113.7"]}' \
   | encrypted_call http://a:8000 /api/gateway-authorized-keys/v1/set ~/.network-key-a
-echo '{"id": "proxy-b"}' | encrypted_call http://a:8000 /api/private-keys/v1/download ~/.network-key-a \
+echo '{"id": "for-b"}' | encrypted_call http://a:8000 /api/private-keys/v1/download ~/.network-key-a \
   | jq '{id: "to-a", private_key}' | encrypted_call http://b:8000 /api/private-keys/v1/set ~/.network-key-b
-echo '{"id": "a", "remote_host": "a.example.com:30000", "private_key": "to-a"}' \
+echo '{"id": "b", "remote_host": "a.example.com:30000", "private_key": "to-a"}' \
   | encrypted_call http://b:8000 /api/gateway-connections/v1/set ~/.network-key-b
 
 # 2. The key made by B - it never leaves B - which is what MCP does in admin mode:
-#    generate_private_key on B -> get_public_key on B -> set_gateway_authorized_key on A
-#    -> set_gateway_connection on B.
+#    generate_private_key on B -> get_public_key on B
+#    -> set_gateway_authorized_key on A (id b, B's address) -> set_gateway_connection b on B.
 ```
+
+### Secure settings: hosts in the secure store
+
+Hosts with their endpoints and locations - and anything else of the settings schema: `variables:`,
+`ip_white_lists:`, `ssl_certificates:`, ... - can be kept in the secure store as one YAML document, the
+secure settings. They are merged with the settings files like the dynamic settings file, after it: a host of
+theirs takes the place of a host of the files with the same id. They are read and set over the encrypted API
+only, as a whole - read the document, change it, give the whole of it back - and, like the dynamic settings
+file, applied by a reload:
+
+```sh
+# the document as it was set - nothing when there is none
+echo '{}' | encrypted_call http://127.0.0.1:8000 /api/secure-settings/v1/get ~/.network-key > secure.yaml
+
+# edit secure.yaml, then set it: the body is the YAML itself
+encrypted_call http://127.0.0.1:8000 /api/secure-settings/v1/set ~/.network-key secure.yaml
+# -> {"bytes_kept":212}
+# then reload - the MCP tool reload_settings, in admin mode - to apply it
+
+# a blank document removes it
+echo | encrypted_call http://127.0.0.1:8000 /api/secure-settings/v1/set ~/.network-key
+```
+
+```yaml
+# secure.yaml
+variables:
+  billing_upstream: http://10.0.0.17:8080
+hosts:
+  billing.example.com:443:
+    endpoint:
+      type: https2
+      ssl_certificate: wildcard
+    locations:
+    - proxy_pass_to: ${billing_upstream}
+```
+
+- The settings are compiled with the document before it is kept: one which is not settings YAML, or with
+  which the settings do not compile, is refused with `400`, and nothing is kept. The error never quotes the
+  document - it says where, or which field is unknown or missing.
+- Kept is not applied: like a change of the dynamic settings file, it is applied by a reload - the MCP tool
+  `reload_settings`, which works in admin mode only (see "MCP admin mode" below). A reload applies every part
+  at once: the files, the dynamic settings file and the secure settings.
+- The store opens at initialize: until then the hosts of the document are not served. The initialize which
+  opens it applies the settings with the document - as the files are applied at the start.
+- Once applied, the hosts are what the proxy runs: the admin ui and MCP (`get_applied_settings`) show them like
+  the hosts of the files.
 
 ### MCP admin mode
 
-The MCP tools which change the secure store work only while admin mode is open: `generate_private_key`,
-`set_gateway_connection`, `delete_gateway_connection`, `set_gateway_authorized_key`,
+The MCP tools which change the proxy work only while admin mode is open: `reload_settings`,
+`generate_private_key`, `set_gateway_connection`, `delete_gateway_connection`, `set_gateway_authorized_key`,
 `delete_gateway_authorized_key`. Only the operator opens it, with an encrypted call - no MCP tool does:
 
 ```sh
@@ -3005,7 +3069,8 @@ main config:
 - **`set_dynamic_settings`** — full-file replace. The YAML is validated against
   the settings schema before writing; on a parse error nothing is written.
   Empty or whitespace-only content is accepted as-is (no data).
-- **`reload_settings`** — applies the written file to the running proxy.
+- **`reload_settings`** — applies the written file to the running proxy, with the files and the secure
+  settings. It works in MCP admin mode only (see "MCP admin mode").
 
 The intended workflow is always: `get_dynamic_settings` → edit the returned
 content → `set_dynamic_settings` (full body) → `reload_settings`. Because

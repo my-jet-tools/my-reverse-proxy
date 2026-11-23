@@ -17,7 +17,7 @@ use crate::mcp::{
 };
 
 /// What MCP clients are told about the server as a whole.
-const MCP_INSTRUCTIONS: &str = "my-reverse-proxy diagnostic snapshots — pools, locations, and their correlation. The secure store - private keys, connections to gateways, the keys the gateway server lets in - is changed only in ADMIN MODE: the tools marked so work only while the operator has opened it, for some minutes, with an encrypted call of the control port. No tool opens it: when one is refused, say so and ask the operator to open it, do not retry. get_mcp_admin_mode tells whether it is open; reading is never gated. A private key never leaves the proxy over MCP: only public keys do.";
+const MCP_INSTRUCTIONS: &str = "my-reverse-proxy diagnostic snapshots — pools, locations, and their correlation. A reload of the settings, and the secure store - private keys, connections to gateways, the keys the gateway server lets in - are changed only in ADMIN MODE: the tools marked so work only while the operator has opened it, for some minutes, with an encrypted call of the control port. No tool opens it: when one is refused, say so and ask the operator to open it, do not retry. get_mcp_admin_mode tells whether it is open; reading is never gated. A private key never leaves the proxy over MCP: only public keys do.";
 
 /// The control port at the address of the settings: `global_settings.http_control_port` and
 /// `http_control_ip`, `127.0.0.1:8000` when they say nothing - and on the unix socket of

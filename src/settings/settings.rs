@@ -76,6 +76,34 @@ impl SettingsModel {
         content.iter().all(|b| b.is_ascii_whitespace())
     }
 
+    /// The secure settings of the store: the schema of the settings file, merged like the dynamic
+    /// settings file; a blank document holds nothing. The error never quotes the document - a
+    /// value of it may be a secret: it says where, or which field is unknown or missing.
+    pub fn parse_secure_settings(content: &str) -> Result<Option<Self>, String> {
+        if Self::is_blank_content(content.as_bytes()) {
+            return Ok(None);
+        }
+
+        my_settings_reader::serde_yaml::from_str::<Self>(content)
+            .map(Some)
+            .map_err(|err| {
+                let text = err.to_string();
+
+                if text.contains("unknown field") || text.contains("missing field") {
+                    return format!("The secure settings are not settings YAML: {text}");
+                }
+
+                match err.location() {
+                    Some(location) => format!(
+                        "The secure settings are not settings YAML: at line {} column {}",
+                        location.line(),
+                        location.column()
+                    ),
+                    None => "The secure settings are not settings YAML".to_string(),
+                }
+            })
+    }
+
     fn from_dynamic_yaml(file_name: &str, content: &[u8]) -> Result<Option<Self>, String> {
         if Self::is_blank_content(content) {
             return Ok(None);

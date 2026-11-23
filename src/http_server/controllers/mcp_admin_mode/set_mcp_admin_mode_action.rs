@@ -10,7 +10,7 @@ use super::{key_of_encrypted_request, parse_call, EncryptedJsonHttpInput};
     method: "POST",
     route: "/api/mcp/v1/admin-mode",
     summary: "Open or close the admin mode of MCP",
-    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key - no MCP tool opens the admin mode. Body: JSON `{\"minutes\": 10}`: it is open for that many minutes from now, 60 at most, in place of the time it had left; 0 closes it; `{}` opens it for 10. While it is open, the MCP tools which change the secure store work: generate_private_key, set_gateway_connection, delete_gateway_connection, set_gateway_authorized_key, delete_gateway_authorized_key. It is closed when the proxy starts. The answer is `{\"open\", \"seconds_left\"}`.",
+    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key - no MCP tool opens the admin mode. Body: JSON `{\"minutes\": 10}`: it is open for that many minutes from now, 60 at most, in place of the time it had left; 0 closes it; `{}` opens it for 10. While it is open, the MCP tools which change the proxy work: reload_settings, generate_private_key, set_gateway_connection, delete_gateway_connection, set_gateway_authorized_key, delete_gateway_authorized_key. It is closed when the proxy starts. The answer is `{\"open\", \"seconds_left\"}`.",
     controller: "Mcp",
     input_data: EncryptedJsonHttpInput,
     result:[

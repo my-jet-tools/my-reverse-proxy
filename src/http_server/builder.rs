@@ -56,6 +56,23 @@ pub fn build_controllers() -> ControllersMiddleware {
     ));
 
     result.register_post_action(Arc::new(
+        super::controllers::gateway_server::SetGatewayServerAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::gateway_server::DeleteGatewayServerAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::gateway_server::GetGatewayServerAction,
+    ));
+
+    result.register_post_action(Arc::new(
+        super::controllers::secure_settings::GetSecureSettingsAction,
+    ));
+    result.register_post_action(Arc::new(
+        super::controllers::secure_settings::SetSecureSettingsAction,
+    ));
+
+    result.register_post_action(Arc::new(
         super::controllers::mcp_admin_mode::SetMcpAdminModeAction,
     ));
 

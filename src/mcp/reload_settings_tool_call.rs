@@ -3,7 +3,7 @@ use serde::*;
 
 use crate::app::APP_CTX;
 
-use super::ConfigurationErrorEntry;
+use super::{admin_mode_is_open, ConfigurationErrorEntry};
 
 #[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
 pub struct ReloadSettingsInputData {}
@@ -35,7 +35,7 @@ pub struct ReloadSettingsHandler;
 
 impl ToolDefinition for ReloadSettingsHandler {
     const FUNC_NAME: &'static str = "reload_settings";
-    const DESCRIPTION: &'static str = "Re-read the settings YAML (~/.my-reverse-proxy + includes) and apply it to the running proxy: re-syncs SSH config list, updates each host's configuration, and re-syncs TCP/Unix listeners. Upstream pools are preserved across reloads via id_string matching (see get_proxy_state_snapshot). Returns the running configuration's error map so per-host apply failures are visible.";
+    const DESCRIPTION: &'static str = "ADMIN MODE. Re-read the settings (~/.my-reverse-proxy + includes, the dynamic settings file, and the secure settings of the secure store) and apply them to the running proxy: re-syncs SSH config list, updates each host's configuration, and re-syncs TCP/Unix listeners. Upstream pools are preserved across reloads via id_string matching (see get_proxy_state_snapshot). Returns the running configuration's error map so per-host apply failures are visible. Refused while admin mode is closed (see get_mcp_admin_mode): then ask the operator to open it, do not retry.";
 }
 
 #[async_trait::async_trait]
@@ -44,6 +44,8 @@ impl McpToolCall<ReloadSettingsInputData, ReloadSettingsResponse> for ReloadSett
         &self,
         _model: ReloadSettingsInputData,
     ) -> Result<ReloadSettingsResponse, String> {
+        admin_mode_is_open()?;
+
         let (ok, error) = match crate::flows::load_everything_from_settings().await {
             Ok(()) => (true, String::new()),
             Err(err) => (false, err),
