@@ -2447,7 +2447,14 @@ echo '{"minutes": 0}' | encrypted_call https://admin.example.com /api/mcp/v1/adm
   port (from its loopback); the header of anybody else is not believed. The unix socket, and the loopback with
   no such header, are `this host`: opened from there, it is open for MCP sessions of this host only.
 - `get_mcp_admin_mode` tells the address it is open for and its country, where the session comes from, and
-  whether it is open for it.
+  whether it is open for it. The same over the encrypted API, changing nothing - with the address of the call
+  itself, as the proxy sees it:
+
+  ```sh
+  echo '{}' | encrypted_call https://admin.example.com /api/mcp/v1/admin-mode/get ~/.network-key
+  # -> {"open":true,"seconds_left":412,"ip":"203.0.113.7","country":"DE",
+  #     "your_ip":"203.0.113.7","your_country":"DE","open_for_you":true}
+  ```
 - It is open for the minutes given, 60 at most (`{}` - 10), in place of the time and the address it had, and
   closes by itself. It is closed after every start.
 - Reading is never gated: `get_mcp_admin_mode`, `get_public_key`, `get_gateway_connections`,

@@ -202,6 +202,9 @@ is in my-http-server's `docs/http-actions/encrypted-requests.md`. What the proxy
   most, in place of the time and the address it had; 0 closes it, from any address; `{}` is 10.
   Answer `{open, seconds_left, ip, country}`. It is closed after every start, and no MCP tool
   opens it.
+- `POST /api/mcp/v1/admin-mode/get`, encrypted, `{}`: changes nothing; answer `{open, seconds_left,
+  ip, country, your_ip, your_country, open_for_you}` - the address the admin commands of MCP are
+  taken from, and the address of this call as the proxy sees it.
 - It is open for the address of the call which opened it: the last entry of `X-Forwarded-For` when
   the call comes from the loopback (the proxy relays it so), the peer address otherwise; the unix
   socket and the bare loopback are `this host`. A middleware in front of MCP writes down where the

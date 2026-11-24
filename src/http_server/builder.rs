@@ -75,6 +75,9 @@ pub fn build_controllers() -> ControllersMiddleware {
     result.register_post_action(Arc::new(
         super::controllers::mcp_admin_mode::SetMcpAdminModeAction,
     ));
+    result.register_post_action(Arc::new(
+        super::controllers::mcp_admin_mode::GetMcpAdminModeAction,
+    ));
 
     result.register_get_action(Arc::new(
         super::controllers::configuration::GetCurrentConfigAction,
