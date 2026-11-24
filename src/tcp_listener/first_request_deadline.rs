@@ -9,8 +9,8 @@ use std::{
 
 use tokio::sync::Notify;
 
-/// The deadline for the first request of a connection served by hyper (`http2` and `https2`
-/// endpoints).
+/// The deadline for the first request of a connection served by hyper (`https2` endpoints, and
+/// the h2 clients of `http` / `http2` ones).
 ///
 /// hyper times the head of an http/1.1 request (`header_read_timeout`, with a timer), but not
 /// what comes before it: the auto builder of an `https2` endpoint first reads the opening bytes
@@ -54,11 +54,22 @@ impl FirstRequestDeadline {
         connection: TConnection,
         timeout: Duration,
     ) -> Option<TConnection::Output> {
+        self.serve_until(connection, tokio::time::Instant::now() + timeout)
+            .await
+    }
+
+    /// [`Self::serve`] with the time the first request is due by: for a connection whose wait
+    /// for it began before hyper took it - the opening bytes of an `http` / `http2` port.
+    pub async fn serve_until<TConnection: Future>(
+        &self,
+        connection: TConnection,
+        deadline: tokio::time::Instant,
+    ) -> Option<TConnection::Output> {
         tokio::pin!(connection);
 
         tokio::select! {
             output = &mut connection => return Some(output),
-            arrived = tokio::time::timeout(timeout, self.wait()) => {
+            arrived = tokio::time::timeout_at(deadline, self.wait()) => {
                 if arrived.is_err() {
                     return None;
                 }

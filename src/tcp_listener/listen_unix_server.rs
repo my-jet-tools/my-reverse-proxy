@@ -120,23 +120,17 @@ async fn handle_accepted_connection(
 
     match endpoint_type {
         ListenConfiguration::Http(configuration) => match configuration.listen_endpoint_type {
-            crate::configurations::ListenHttpEndpointType::Http1 => {
-                crate::h1_proxy_server::kick_h1_unix_reverse_proxy_server_from_http(
+            // One and the same: the first bytes of a connection tell h2 from http/1.1. A unix
+            // socket is of the host itself: no limit of connections is kept for it.
+            crate::configurations::ListenHttpEndpointType::Http1
+            | crate::configurations::ListenHttpEndpointType::Http2 => {
+                super::plain_http::kick_connection(
                     accepted_connection,
-                    configuration,
-                );
-                //super::http::handle_connection(accepted_connection, listening_addr, configuration)
-                //    .await;
-            }
-            crate::configurations::ListenHttpEndpointType::Http2 => {
-                // A unix socket is of the host itself: no limit of connections is kept for it.
-                super::http2::handle_connection(
-                    accepted_connection.into(),
+                    crate::types::ConnectionIp::UnixSocket,
                     listen_host.clone().into(),
                     configuration,
                     crate::app::ConnectionSlot::unlimited(),
-                )
-                .await;
+                );
             }
             crate::configurations::ListenHttpEndpointType::Https1 => {
                 panic!(

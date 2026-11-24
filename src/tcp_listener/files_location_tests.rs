@@ -1,8 +1,8 @@
-//! Files locations end to end, through the entries the tcp listener uses. An `http` endpoint is
-//! served by the h1 pipeline (`kick_h1_tcp_reverse_proxy_server_from_http`) and an `http2`
-//! endpoint by hyper (`http2::handle_connection`); `https` and `https2` are the same two behind
-//! TLS (`https::handle_connection`). The configuration is compiled from settings the same way a
-//! settings file is.
+//! Files locations end to end, through the entries the tcp listener uses. A plain endpoint
+//! (`plain_http::kick_connection`) serves an http/1.1 client by the h1 pipeline and an h2 one by
+//! hyper - the tests send http/1.1 to `http` and h2 to `http2`; `https` and `https2` are the same
+//! two behind TLS (`https::handle_connection`). The configuration is compiled from settings the
+//! same way a settings file is.
 //!
 //! The HTTP/1.1 client is a socket written to by hand: what a test sends is what gets to the
 //! wire, a `..` in the path included.
@@ -740,22 +740,15 @@ async fn start_host(
             connection_id += 1;
 
             match endpoint_type {
-                ListenHttpEndpointType::Http1 => {
-                    crate::h1_proxy_server::kick_h1_tcp_reverse_proxy_server_from_http(
+                // The first bytes of the connection tell h2 from http/1.1.
+                ListenHttpEndpointType::Http1 | ListenHttpEndpointType::Http2 => {
+                    super::plain_http::kick_connection(
                         tcp_stream,
-                        client_addr,
-                        configuration.clone(),
-                        crate::app::ConnectionSlot::unlimited(),
-                    );
-                }
-                ListenHttpEndpointType::Http2 => {
-                    super::http2::handle_connection(
-                        (tcp_stream, client_addr).into(),
+                        client_addr.into(),
                         listening_addr.into(),
                         configuration.clone(),
                         crate::app::ConnectionSlot::unlimited(),
-                    )
-                    .await;
+                    );
                 }
                 _ => {
                     super::https::handle_connection(

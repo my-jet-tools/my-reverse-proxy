@@ -2,21 +2,28 @@ use std::sync::Arc;
 
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
     configurations::HttpListenPortConfiguration,
-    network_stream::*,
-    types::{AcceptedServerConnection, ListenHost},
+    types::{ConnectionIp, ListenHost},
 };
 
 use super::http_request_handler::http::HttpRequestHandler;
 
-/// `slot`: the connection's place among the ones held (`max_connections`), given back with it.
-pub async fn handle_connection(
-    accepted_connection: AcceptedServerConnection,
+/// A connection of an `http` / `http2` endpoint - a tcp port or a unix socket - whose client
+/// speaks h2 (by prior knowledge: the client preface, with no TLS to agree on it in), served to
+/// its end on the task it is on. `stream` gives the preface first, as it came
+/// (`plain_http::ReplayedStream`).
+///
+/// `first_request_deadline`: when the first request is due - `header_read_timeout` from the
+/// start of the connection, the wait for the preface included.
+pub async fn serve_connection<TStream: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    stream: TStream,
+    connection_ip: ConnectionIp,
     listen_host: ListenHost,
     configuration: Arc<HttpListenPortConfiguration>,
-    slot: crate::app::ConnectionSlot,
+    first_request_deadline: tokio::time::Instant,
 ) {
     let listening_addr_str =
         listen_host.to_pretty_string(configuration.listen_endpoint_type.is_https());
@@ -27,7 +34,7 @@ pub async fn handle_connection(
     let connection_settings = configuration.connection_settings();
 
     // The h2 PINGs need a timer; a client which stopped answering them is cut. What comes before
-    // the first request - the client preface, the first HEADERS - is timed below.
+    // the first request - the rest of the client preface, the first HEADERS - is timed below.
     let mut http2_builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
     http2_builder
         .enable_connect_protocol()
@@ -36,9 +43,6 @@ pub async fn handle_connection(
         .keep_alive_timeout(client_timeouts.h2_keep_alive_timeout)
         .max_concurrent_streams(connection_settings.h2_max_concurrent_streams)
         .max_header_list_size(connection_settings.h2_max_header_list_size);
-    let http2_builder = Arc::new(http2_builder);
-
-    let builder = http2_builder.clone();
 
     let port = listen_host.get_port();
 
@@ -48,120 +52,58 @@ pub async fn handle_connection(
             .update(|itm| itm.connection_by_port.inc(port));
     }
 
-    let listening_addr_str = listening_addr_str.clone();
-
     crate::app::APP_CTX
         .prometheus
         .inc_http2_server_connections(listening_addr_str.as_str());
 
-    let connection_addr = accepted_connection.get_addr();
-    crate::app::spawn_named("http2_server_connection", async move {
-        let _slot = slot;
-        let io = match accepted_connection {
-            AcceptedServerConnection::Tcp { network_stream, .. } => {
-                let io = TokioIo::new(network_stream);
+    let http_request_handler = Arc::new(HttpRequestHandler::new(connection_ip, configuration));
 
-                TcpOrUnixSocket::Tcp(io)
-            }
-            #[cfg(unix)]
-            AcceptedServerConnection::Unix(unix_stream) => {
-                let io = TokioIo::new(unix_stream);
-                TcpOrUnixSocket::Unix(io)
-            }
-        };
+    let http_request_handler_to_dispose = http_request_handler.clone();
+    // A request which finds the connection must not go on cuts it: see `ConnectionCut`.
+    let cut = http_request_handler.cut.clone();
+    // Closes the connection once it is idle, or served enough requests: see
+    // `ConnectionLifetime`.
+    let lifetime = http_request_handler.lifetime.clone();
 
-        let http_request_handler = HttpRequestHandler::new(connection_addr, configuration);
+    let first_request = super::FirstRequestDeadline::new();
+    let first_request_seen = first_request.clone();
 
-        let http_request_handler = Arc::new(http_request_handler);
+    let connection = http2_builder.serve_connection(
+        TokioIo::new(stream),
+        service_fn(move |req| {
+            first_request_seen.request_arrived();
+            super::http_request_handler::http::handle_request(http_request_handler.clone(), req)
+        }),
+    );
 
-        let http_request_handler_to_dispose = http_request_handler.clone();
-        // A request which finds the connection must not go on cuts it: see `ConnectionCut`.
-        let cut = http_request_handler.cut.clone();
-        // Closes the connection once it is idle, or served enough requests: see
-        // `ConnectionLifetime`.
-        let lifetime = http_request_handler.lifetime.clone();
+    let connection = lifetime.serve(
+        connection,
+        |connection| connection.graceful_shutdown(),
+        client_timeouts.h2_idle_timeout,
+        connection_settings.max_requests_per_connection,
+    );
 
-        match io {
-            TcpOrUnixSocket::Tcp(io) => {
-                let first_request = super::FirstRequestDeadline::new();
-                let first_request_seen = first_request.clone();
+    let result = cut
+        .serve(first_request.serve_until(connection, first_request_deadline))
+        .await
+        .flatten();
 
-                let connection = builder.serve_connection(
-                    io,
-                    service_fn(move |req| {
-                        first_request_seen.request_arrived();
-                        super::http_request_handler::http::handle_request(
-                            http_request_handler.clone(),
-                            req,
-                        )
-                    }),
-                );
+    if let Some(Err(err)) = result {
+        println!(
+            "Error serving H2 connection on [{}]. Err{:?}",
+            listening_addr_str, err
+        );
+    }
 
-                let connection = lifetime.serve(
-                    connection,
-                    |connection| connection.graceful_shutdown(),
-                    client_timeouts.h2_idle_timeout,
-                    connection_settings.max_requests_per_connection,
-                );
-
-                let result = cut
-                    .serve(first_request.serve(connection, client_timeouts.header_read_timeout))
-                    .await
-                    .flatten();
-
-                if let Some(Err(err)) = result {
-                    println!(
-                        "Error serving H2 connection on [{}]. Err{:?}",
-                        listening_addr_str, err
-                    );
-                }
-            }
-            #[cfg(unix)]
-            TcpOrUnixSocket::Unix(io) => {
-                let first_request = super::FirstRequestDeadline::new();
-                let first_request_seen = first_request.clone();
-
-                let connection = builder.serve_connection(
-                    io,
-                    service_fn(move |req| {
-                        first_request_seen.request_arrived();
-                        super::http_request_handler::http::handle_request(
-                            http_request_handler.clone(),
-                            req,
-                        )
-                    }),
-                );
-
-                let connection = lifetime.serve(
-                    connection,
-                    |connection| connection.graceful_shutdown(),
-                    client_timeouts.h2_idle_timeout,
-                    connection_settings.max_requests_per_connection,
-                );
-
-                let result = cut
-                    .serve(first_request.serve(connection, client_timeouts.header_read_timeout))
-                    .await
-                    .flatten();
-
-                if let Some(Err(err)) = result {
-                    println!(
-                        "Error serving H2 connection on [{}]. Err{:?}",
-                        listening_addr_str, err
-                    );
-                }
-            }
-        }
-
-        if let Some(port) = port.as_ref() {
-            crate::app::APP_CTX
-                .metrics
-                .update(|itm| itm.connection_by_port.dec(port));
-        }
-
+    if let Some(port) = port.as_ref() {
         crate::app::APP_CTX
-            .prometheus
-            .dec_http2_server_connections(listening_addr_str.as_str());
-        http_request_handler_to_dispose.dispose().await;
-    });
+            .metrics
+            .update(|itm| itm.connection_by_port.dec(port));
+    }
+
+    crate::app::APP_CTX
+        .prometheus
+        .dec_http2_server_connections(listening_addr_str.as_str());
+
+    http_request_handler_to_dispose.dispose().await;
 }

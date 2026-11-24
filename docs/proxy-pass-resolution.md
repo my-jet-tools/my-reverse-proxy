@@ -38,10 +38,13 @@ When the listener accepts a connection, `handle_accepted_connection`
 `AppConfigurationInner::listen_tcp_endpoints` and dispatches:
 
 - `ListenConfiguration::Http(_)` — match on `listen_endpoint_type`:
-  - `Http1` → `h1_proxy_server::kick_h1_tcp_reverse_proxy_server_from_http`
-    (plain HTTP/1, no TLS).
-  - `Http2` → `tcp_listener::http2::handle_connection` (h2 over plain TCP,
-    legacy hyper-based).
+  - `Http1` and `Http2` alike → `tcp_listener::plain_http::kick_connection`
+    (no TLS, a tcp port or a unix socket). It reads the first bytes of the
+    connection: the h2 client preface whole → `tcp_listener::http2::serve_connection`
+    (hyper, with the bytes read given back first); anything else → the h1
+    pipeline (`h1_proxy_server::serve_h1_plain_connection`), whose buffer
+    starts with the bytes read. The first request of either is due
+    `header_read_timeout` after the connect.
   - `Https1` → `tcp_listener::https::handle_connection`, which terminates
     TLS and then forks on `endpoint_info.listen_endpoint_type` again
     (`Https1` → h1 server, `Https2` → hyper h2 server).
@@ -64,8 +67,8 @@ The legality of multiple endpoints on one port is governed by
 
 | New type | Same-port partners allowed |
 |---|---|
-| `Http1` | `Http1` |
-| `Http2` | `Http2` |
+| `Http1` | `Http1`, `Http2` |
+| `Http2` | `Http1`, `Http2` |
 | `Https1` | `Https1`, `Https2`, `Mcp` |
 | `Https2` | `Https1`, `Https2` |
 | `Mcp` | `Https1`, `Https2`, `Mcp` |
@@ -87,7 +90,8 @@ For TLS listeners (`Https1` / `Https2` / `Mcp`):
 3. The chosen `HttpEndpointInfo` carries the SSL cert id, allowed user
    list, modify-headers config, and the per-endpoint `locations`.
 
-For plain HTTP/1 listeners (`Http1`):
+For plain listeners (`Http1` / `Http2`) - the http/1.1 clients; an h2 client
+is resolved by the `:authority` of each request, as on `https2`:
 
 1. There is no SNI, so endpoint resolution is deferred until the first
    request's `Host` header is read.

@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use crate::{
     configurations::{HttpEndpointInfo, HttpListenPortConfiguration},
+    network_stream::NetworkStream,
     tcp_listener::https::ClientCertificateData,
     types::*,
 };
+
+use super::ReadAhead;
 
 #[derive(Clone)]
 pub struct HttpConnectionInfo {
@@ -102,34 +105,19 @@ pub async fn kick_h1_reverse_proxy_server(
         Some(endpoint_info),
         listen_config,
     );
-    super::serve_reverse_proxy_pipelined(server_stream, http_connection_info).await;
+    super::serve_reverse_proxy_pipelined(server_stream, http_connection_info, None).await;
 }
 
-/// `slot`: the connection's place among the ones held (`max_connections`), given back with it.
-pub fn kick_h1_tcp_reverse_proxy_server_from_http(
-    accepted_connection: tokio::net::TcpStream,
-    connection_ip: impl Into<ConnectionIp>,
+/// A connection of an `http` / `http2` endpoint - a tcp port or a unix socket - whose client
+/// speaks http/1.1, served to its end on the task it is on. `read_ahead`: what was read of it to
+/// tell that (`tcp_listener::plain_http`).
+pub async fn serve_h1_plain_connection<TStream: NetworkStream + Send + Sync + 'static>(
+    stream: TStream,
+    connection_ip: ConnectionIp,
     listen_config: Arc<HttpListenPortConfiguration>,
-    slot: crate::app::ConnectionSlot,
+    read_ahead: ReadAhead,
 ) {
-    let http_connection_info =
-        HttpConnectionInfo::new(connection_ip.into(), None, None, listen_config);
+    let http_connection_info = HttpConnectionInfo::new(connection_ip, None, None, listen_config);
 
-    crate::app::spawn_named("h1_tcp_server_connection", async move {
-        let _slot = slot;
-        super::serve_reverse_proxy_pipelined(accepted_connection, http_connection_info).await;
-    });
-}
-
-#[cfg(unix)]
-pub fn kick_h1_unix_reverse_proxy_server_from_http(
-    accepted_connection: tokio::net::UnixStream,
-    listen_config: Arc<HttpListenPortConfiguration>,
-) {
-    let http_connection_info =
-        HttpConnectionInfo::new(ConnectionIp::UnixSocket, None, None, listen_config);
-    crate::app::spawn_named(
-        "h1_unix_server_connection",
-        super::serve_reverse_proxy_pipelined(accepted_connection, http_connection_info),
-    );
+    super::serve_reverse_proxy_pipelined(stream, http_connection_info, Some(read_ahead)).await;
 }

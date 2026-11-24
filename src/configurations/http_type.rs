@@ -8,15 +8,13 @@ pub enum ListenHttpEndpointType {
 }
 
 impl ListenHttpEndpointType {
+    /// `http` and `http2` are one type under two names: a connection of either tells h2 from
+    /// http/1.1 by its first bytes (`tcp_listener::plain_http`).
     pub fn can_be_under_the_same_port(&self, other: Self) -> bool {
         match self {
-            Self::Http1 => match other {
-                Self::Http1 => true,
-                Self::Http2 | Self::Https1 | Self::Https2 | Self::Mcp => false,
-            },
-            Self::Http2 => match other {
-                Self::Http2 => true,
-                Self::Http1 | Self::Https1 | Self::Https2 | Self::Mcp => false,
+            Self::Http1 | Self::Http2 => match other {
+                Self::Http1 | Self::Http2 => true,
+                Self::Https1 | Self::Https2 | Self::Mcp => false,
             },
             Self::Https1 => match other {
                 Self::Https1 | Self::Https2 | Self::Mcp => true,

@@ -1,6 +1,7 @@
 //mod http;
 
 mod http2;
+mod plain_http;
 
 pub mod https;
 
@@ -52,3 +53,6 @@ mod slow_client_tests;
 
 #[cfg(test)]
 mod h1_to_h2_upstream_tests;
+
+#[cfg(test)]
+mod plain_http_tests;

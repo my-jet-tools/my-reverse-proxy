@@ -177,24 +177,16 @@ async fn handle_accepted_connection(
 
     match endpoint_type {
         ListenConfiguration::Http(configuration) => match configuration.listen_endpoint_type {
-            crate::configurations::ListenHttpEndpointType::Http1 => {
-                crate::h1_proxy_server::kick_h1_tcp_reverse_proxy_server_from_http(
+            // One and the same: the first bytes of a connection tell h2 from http/1.1.
+            crate::configurations::ListenHttpEndpointType::Http1
+            | crate::configurations::ListenHttpEndpointType::Http2 => {
+                super::plain_http::kick_connection(
                     accepted_connection,
-                    socket_addr,
-                    configuration,
-                    slot,
-                );
-                //super::http::handle_connection(accepted_connection, listening_addr, configuration)
-                //    .await;
-            }
-            crate::configurations::ListenHttpEndpointType::Http2 => {
-                super::http2::handle_connection(
-                    (accepted_connection, socket_addr).into(),
+                    socket_addr.into(),
                     listening_host.into(),
                     configuration,
                     slot,
-                )
-                .await;
+                );
             }
             crate::configurations::ListenHttpEndpointType::Https1 => {
                 super::https::handle_connection(

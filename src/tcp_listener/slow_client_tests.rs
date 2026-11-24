@@ -6,7 +6,9 @@
 //!   `header_read_timeout`, and so is a keep-alive connection that sends no next request - but
 //!   not while an answer is still on its way;
 //! - a connection to a TLS port that sends nothing is cut at `tls_handshake_timeout`;
-//! - an `https2` / `http2` connection that sends no request is cut at `header_read_timeout`;
+//! - an `https2` connection that sends no request is cut at `header_read_timeout`, and so is a
+//!   connection to an `http` / `http2` port which sends nothing to tell its protocol by, or no
+//!   request after it - counted from the connect;
 //! - a body the proxy waits for whole is answered `408` once it stops coming (`read_timeout`),
 //!   and `413` once it is larger than `max_buffered_request_body` - or says it is;
 //! - `tcp` and `mcp` endpoints, which never read a head, are not cut by any of it.
@@ -596,13 +598,112 @@ async fn every_answer_gets_a_line_in_the_access_log() {
     }
 }
 
-/// No TLS here: the h2 connection sends its SETTINGS and waits for the client preface.
-#[tokio::test]
-async fn http2_a_client_which_sends_nothing_is_cut() {
-    let site = Site::start("http2", "      header_read_timeout: 1000\n").await;
+// ---------------------------------------------------------------------------------------------
+// The opening bytes of a plain port: `http` and `http2` endpoints
+// ---------------------------------------------------------------------------------------------
 
-    let mut client = site.connect().await;
-    assert_closed_by_timeout_after_the_server_preface(&mut client).await;
+/// No TLS here: the protocol is told by the first bytes of the client, so a client which sends
+/// none is cut with nothing said - not even an h2 SETTINGS.
+#[tokio::test]
+async fn plain_a_client_which_sends_nothing_is_cut() {
+    for endpoint_type in ["http", "http2"] {
+        let site = Site::start(endpoint_type, "      header_read_timeout: 1000\n").await;
+
+        let mut client = site.connect().await;
+        assert_closed_by_timeout(&mut client).await;
+
+        site.assert_served_on_a_new_connection().await;
+    }
+}
+
+/// A part of the h2 preface tells neither protocol yet: cut all the same.
+#[tokio::test]
+async fn plain_a_part_of_the_h2_preface_is_cut() {
+    for endpoint_type in ["http", "http2"] {
+        let site = Site::start(endpoint_type, "      header_read_timeout: 1000\n").await;
+
+        let mut client = site.connect().await;
+        client.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
+        assert_closed_by_timeout(&mut client).await;
+
+        site.assert_served_on_a_new_connection().await;
+    }
+}
+
+/// The preface whole is h2: the server sends its SETTINGS, and cuts the connection which sends
+/// no request.
+#[tokio::test]
+async fn plain_an_h2_preface_with_no_request_is_cut() {
+    for endpoint_type in ["http", "http2"] {
+        let site = Site::start(endpoint_type, "      header_read_timeout: 1000\n").await;
+
+        let mut client = site.connect().await;
+        client.write_all(H2_PREFACE).await.unwrap();
+        assert_closed_by_timeout_after_the_server_preface(&mut client).await;
+    }
+}
+
+/// The first request is due `header_read_timeout` after the connect, not after the first bytes:
+/// a client which waits before it sends is not given the timeout again. An http/1.1 head which
+/// does not end, and an h2 preface with no request after it.
+#[tokio::test]
+async fn plain_the_first_request_is_due_from_the_connect() {
+    for endpoint_type in ["http", "http2"] {
+        let site = Site::start(endpoint_type, "      header_read_timeout: 1000\n").await;
+
+        for opening in [site.head_start("GET /").into_bytes(), H2_PREFACE.to_vec()] {
+            let mut client = site.connect().await;
+            let connected = Instant::now();
+
+            tokio::time::sleep(WAIT_BEFORE_SENDING).await;
+            client.write_all(&opening).await.unwrap();
+
+            let (elapsed, answered) = wait_for_the_close(&mut client, connected).await;
+
+            let what = format!("{endpoint_type}, {:?}", String::from_utf8_lossy(&opening));
+            assert!(
+                (NOT_BEFORE..SHORT + WAIT_BEFORE_SENDING / 2).contains(&elapsed),
+                "{what}: closed {elapsed:?} after the connect"
+            );
+
+            // An h2 server says its SETTINGS before anything else; an http/1.1 head which did
+            // not come in time is answered nothing.
+            if opening.starts_with(H2_PREFACE) {
+                assert_eq!(answered.get(3), Some(&4), "{what}: not a SETTINGS: {answered:?}");
+            } else {
+                assert!(answered.is_empty(), "{what}: answered {answered:?}");
+            }
+        }
+    }
+}
+
+/// What an h2 client by prior knowledge sends before anything else.
+const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// How long [`plain_the_first_request_is_due_from_the_connect`] waits after the connect before
+/// it sends. The close is expected at [`SHORT`] after the connect, and taken up to half of this
+/// later; counted again from the bytes, it would come this much later.
+const WAIT_BEFORE_SENDING: Duration = Duration::from_millis(700);
+
+/// Reads until the proxy closes the connection: how long after `since` it did, and what it sent
+/// before that.
+async fn wait_for_the_close<S: AsyncRead + Unpin>(
+    client: &mut S,
+    since: Instant,
+) -> (Duration, Vec<u8>) {
+    let mut answered = Vec::new();
+    let mut buffer = [0u8; 1024];
+
+    loop {
+        let read = tokio::time::timeout(NOT_AFTER, client.read(&mut buffer))
+            .await
+            .expect("the connection was not closed");
+
+        match read {
+            Ok(0) | Err(_) => return (since.elapsed(), answered),
+            Ok(size) => answered.extend_from_slice(&buffer[..size]),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

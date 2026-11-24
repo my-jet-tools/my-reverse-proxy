@@ -43,6 +43,19 @@ pub struct H1Reader<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'sta
     pub loop_buffer: LoopBuffer,
     pub h1_headers_builder: Http1HeadersBuilder,
     pub timeouts: HttpTimeouts,
+    /// When the head of the next request is due, if the wait for it began before this reader
+    /// did: see [`ReadAhead`]. Taken by the first [`Self::read_request_headers`].
+    head_deadline: Option<tokio::time::Instant>,
+}
+
+/// What was read of a client connection before the pipeline took it: the opening bytes of an
+/// `http` / `http2` port, which tell http/1.1 from h2 (`tcp_listener::plain_http`).
+pub struct ReadAhead {
+    /// The bytes read, as the first read of the pipeline would have put them.
+    pub received: LoopBuffer,
+    /// When the head of the first request is due: `header_read_timeout` from the start of the
+    /// connection, as if the pipeline had waited for the head from the start.
+    pub head_deadline: tokio::time::Instant,
 }
 
 impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<TNetworkReadPart> {
@@ -52,6 +65,23 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
             loop_buffer: LoopBuffer::new(),
             h1_headers_builder: Http1HeadersBuilder::new(),
             timeouts,
+            head_deadline: None,
+        }
+    }
+
+    /// A reader of a client connection whose opening bytes were read already: they are the
+    /// start of what it reads.
+    pub fn with_read_ahead(
+        read_part: TNetworkReadPart,
+        timeouts: HttpTimeouts,
+        read_ahead: ReadAhead,
+    ) -> Self {
+        Self {
+            read_part,
+            loop_buffer: read_ahead.received,
+            h1_headers_builder: Http1HeadersBuilder::new(),
+            timeouts,
+            head_deadline: Some(read_ahead.head_deadline),
         }
     }
 
@@ -91,7 +121,8 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
     /// The deadline starts when the connection waits for this request with no response still
     /// going out, or at the first byte of the request, whichever comes first. So it covers the
     /// idle wait of a keep-alive connection, but not the time an answer to the request before
-    /// it takes: the client sends the next request only after it got that one.
+    /// it takes: the client sends the next request only after it got that one. The first
+    /// request of a connection read ahead of the reader has the deadline of [`ReadAhead`].
     ///
     /// Only for requests: the head of an upstream's response is read with [`Self::read_headers`].
     ///
@@ -103,7 +134,7 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
         max_head_size: usize,
         in_flight: &crate::h1_proxy_server::pipeline::InFlightResponses,
     ) -> Result<Http1Headers, ProxyServerError> {
-        let mut deadline: Option<tokio::time::Instant> = None;
+        let mut deadline: Option<tokio::time::Instant> = self.head_deadline.take();
 
         loop {
             {

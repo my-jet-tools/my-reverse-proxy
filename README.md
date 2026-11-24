@@ -809,10 +809,10 @@ Whatever the folder is - local, behind ssh or behind a gateway:
 - A file name is not percent-decoded: `/my%20file.txt` is a file named `my%20file.txt`, not `my file.txt`.
 - A file which is not there is answered 404. So is a path which is there and is not a file - a directory - and a name longer than the file system takes, behind ssh the same as in a local folder.
 
-Two things depend on the type of the endpoint:
+Two things depend on the path of the request through the proxy:
 
-- On `http` and `https` endpoints only `GET` and `HEAD` are served, any other method is answered 404. A `HEAD` is answered with the head of the response the same `GET` gets, and no body. `http2` and `https2` endpoints do not look at the method.
-- When the ssh host or the gateway can not be reached, the answer is 503 on `http` and `https` endpoints, and 500 on `http2` and `https2` endpoints.
+- To the http/1.1 clients of `http` / `http2` endpoints and of `https` ones only `GET` and `HEAD` are served, any other method is answered 404. A `HEAD` is answered with the head of the response the same `GET` gets, and no body. The h2 clients of `http` / `http2` endpoints, and `https2` endpoints, do not get the method looked at.
+- When the ssh host or the gateway can not be reached, the answer is 503 to those http/1.1 clients, and 500 to the h2 clients of `http` / `http2` and on `https2` endpoints.
 
 
 ### Serving static content
@@ -890,8 +890,9 @@ hosts:
       type: http
 ```
 
-`http` and `https` are served by the proxy's own http/1.1 pipeline, which sends the lines of a
-request head on as they came. The upstream finds where the request ends by them on its own, so
+`http` serves http/1.1 and h2 clients alike - see [Http2](#http2), the same type under another
+name. Its http/1.1 clients, and those of `https`, are served by the proxy's own http/1.1
+pipeline, which sends the lines of a request head on as they came. The upstream finds where the request ends by them on its own, so
 a head it could read another way than the proxy is refused - the connection is closed and
 nothing goes upstream, as nginx refuses it. Otherwise the upstream could find a second request
 inside the body of the first and serve it past the checks of the location (request smuggling):
@@ -914,6 +915,22 @@ hosts:
     endpoint:
       type: http2
 ```
+
+`http2` and `http` are one type under two names: an endpoint of either serves http/1.1 and h2
+clients alike, on a tcp port and on a unix socket, and hosts of the two names share a port.
+
+There is no TLS on them, so no ALPN to agree on the protocol in: the proxy tells it by the first
+bytes of a connection. An h2 client by prior knowledge (h2c - `curl --http2-prior-knowledge`, a
+gRPC client) sends the h2 connection preface, `PRI * HTTP/2.0`..., before anything else; anything
+else is http/1.1.
+
+- An http/1.1 client is served by the proxy's own http/1.1 pipeline, as on `https`; an h2 client by
+  hyper, as the h2 clients of `https2` are. Where this README tells `http` and `http2` apart, what
+  it says of `http` is of the http/1.1 clients of a plain endpoint, and what it says of `http2` is
+  of its h2 clients.
+- A connection which does not tell its protocol within `header_read_timeout` - sends nothing, or a
+  part of the preface - is closed without a word. The first request is due within
+  `header_read_timeout` of the connect, whichever the protocol: the wait for the first bytes counts.
 
 ### Https
 
@@ -993,7 +1010,8 @@ side. Supported endpoint × upstream combinations:
 | `https2`        | `http`                 | yes   |
 | `https2`        | `http2`                | yes   |
 | `https1`        | `http`                 | yes   |
-| `http2`         | `http` / `http2`       | yes (non-browser h2 clients only) |
+| `http` / `http2`, an http/1.1 client | `http` | yes |
+| `http` / `http2`, an h2 client | `http` / `http2` | yes (non-browser h2 clients only) |
 
 Notes:
 - Browsers do WebSocket over HTTP/2 only on TLS — use `https2` for
@@ -1316,7 +1334,7 @@ mcp.domain.com:443:
       proxy_pass_to: http://service-b:8000/mcp
 ```
 
-`mcp-h2` needs an `http2` / `https2` endpoint (see the note below):
+`mcp-h2` talks h2 to its upstream, under an endpoint of any http type (see the note below):
 
 ```yaml
 mcp2.domain.com:443:
@@ -1354,9 +1372,10 @@ Notes:
 - MCP does not go through a gateway: a location of `type: mcp` / `type: mcp-h2`
   whose `proxy_pass_to` is `gateway:...` is refused at load time.
 
-- `mcp-h2` is served by the HTTP/2 request path, so it needs an endpoint of
-  `type: http2` / `type: https2`. Under an `http` / `https` endpoint the config
-  is refused at load time with an explicit message.
+- `mcp-h2` works under `http`, `http2`, `https` and `https2` endpoints: the
+  http/1.1 pipeline sends to an h2 upstream as well. Under an endpoint of
+  `type: mcp` - a byte bridge, which parses no HTTP - the config is refused at
+  load time with an explicit message.
 - Do not set `compress: true` on an MCP location: it gzips the body of a
   request on its way to the upstream - the JSON-RPC messages - which an MCP
   server is not made to take, and holds every body whole in memory first.
@@ -2171,7 +2190,7 @@ In this case - allowed_users configuration with id='list_id' must be located ins
 ### Compressing the http body
 Sometimes if proxy pass is done to remote endpoint by ssh - it would be wise to compress http body
 
-`compress: true` of a location gzips the body of a request on its way to the upstream - a body of 2048 bytes and more, held whole in memory for it - and the upstream has to take a gzipped body. It works on `http2` and `https2` endpoints; on `http` and `https` ones it is not applied.
+`compress: true` of a location gzips the body of a request on its way to the upstream - a body of 2048 bytes and more, held whole in memory for it - and the upstream has to take a gzipped body. It works for the h2 clients of `http` / `http2` endpoints and on `https2` endpoints; to the requests of http/1.1 clients of `http` / `http2`, and on `https` endpoints, it is not applied.
 
 ```yaml
 
@@ -2496,8 +2515,8 @@ hosts:
       proxy_pass_to: gateway:gateway_name->http://localhost:9000   # cleartext http2 (h2c) upstream
 ```
 
-Gateway locations work on `http` and `http2` endpoints, for http/1.1 upstreams and, on
-`http2` endpoints, for cleartext http2 (h2c) upstreams (`type: http2`). A unix socket
+Gateway locations work on `http` and `http2` endpoints, for http/1.1 upstreams and for
+cleartext http2 (h2c) upstreams (`type: http2`). A unix socket
 upstream works the same way - `gateway:gateway_name->unix+http:///var/run/app.sock` - since
 the far side connects to the socket path itself. The gateway only carries the connection:
 TLS to the upstream through a gateway is not supported. Neither is MCP: a location of
@@ -2690,7 +2709,7 @@ same unit. The **Levels** column says how far down the cascade each key is read:
 | `pool_hot_window` | ms | 3000 | global→endpoint→location | Idle window after a success during which the h2 probe is skipped. **h2 + liveness URL only.** |
 | `read_timeout` | ms | 180000 (3m) | global→endpoint | Idle read timeout on every byte pump — H1 request/response body transfer, MCP tunnel, TCP port-forward, WebSocket. A TCP port-forward or WebSocket session is torn down only when neither direction has moved bytes for this long; a one-way stream keeps it open. Doubles as dead-peer detection. On `http2` / `https2` it is also the longest silence inside a request body the proxy holds whole before sending it on (to an http/1.1 upstream): the client gets `408`. |
 | `write_timeout` | ms | 30000 (30s) | global→endpoint | Idle write timeout on every byte pump (same paths as `read_timeout`). On `http2` / `https2` it is also how long a client may take nothing of an answer - an h2 stream whose window it keeps shut, an http/1.1 client which reads nothing: then the connection is cut (nginx's `send_timeout`). |
-| `header_read_timeout` | ms | 30000 (30s) | global→endpoint | The whole head of a request has to arrive within this, at whatever pace — `http`, `https`, `http2`, `https2` endpoints. Covers the wait of a keep-alive connection for its next request, and on `http2` / `https2` everything before the first request. See [Slow clients](#slow-clients). |
+| `header_read_timeout` | ms | 30000 (30s) | global→endpoint | The whole head of a request has to arrive within this, at whatever pace — `http`, `https`, `http2`, `https2` endpoints. Covers the wait of a keep-alive connection for its next request, and everything before the first request - on `http` / `http2` from the connect, the first bytes which tell h2 from http/1.1 included. See [Slow clients](#slow-clients). |
 | `tls_handshake_timeout` | ms | 10000 (10s) | global→endpoint | The TLS handshake of `https`, `https2` and `mcp` endpoints, from the accepted connection — the ClientHello included. |
 | `h2_keep_alive_interval` | ms | 30000 (30s) | global→endpoint | How often an h2 client of an `http2` / `https2` endpoint is sent a PING. |
 | `h2_keep_alive_timeout` | ms | 20000 (20s) | global→endpoint | How long the answer to that PING may take before the connection is closed. |
@@ -2717,7 +2736,8 @@ What cuts each of them, by default:
 | Connects to a TLS port, sends nothing (or a ClientHello a byte at a time) | `https`, `https2`, `mcp` | `tls_handshake_timeout` | 10 s |
 | Sends a request head that does not end, at any pace | `http`, `https`, `http2`, `https2` | `header_read_timeout` | 30 s |
 | Keeps a keep-alive connection open and sends no next request | `http`, `https`, and http/1.1 clients of `https2` | `header_read_timeout` | 30 s |
-| Finishes the TLS handshake (or connects to `http2`) and sends no request | `http2`, `https2` | `header_read_timeout` | 30 s |
+| Connects to `http` / `http2` and sends nothing - or not enough to tell h2 from http/1.1, or the h2 preface and no request | `http`, `http2` | `header_read_timeout`, from the connect | 30 s |
+| Finishes the TLS handshake and sends no request | `https2` | `header_read_timeout` | 30 s |
 | Stops answering h2 PINGs (gone without a FIN) | `http2`, `https2` | `h2_keep_alive_interval` + `h2_keep_alive_timeout` | 30 s + 20 s |
 | Goes silent in the middle of a request body | `http`, `https`; `http2`, `https2` to an http/1.1 upstream | `read_timeout` (between two pieces) | 3 min |
 | Takes nothing of an answer - keeps its h2 window shut, or reads nothing | all four | `write_timeout` | 30 s |

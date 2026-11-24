@@ -182,25 +182,14 @@ async fn start_endpoint_with_location_ids(
                 return;
             };
 
-            match endpoint_type {
-                ListenHttpEndpointType::Http1 => {
-                    crate::h1_proxy_server::kick_h1_tcp_reverse_proxy_server_from_http(
-                        tcp_stream,
-                        client_addr,
-                        configuration.clone(),
-                        crate::app::ConnectionSlot::unlimited(),
-                    );
-                }
-                _ => {
-                    super::http2::handle_connection(
-                        (tcp_stream, client_addr).into(),
-                        listening_addr.into(),
-                        configuration.clone(),
-                        crate::app::ConnectionSlot::unlimited(),
-                    )
-                    .await;
-                }
-            }
+            // `http` and `http2` alike: the first bytes of the connection tell h2 from http/1.1.
+            super::plain_http::kick_connection(
+                tcp_stream,
+                client_addr.into(),
+                listening_addr.into(),
+                configuration.clone(),
+                crate::app::ConnectionSlot::unlimited(),
+            );
         }
     });
 

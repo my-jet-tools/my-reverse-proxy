@@ -9,7 +9,7 @@ use crate::h1_remote_connection::{mcp_path, H1PoolHolder};
 use crate::network_stream::*;
 
 use super::super::{
-    H1HeadersKind, H1Reader, HttpConnectionInfo, HttpHeadersReader, ProxyServerError,
+    H1HeadersKind, H1Reader, HttpConnectionInfo, HttpHeadersReader, ProxyServerError, ReadAhead,
 };
 use super::{
     run_client_writer, run_h2_upstream_request, run_oauth_gate, run_upstream_request,
@@ -79,6 +79,8 @@ enum ReaderStep {
 
 /// Connection entry for the task-decomposed H1 path. Spawns the client-writer
 /// task (sole owner of the write half) and runs the reader loop on this task.
+///
+/// `read_ahead`: what was read of the connection before it got here - see [`ReadAhead`].
 pub async fn serve_reverse_proxy_pipelined<
     WritePart: NetworkStreamWritePart + Send + Sync + 'static,
     ReadPart: NetworkStreamReadPart + Send + Sync + 'static,
@@ -86,6 +88,7 @@ pub async fn serve_reverse_proxy_pipelined<
 >(
     server_stream: TServerStream,
     mut http_connection_info: HttpConnectionInfo,
+    read_ahead: Option<ReadAhead>,
 ) {
     let listen_addr = http_connection_info.listen_config.listen_host.to_string();
     let port = http_connection_info.listen_config.listen_host.get_port();
@@ -114,7 +117,10 @@ pub async fn serve_reverse_proxy_pipelined<
         .map(|e| e.timeouts)
         .unwrap_or_default();
 
-    let mut h1_reader = H1Reader::new(server_read_part, timeouts);
+    let mut h1_reader = match read_ahead {
+        Some(read_ahead) => H1Reader::with_read_ahead(server_read_part, timeouts, read_ahead),
+        None => H1Reader::new(server_read_part, timeouts),
+    };
 
     // Per-connection (local) pool, keyed by upstream identity — mcp locations
     // included. A global pool would be passed in instead — same H1PoolHolder
