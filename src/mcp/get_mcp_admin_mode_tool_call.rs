@@ -16,7 +16,7 @@ pub struct GetMcpAdminModeResponse {
     pub seconds_left: i64,
 
     #[property(
-        description = "The address it is open for - the one the operator opened it from - or `this host` for the unix socket and the bare loopback; null when it is closed."
+        description = "The address it is open for - the one the operator opened it from - or `this host` for the unix socket and the loopback with no address in X-Forwarded-For; null when it is closed."
     )]
     pub ip: Option<String>,
 

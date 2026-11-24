@@ -2443,9 +2443,18 @@ echo '{"minutes": 0}' | encrypted_call https://admin.example.com /api/mcp/v1/adm
 - An MCP session from another address is refused, and so is one which has come from more than one address:
   the tools need the session to come from the address admin mode was opened from. Closing it is a call from any
   address.
-- The address of a call is the one the proxy writes in `X-Forwarded-For` when it relays the call to the control
-  port (from its loopback); the header of anybody else is not believed. The unix socket, and the loopback with
-  no such header, are `this host`: opened from there, it is open for MCP sessions of this host only.
+- The address of the call which opens it - encrypted, so its sender holds a network key - is the first entry of
+  its `X-Forwarded-For` when it is an address, the real address of the client, from whatever peer, over the unix
+  socket as over TCP; without it, the peer address.
+- The address of an MCP request - not signed by anything - is, when it comes from this host (the loopback or
+  the unix socket, one as the other: the proxy relays to either after its own rules), the first entry of the
+  `X-Forwarded-For` the proxy writes: the client - the address Cloudflare gives for a `cloudflare: true`
+  endpoint, the address of the connection otherwise. The header of a request from the network is not
+  believed, so nobody can name the operator's address in it.
+- The unix socket and the loopback with no address in `X-Forwarded-For` are `this host`: opened from there,
+  admin mode is open for MCP sessions of this host only - a session the proxy relays to the control socket
+  from a client is that client, not this host. A client of the public port which is on this host itself (an
+  ssh tunnel to the port) is the address the proxy writes for it, `127.0.0.1`.
 - `get_mcp_admin_mode` tells the address it is open for and its country, where the session comes from, and
   whether it is open for it. The same over the encrypted API, changing nothing - with the address of the call
   itself, as the proxy sees it:

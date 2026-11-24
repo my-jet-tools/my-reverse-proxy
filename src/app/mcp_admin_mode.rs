@@ -168,6 +168,34 @@ mod tests {
         assert_eq!(mode.state(at(1)).map(|itm| itm.opened_from), Some(operator));
     }
 
+    /// An MCP session the proxy relays to the control unix socket is the client it writes in
+    /// `X-Forwarded-For` - not this host: admin mode opened for this host does not let it in, and
+    /// opened for that client it does.
+    #[test]
+    fn a_session_relayed_to_the_unix_socket_is_its_client_not_this_host() {
+        use super::super::McpSessionCallers;
+
+        let callers = McpSessionCallers::new();
+        callers.note(
+            "via-the-socket",
+            CallerIp::of(None, Some("203.0.113.7")),
+            at(0),
+        );
+        callers.note("local", CallerIp::of(None, None), at(0));
+
+        let mode = McpAdminMode::new();
+        mode.open_for(10, at(0), CallerIp::of_encrypted(None, None));
+        assert!(mode
+            .check_for(callers.get("via-the-socket"), at(1))
+            .is_err());
+        assert!(mode.check_for(callers.get("local"), at(1)).is_ok());
+
+        // Opened over the socket by a caller which gives the same address.
+        mode.open_for(10, at(2), CallerIp::of_encrypted(None, Some("203.0.113.7")));
+        assert!(mode.check_for(callers.get("via-the-socket"), at(3)).is_ok());
+        assert!(mode.check_for(callers.get("local"), at(3)).is_err());
+    }
+
     /// Opening it again takes it to the new address; closing it is anybody's.
     #[test]
     fn opening_it_again_moves_it_and_zero_closes_it() {

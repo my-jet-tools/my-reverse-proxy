@@ -205,9 +205,13 @@ is in my-http-server's `docs/http-actions/encrypted-requests.md`. What the proxy
 - `POST /api/mcp/v1/admin-mode/get`, encrypted, `{}`: changes nothing; answer `{open, seconds_left,
   ip, country, your_ip, your_country, open_for_you}` - the address the admin commands of MCP are
   taken from, and the address of this call as the proxy sees it.
-- It is open for the address of the call which opened it: the last entry of `X-Forwarded-For` when
-  the call comes from the loopback (the proxy relays it so), the peer address otherwise; the unix
-  socket and the bare loopback are `this host`. A middleware in front of MCP writes down where the
+- It is open for the address of the call which opened it: the first entry of its `X-Forwarded-For`
+  when it is an address, from any peer - the call is encrypted, its sender holds a network key - the
+  peer address otherwise. An MCP request, signed by nothing, comes from the first entry of
+  `X-Forwarded-For` only when it comes from this host - the loopback or the unix socket, one as the
+  other, over which the proxy relays it after its own rules and writes the header itself:
+  `<client>`, or `<client>, <Cloudflare server>` - from its peer address otherwise. The unix socket
+  and the loopback with no address in the header are `this host`. A middleware in front of MCP writes down where the
   requests of each MCP session come from (`McpSessionCallers`), and a tool which needs admin mode
   runs only for a session which has come from that address alone.
 - While it is open, the MCP tools which change the proxy work: `reload_settings`,

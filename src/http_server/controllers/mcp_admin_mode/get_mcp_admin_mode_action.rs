@@ -8,7 +8,7 @@ use super::{key_of_encrypted_request, EncryptedJsonHttpInput};
     method: "POST",
     route: "/api/mcp/v1/admin-mode/get",
     summary: "The address the admin commands of MCP are taken from",
-    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key. The body is any JSON - `{}` - since an empty body carries no encryption; it changes nothing. The answer is `{\"open\", \"seconds_left\", \"ip\", \"country\", \"your_ip\", \"your_country\", \"open_for_you\"}`: whether admin mode is open, for how many seconds more, the address the admin commands of MCP are taken from - the one it was opened from - and its country; the address this call comes from, as the proxy sees it, and its country; and whether MCP sessions from that address may give the admin commands now. `this host` is the unix socket and the bare loopback; a country is `-` when the country database has none for the address.",
+    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key. The body is any JSON - `{}` - since an empty body carries no encryption; it changes nothing. The answer is `{\"open\", \"seconds_left\", \"ip\", \"country\", \"your_ip\", \"your_country\", \"open_for_you\"}`: whether admin mode is open, for how many seconds more, the address the admin commands of MCP are taken from - the one it was opened from - and its country; the address this call comes from - the first entry of its `X-Forwarded-For` when it has one, as for the call which opens admin mode - and its country; and whether MCP sessions from that address may give the admin commands now. `this host` is the unix socket or the loopback with no address in `X-Forwarded-For`; a country is `-` when the country database has none for the address.",
     controller: "Mcp",
     input_data: EncryptedJsonHttpInput,
     result:[
@@ -30,7 +30,7 @@ async fn handle_request(
         .mcp_admin_mode
         .state(DateTimeAsMicroseconds::now());
 
-    let you = crate::app::CallerIp::of_request(&ctx.request);
+    let you = crate::app::CallerIp::of_encrypted_request(&ctx.request);
 
     HttpOutput::as_json(McpAdminModeStateHttpModel {
         open: state.is_some(),

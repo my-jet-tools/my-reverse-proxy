@@ -10,7 +10,7 @@ use super::{key_of_encrypted_request, parse_call, EncryptedJsonHttpInput};
     method: "POST",
     route: "/api/mcp/v1/admin-mode",
     summary: "Open or close the admin mode of MCP",
-    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key - no MCP tool opens the admin mode. Body: JSON `{\"minutes\": 10}`: it is open for that many minutes from now, 60 at most, in place of the time and the address it had; 0 closes it, from any address; `{}` opens it for 10. It is open for the address this call comes from - `X-Forwarded-For` when the proxy relays it to the control port, `this host` for the unix socket and the bare loopback: while it is open, the MCP tools which change the proxy work for the MCP sessions from that address, and are refused for any other - reload_settings, generate_private_key, set_gateway_connection, delete_gateway_connection, set_gateway_authorized_key, delete_gateway_authorized_key. It is closed when the proxy starts. The answer is `{\"open\", \"seconds_left\", \"ip\", \"country\"}`.",
+    description: "Encrypted with a network key (Content-Encoding: aes128gcm), and answered encrypted with the same key - no MCP tool opens the admin mode. Body: JSON `{\"minutes\": 10}`: it is open for that many minutes from now, 60 at most, in place of the time and the address it had; 0 closes it, from any address; `{}` opens it for 10. It is open for the address this call comes from - the first entry of its `X-Forwarded-For` when it is an address (the caller holds a network key: the address it gives is taken, over the unix socket as over TCP), the peer address otherwise, `this host` for the unix socket and the loopback with no address in the header: while it is open, the MCP tools which change the proxy work for the MCP sessions from that address, and are refused for any other - reload_settings, generate_private_key, set_gateway_connection, delete_gateway_connection, set_gateway_authorized_key, delete_gateway_authorized_key. It is closed when the proxy starts. The answer is `{\"open\", \"seconds_left\", \"ip\", \"country\"}`.",
     controller: "Mcp",
     input_data: EncryptedJsonHttpInput,
     result:[
@@ -42,7 +42,7 @@ async fn handle_request(
     let admin_mode = &crate::app::APP_CTX.mcp_admin_mode;
 
     // Open for where this call comes from; closed by a call from anywhere.
-    let caller = crate::app::CallerIp::of_request(&ctx.request);
+    let caller = crate::app::CallerIp::of_encrypted_request(&ctx.request);
 
     admin_mode.open_for(minutes, now, caller);
 

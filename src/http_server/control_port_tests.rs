@@ -402,6 +402,19 @@ async fn the_control_port_is_served_on_a_unix_socket() {
     .await;
     assert_eq!(response.status, 400);
 
+    // Not through a proxy, on the socket either: a request the proxy relays to it carries the
+    // `X-Forwarded-For` the proxy writes.
+    let stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let response = post_on(
+        stream,
+        "localhost",
+        "/api/initialize",
+        "X-Forwarded-For: 203.0.113.7\r\n",
+        br#"{"key": "short"}"#,
+    )
+    .await;
+    assert_eq!(response.status, 403);
+
     let _ = std::fs::remove_file(&path);
 }
 
