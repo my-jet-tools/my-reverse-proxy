@@ -281,6 +281,7 @@ mod tests {
         serde_yaml::from_str(yaml).unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_control_unix_socket_is_a_path_with_home_expanded() {
         assert_eq!(
@@ -306,6 +307,29 @@ mod tests {
                 "{}/sockets/control.sock",
                 crate::settings::home_dir().unwrap()
             )))
+        );
+    }
+
+    /// No unix sockets on Windows: a control socket which is asked for is an error - the startup
+    /// stops on it - and one which is not asked for is none.
+    #[cfg(not(unix))]
+    #[test]
+    fn the_control_unix_socket_is_refused_where_there_are_no_unix_sockets() {
+        assert_eq!(
+            parse("http_control_port: 9000").get_control_unix_socket(),
+            Ok(None)
+        );
+        assert_eq!(
+            parse("control_unix_socket: ''").get_control_unix_socket(),
+            Ok(None)
+        );
+
+        let settings = parse("control_unix_socket: /var/run/my-reverse-proxy-control.sock");
+        let err = settings.get_control_unix_socket().unwrap_err();
+        assert!(
+            err.contains("/var/run/my-reverse-proxy-control.sock")
+                && err.contains("not supported on this platform"),
+            "{err}"
         );
     }
 

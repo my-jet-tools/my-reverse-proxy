@@ -111,6 +111,22 @@ mcp-server-middleware = { tag = "0.9.0", git = "https://github.com/my-ai-utils/m
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The command line of Windows - --install, --uninstall, --start, --run-as-service, --settings: the
+# registration with the Service Control Manager (auto-start, restart-on-failure) and the SCM protocol
+# the installed service speaks. Windows only, as the `main` which uses it (src/win_service.rs): a
+# Linux build does not fetch it, and its `main` has no command line.
+[target.'cfg(windows)'.dependencies]
+win-service-host = { tag = "0.2.0", git = "https://github.com/my-jet-tools/win-utils.git" }
+# The access lists of the folders `--install` checks, and of the process a release build closes
+# to debuggers (src/win_service/).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Threading",
+] }
+
 [build-dependencies]
 ci-utils = { git = "https://github.com/MyJetTools/ci-utils.git", tag = "0.1.3" }
 
