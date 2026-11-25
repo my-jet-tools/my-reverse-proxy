@@ -38,7 +38,7 @@ use crate::types::{ConnectionIp, ProtectedString};
 /// Headers which can not be required (as [`header_name_is`] takes a name): a request can not go
 /// on without them - they carry its host, its body, its connection -, or the proxy writes them
 /// itself, or their value is never the same twice.
-const NOT_REQUIRABLE: [&str; 18] = [
+const NOT_REQUIRABLE: [&str; 19] = [
     "host",
     "content-length",
     "transfer-encoding",
@@ -57,6 +57,7 @@ const NOT_REQUIRABLE: [&str; 18] = [
     "cf-connecting-ipv6",
     "cf-ipcountry",
     crate::forwarded_user::HEADER,
+    crate::forwarded_user::CLIENT_CERT_ID_HEADER,
 ];
 
 #[derive(Clone)]
@@ -427,6 +428,7 @@ mod tests {
             "X-Forwarded-For",
             "CF-Connecting-IP",
             "X-Forwarded-User",
+            "X-Forwarded-ClientCertId",
         ] {
             let err = compile(&format!("- {name}: value\n")).unwrap_err();
             assert!(err.contains("can not be required"), "{name}: {err}");

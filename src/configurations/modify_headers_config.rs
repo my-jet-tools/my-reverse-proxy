@@ -21,8 +21,9 @@ impl ModifyHeadersConfig {
         if let Some(add) = settings.add.as_mut() {
             if let Some(add) = add.request.take() {
                 for add in add {
-                    // Who a request is of is the proxy's own header: what it says is never up
-                    // to the settings (see `crate::forwarded_user`).
+                    // Who a request is of (`X-Forwarded-User`, `X-Forwarded-ClientCertId`) is the
+                    // proxy's own header: what it says is never up to the settings (see
+                    // `crate::forwarded_user`).
                     if crate::forwarded_user::is_header_name(add.name.as_bytes()) {
                         continue;
                     }

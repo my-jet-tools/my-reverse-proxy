@@ -1163,18 +1163,21 @@ async fn a_header_the_settings_add_is_never_taken_from_the_client() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// X-Forwarded-User
+// X-Forwarded-User, X-Forwarded-ClientCertId
 // ---------------------------------------------------------------------------------------------
 
-/// What a client sends to pass itself off as somebody: the header, and the spelling of it a
+/// What a client sends to pass itself off as somebody: the headers, and the spelling of each a
 /// CGI-style server (PHP, WSGI, Rack) reads as the same `HTTP_X_FORWARDED_USER`.
 const FORGED_BY_THE_CLIENT: &[(&str, &str)] = &[
     ("x-forwarded-user", "forged-by-the-client"),
     ("x_forwarded_user", "forged-by-the-client"),
+    ("x-forwarded-clientcertid", "forged-by-the-client"),
+    ("x_forwarded_clientcertid", "forged-by-the-client"),
 ];
 
 /// A request of nobody - no client certificate, no Google sign-in - reaches the upstream with no
-/// `X-Forwarded-User`, whatever the client or the settings put under that name.
+/// `X-Forwarded-User` and no `X-Forwarded-ClientCertId`, whatever the client or the settings put
+/// under those names.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn x_forwarded_user_of_a_request_of_nobody_is_not_sent() {
     my_tls::install_default_crypto_providers();
@@ -1202,7 +1205,8 @@ async fn x_forwarded_user_of_a_request_of_nobody_is_not_sent() {
 }
 
 /// On an endpoint with `google_auth` the header is the email of the request's sign-in - the only
-/// one, whatever the client or the settings put under that name.
+/// one, whatever the client or the settings put under that name. A sign-in is no certificate: no
+/// `X-Forwarded-ClientCertId` goes with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn x_forwarded_user_is_the_email_of_a_google_sign_in() {
     my_tls::install_default_crypto_providers();
@@ -1252,14 +1256,16 @@ async fn x_forwarded_user_is_the_email_of_a_google_sign_in() {
 }
 
 /// On an endpoint with `client_certificate_ca` the header is the CN of the certificate its ca
-/// verified - the only one, whatever the client or the settings put under that name.
+/// verified, and `X-Forwarded-ClientCertId` its serial (the id ca-api gives it) - the only ones,
+/// whatever the client or the settings put under those names.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn x_forwarded_user_is_the_cn_of_a_client_certificate() {
+async fn x_forwarded_user_and_clientcertid_are_the_cn_and_serial_of_a_client_certificate() {
     my_tls::install_default_crypto_providers();
 
     const CN: &str = "forwarded-user-test-client";
+    const SERIAL: u64 = 42;
 
-    let certificate = ClientCertificate::issue(CN).await;
+    let certificate = ClientCertificate::issue(CN, SERIAL).await;
 
     let endpoints = [
         Endpoint::Https,
@@ -1283,7 +1289,10 @@ async fn x_forwarded_user_is_the_cn_of_a_client_certificate() {
         seen.push((endpoint, sent));
     }
 
-    let expected = vec![format!("x-forwarded-user: {CN}")];
+    let expected = vec![
+        format!("x-forwarded-clientcertid: {SERIAL}"),
+        format!("x-forwarded-user: {CN}"),
+    ];
 
     assert_eq!(
         seen,
@@ -1336,7 +1345,12 @@ async fn x_forwarded_user_spelled_to_slip_through_does_not_reach_the_upstream() 
         String::from_utf8_lossy(&response).to_string()
     }
 
-    let response = answer(port, "X-Other: kept\r\nX_Forwarded_User: underscored\r\n").await;
+    let lines = concat!(
+        "X-Other: kept\r\n",
+        "X_Forwarded_User: underscored\r\n",
+        "X_Forwarded_ClientCertId: underscored\r\n",
+    );
+    let response = answer(port, lines).await;
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 
     let requests = upstream.requests();
@@ -1349,6 +1363,8 @@ async fn x_forwarded_user_spelled_to_slip_through_does_not_reach_the_upstream() 
         "X-Forwarded-User : spaced\r\n",
         "X-Forwarded-User\t: tabbed\r\n",
         "X-Other: kept\r\n X-Forwarded-User: folded\r\n",
+        "X-Forwarded-ClientCertId : spaced\r\n",
+        "X-Other: kept\r\n X-Forwarded-ClientCertId: folded\r\n",
     ] {
         let response = answer(port, lines).await;
         assert!(
@@ -1361,7 +1377,8 @@ async fn x_forwarded_user_spelled_to_slip_through_does_not_reach_the_upstream() 
 }
 
 /// An endpoint of `endpoint`'s type in front of the upstream, with `endpoint_lines` added to it,
-/// whose location tries to set `X-Forwarded-User` from the settings; `sections` go after `hosts`.
+/// whose location tries to set `X-Forwarded-User` and `X-Forwarded-ClientCertId` from the settings;
+/// `sections` go after `hosts`.
 fn forwarded_user_yaml(
     endpoint: Endpoint,
     port: u16,
@@ -1370,14 +1387,14 @@ fn forwarded_user_yaml(
     sections: &str,
 ) -> String {
     format!(
-        "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {endpoint_type}\n{endpoint_lines}    locations:\n    - proxy_pass_to: http://127.0.0.1:{upstream_port}\n      modify_http_headers:\n        add:\n          request:\n          - name: X-Forwarded-User\n            value: forged-by-the-settings\n{sections}",
+        "hosts:\n  localhost:{port}:\n    endpoint:\n      type: {endpoint_type}\n{endpoint_lines}    locations:\n    - proxy_pass_to: http://127.0.0.1:{upstream_port}\n      modify_http_headers:\n        add:\n          request:\n          - name: X-Forwarded-User\n            value: forged-by-the-settings\n          - name: X-Forwarded-ClientCertId\n            value: forged-by-the-settings\n{sections}",
         endpoint_type = endpoint.type_name(),
     )
 }
 
 /// One request to an endpoint set up by [`forwarded_user_yaml`]: `headers` and
 /// [`FORGED_BY_THE_CLIENT`] in it, `certificate` presented in the TLS handshake. Returns the
-/// `X-Forwarded-User` headers the upstream got.
+/// `X-Forwarded-User` and `X-Forwarded-ClientCertId` headers the upstream got, sorted.
 async fn forwarded_user_probe(
     endpoint: Endpoint,
     endpoint_lines: &str,
@@ -1412,20 +1429,32 @@ async fn forwarded_user_probe(
     forwarded_user_lines(&outcome.upstream_requests[0])
 }
 
-/// The lines of an upstream request's head which an upstream could read as `X-Forwarded-User`.
+/// The lines of an upstream request's head which an upstream could read as `X-Forwarded-User` or
+/// `X-Forwarded-ClientCertId`, sorted: the order of the headers is no part of what is checked.
 fn forwarded_user_lines(upstream_request: &str) -> Vec<String> {
-    upstream_request
+    let mut lines: Vec<String> = upstream_request
         .lines()
         .skip(1)
         .filter(|line| {
-            line.starts_with("x-forwarded-user:") || line.starts_with("x_forwarded_user:")
+            [
+                "x-forwarded-user:",
+                "x_forwarded_user:",
+                "x-forwarded-clientcertid:",
+                "x_forwarded_clientcertid:",
+            ]
+            .iter()
+            .any(|name| line.starts_with(name))
         })
         .map(str::to_string)
-        .collect()
+        .collect();
+
+    lines.sort();
+    lines
 }
 
 /// A client-certificate ca made for one test - loaded into the proxy under an id of its own,
-/// since the certificate cache is shared by every test - and a certificate it issued.
+/// since the certificate cache is shared by every test - and a certificate it issued, with the
+/// serial `serial` as ca-api numbers them.
 struct ClientCertificate {
     ca_id: String,
     cert: CertificateDer<'static>,
@@ -1433,10 +1462,10 @@ struct ClientCertificate {
 }
 
 impl ClientCertificate {
-    async fn issue(cn: &str) -> Self {
+    async fn issue(cn: &str, serial: u64) -> Self {
         use rcgen::{
             BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
-            KeyPair, KeyUsagePurpose,
+            KeyPair, KeyUsagePurpose, SerialNumber,
         };
 
         let ca_key = KeyPair::generate().unwrap();
@@ -1453,6 +1482,7 @@ impl ClientCertificate {
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
         params.distinguished_name.push(DnType::CommonName, cn);
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params.serial_number = Some(SerialNumber::from(serial));
         let cert = params.signed_by(&key, &issuer).unwrap();
 
         let ca_id = unique_id("location_tests_ca");

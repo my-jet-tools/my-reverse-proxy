@@ -1,10 +1,13 @@
-//! `X-Forwarded-User`: who a request is of, as the proxy tells it to the upstream.
+//! `X-Forwarded-User` and `X-Forwarded-ClientCertId`: who a request is of, as the proxy tells it
+//! to the upstream.
 //!
-//! It is the CN of a client certificate the endpoint's `client_certificate_ca` verified, or the
-//! email of a Google sign-in (`google_auth`) - the identity `allowed_users` checks. The header is
-//! always the proxy's own, on every http endpoint type and whatever the settings say: what the
-//! client sent under that name is removed, `modify_http_headers` can not add it, and a request
-//! with no such user reaches the upstream without one.
+//! `X-Forwarded-User` is the CN of a client certificate the endpoint's `client_certificate_ca`
+//! verified, or the email of a Google sign-in (`google_auth`) - the identity `allowed_users`
+//! checks. `X-Forwarded-ClientCertId` goes with it when that identity is a client certificate:
+//! the serial of the certificate, in decimal - the id ca-api gives it. The headers are always the
+//! proxy's own, on every http endpoint type and whatever the settings say: what the client sent
+//! under those names is removed, `modify_http_headers` can not add them, and a request with no
+//! such user reaches the upstream without them.
 
 use crate::http_proxy_pass::HttpProxyPassIdentity;
 
@@ -12,22 +15,34 @@ use crate::http_proxy_pass::HttpProxyPassIdentity;
 /// takes it.
 pub const HEADER: &str = "x-forwarded-user";
 
-/// Whether an upstream could read a header named `name` as [`HEADER`] - one a client sent, to be
-/// removed, or one `modify_http_headers` would add, to be ignored. Not only the name in any case:
-/// also with whitespace around it (`X-Forwarded-User :`, which HTTP/1.1 forbids and a lenient
-/// server trims) and with `_` for `-` (`X_Forwarded_User`, which CGI-style servers - PHP, WSGI,
-/// Rack - read as the very same `HTTP_X_FORWARDED_USER`).
+/// `X-Forwarded-ClientCertId`, in lowercase like [`HEADER`].
+pub const CLIENT_CERT_ID_HEADER: &str = "x-forwarded-clientcertid";
+
+/// Whether an upstream could read a header named `name` as [`HEADER`] or
+/// [`CLIENT_CERT_ID_HEADER`] - one a client sent, to be removed, or one `modify_http_headers`
+/// would add, to be ignored. Not only the name in any case: also with whitespace around it
+/// (`X-Forwarded-User :`, which HTTP/1.1 forbids and a lenient server trims) and with `_` for `-`
+/// (`X_Forwarded_User`, which CGI-style servers - PHP, WSGI, Rack - read as the very same
+/// `HTTP_X_FORWARDED_USER`).
 pub fn is_header_name(name: &[u8]) -> bool {
     let name = name.trim_ascii();
 
-    name.len() == HEADER.len()
-        && name.iter().zip(HEADER.as_bytes()).all(|(&byte, &expected)| {
-            let byte = match byte {
-                b'_' => b'-',
-                byte => byte.to_ascii_lowercase(),
-            };
-            byte == expected
-        })
+    reads_as(name, HEADER) || reads_as(name, CLIENT_CERT_ID_HEADER)
+}
+
+/// Whether `name` is `header` (lowercase, with `-`) in any case and with `_` for `-`.
+fn reads_as(name: &[u8], header: &str) -> bool {
+    name.len() == header.len()
+        && name
+            .iter()
+            .zip(header.as_bytes())
+            .all(|(&byte, &expected)| {
+                let byte = match byte {
+                    b'_' => b'-',
+                    byte => byte.to_ascii_lowercase(),
+                };
+                byte == expected
+            })
 }
 
 /// What goes in [`HEADER`] for `identity`. `None` - the request goes without the header - when
@@ -47,9 +62,23 @@ pub fn value_of(identity: &HttpProxyPassIdentity) -> Option<&str> {
     fits.then_some(value)
 }
 
+/// What goes in [`CLIENT_CERT_ID_HEADER`] for `identity`: the serial of its client certificate,
+/// in decimal - only digits, so it always travels, even when the CN does not. `None` - the
+/// request goes without the header - for a Google sign-in: the header tells which certificate the
+/// user is, so it is there only when the user is a certificate.
+pub fn client_cert_id_of(identity: &HttpProxyPassIdentity) -> Option<&str> {
+    match identity {
+        HttpProxyPassIdentity::ClientCert(certificate) => Some(certificate.serial.as_str()),
+        HttpProxyPassIdentity::GoogleUser(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::tcp_listener::https::ClientCertificateData;
     use crate::types::Email;
 
     fn user(name: &str) -> HttpProxyPassIdentity {
@@ -67,6 +96,12 @@ mod tests {
             "X-Forwarded-User ",
             " X-Forwarded-User",
             "X-Forwarded-User\t",
+            "x-forwarded-clientcertid",
+            "X-Forwarded-ClientCertId",
+            "X-FORWARDED-CLIENTCERTID",
+            "X_Forwarded_ClientCertId",
+            "X-Forwarded-ClientCertId ",
+            " X-Forwarded-ClientCertId",
         ] {
             assert!(is_header_name(name.as_bytes()), "{name:?}");
         }
@@ -77,10 +112,33 @@ mod tests {
             "x-forwarded-use",
             "forwarded-user",
             "x-forwarded user",
+            "x-forwarded-clientcertids",
+            "x-forwarded-clientcert",
+            "x-forwarded-client-certid",
             "",
         ] {
             assert!(!is_header_name(name.as_bytes()), "{name:?}");
         }
+    }
+
+    #[test]
+    fn the_client_cert_id_is_the_serial_of_a_certificate_and_of_nobody_else() {
+        let certificate = |cn: &str| {
+            HttpProxyPassIdentity::ClientCert(Arc::new(ClientCertificateData {
+                cn: cn.to_string(),
+                serial: "42".to_string(),
+                ca_id: "ca".to_string(),
+                accepted_outside_validity: false,
+            }))
+        };
+
+        assert_eq!(client_cert_id_of(&certificate("partner")), Some("42"));
+        // A CN which can not travel keeps out `X-Forwarded-User` only.
+        assert_eq!(value_of(&certificate("partner\r\n")), None);
+        assert_eq!(client_cert_id_of(&certificate("partner\r\n")), Some("42"));
+        assert_eq!(client_cert_id_of(&certificate("")), Some("42"));
+
+        assert_eq!(client_cert_id_of(&user("someone@example.com")), None);
     }
 
     #[test]

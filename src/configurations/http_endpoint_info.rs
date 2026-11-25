@@ -424,6 +424,7 @@ mod client_cert_guard_tests {
     fn cert(ca_id: &str, accepted_outside_validity: bool) -> ClientCertificateData {
         ClientCertificateData {
             cn: "client".to_string(),
+            serial: "1".to_string(),
             ca_id: ca_id.to_string(),
             accepted_outside_validity,
         }

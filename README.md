@@ -1658,6 +1658,16 @@ the following headers into proxied HTTP/1.1 and HTTP/2 requests:
   travel in a header as it is (a control character, a space at either end) is
   not sent.
 
+* **`X-Forwarded-ClientCertId`** — the id of the client certificate when the
+  request's user is a client certificate (`X-Forwarded-User` carries its CN): the
+  certificate's serial number in decimal, the `id` ca-api gives it (`42`). It is
+  sent even when the CN cannot travel in `X-Forwarded-User`. A Google sign-in
+  gets none, also on an endpoint that has both `google_auth` and
+  `client_certificate_ca`. Like `X-Forwarded-User` it is always the proxy's own:
+  a client-supplied copy is removed (`_` for `-`, whitespace around the name
+  included), `modify_http_headers` can
+  neither add nor remove it, and `request_with_header_only` cannot require it.
+
 * **`CF-IPCountry`** — only when `inject_country: true` is set on the endpoint.
   The 2-letter ISO country code of the client IP is looked up from the bundled
   IPv4 geolocation database and written as `CF-IPCountry: XX`. Any `CF-IPCountry`

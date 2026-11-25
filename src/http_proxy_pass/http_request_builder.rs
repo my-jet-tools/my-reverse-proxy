@@ -820,8 +820,8 @@ impl HttpRequestBuilder {
     }
 }
 
-/// `X-Forwarded-User`: who the request is of, or nothing - never what the client sent under
-/// that name, in any spelling an upstream could read as it.
+/// `X-Forwarded-User` and `X-Forwarded-ClientCertId`: who the request is of, or nothing - never
+/// what the client sent under those names, in any spelling an upstream could read as them.
 fn apply_forwarded_user(parts: &mut Parts, identity: Option<&HttpProxyPassIdentity>) {
     let sent_by_the_client: Vec<HeaderName> = parts
         .headers
@@ -834,15 +834,27 @@ fn apply_forwarded_user(parts: &mut Parts, identity: Option<&HttpProxyPassIdenti
         parts.headers.remove(name);
     }
 
-    let Some(user) = identity.and_then(crate::forwarded_user::value_of) else {
+    let Some(identity) = identity else {
         return;
     };
 
-    if let Ok(value) = HeaderValue::from_str(user) {
-        parts.headers.insert(
-            HeaderName::from_static(crate::forwarded_user::HEADER),
-            value,
-        );
+    let headers = [
+        (
+            crate::forwarded_user::HEADER,
+            crate::forwarded_user::value_of(identity),
+        ),
+        (
+            crate::forwarded_user::CLIENT_CERT_ID_HEADER,
+            crate::forwarded_user::client_cert_id_of(identity),
+        ),
+    ];
+
+    for (name, value) in headers {
+        let Some(Ok(value)) = value.map(HeaderValue::from_str) else {
+            continue;
+        };
+
+        parts.headers.insert(HeaderName::from_static(name), value);
     }
 }
 

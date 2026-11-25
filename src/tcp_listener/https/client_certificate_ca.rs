@@ -11,6 +11,10 @@ use my_tls::{crl::CrlRecord, tokio_rustls::rustls};
 #[derive(Debug, Clone)]
 pub struct ClientCertificateData {
     pub cn: String,
+    /// The serial number of the certificate, in decimal: its id within its CA - the `id` ca-api
+    /// lists it under, and the number a revocation list names it by. What
+    /// `X-Forwarded-ClientCertId` carries.
+    pub serial: String,
     /// `client_certificate_id` of the CA this certificate was verified against
     /// during the TLS handshake. A connection may carry requests for other
     /// vhosts (HTTP/2 coalescing, keep-alive cross-`Host` reuse), so every
@@ -174,6 +178,7 @@ impl ClientCertificateCa {
 
             let cert_data = ClientCertificateData {
                 cn,
+                serial: cert_to_check.serial.to_string(),
                 ca_id: ca_id.to_string(),
                 accepted_outside_validity,
             };
@@ -283,5 +288,61 @@ impl ClientCertificateCa {
             crl_list: crl,
             crl_file_source: self.crl_file_source.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+        KeyPair, KeyUsagePurpose, SerialNumber,
+    };
+
+    use super::ClientCertificateCa;
+
+    /// The serial of the certificate `serial` names, as [`ClientCertificateCa::verify_cert`]
+    /// gives it.
+    fn verified_serial(serial: SerialNumber) -> String {
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "serial test ca");
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::new(ca_params, ca_key);
+
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name.push(DnType::CommonName, "client");
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params.serial_number = Some(serial);
+        let cert = params.signed_by(&key, &issuer).unwrap();
+
+        let ca = ClientCertificateCa::new(vec![ca_cert.der().clone()], None, vec![], None).unwrap();
+
+        ca.verify_cert(cert.der(), "serial-test", None)
+            .unwrap()
+            .serial
+            .clone()
+    }
+
+    /// A serial is given in decimal, whole: the id ca-api numbers its certificates with
+    /// (`SerialNumber::from(u64)`), and the 20 bytes other CAs fill with random ones - more than
+    /// a `u64` holds.
+    #[test]
+    fn the_serial_of_a_verified_certificate_is_given_in_decimal() {
+        assert_eq!(verified_serial(SerialNumber::from(42u64)), "42");
+        assert_eq!(
+            verified_serial(SerialNumber::from(u64::MAX)),
+            "18446744073709551615"
+        );
+
+        let twenty_bytes: Vec<u8> = (0x11..0x25).collect();
+        assert_eq!(
+            verified_serial(SerialNumber::from_slice(&twenty_bytes)),
+            "97455918484687351839003113181973136074250265380"
+        );
     }
 }

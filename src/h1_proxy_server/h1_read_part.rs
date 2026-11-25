@@ -329,8 +329,9 @@ impl<TNetworkReadPart: NetworkStreamReadPart + Send + Sync + 'static> H1Reader<T
 }
 
 /// Writes `head` - parsed, in the buffer it was parsed from - to `out` the way it goes on: with
-/// the `modify_http_headers` of `kind` applied, `X-Forwarded-For`, `CF-IPCountry` and
-/// `X-Forwarded-User` (of `identity`) on a request, `Connection: close` and HSTS on a response.
+/// the `modify_http_headers` of `kind` applied, `X-Forwarded-For`, `CF-IPCountry`,
+/// `X-Forwarded-User` and `X-Forwarded-ClientCertId` (of `identity`) on a request,
+/// `Connection: close` and HSTS on a response.
 /// Returns whether the head asks for a websocket upgrade.
 ///
 /// The headers of a request which tell who its client is are the proxy's word: what the client
@@ -413,7 +414,8 @@ pub fn compile_head(
             .iter()
             .any(|rules| rules.has_to_be_removed(header_name));
 
-        // Who the request is of is the proxy's word, written below - never the client's.
+        // Who the request is of (`X-Forwarded-User`, `X-Forwarded-ClientCertId`) is the proxy's
+        // word, written below - never the client's.
         let is_forwarded_user =
             is_request && crate::forwarded_user::is_header_name(header_name.as_bytes());
 
@@ -454,9 +456,13 @@ pub fn compile_head(
         }
     }
 
-    if is_request {
-        if let Some(user) = identity.as_ref().and_then(crate::forwarded_user::value_of) {
+    if let Some(identity) = identity.as_ref().filter(|_| is_request) {
+        if let Some(user) = crate::forwarded_user::value_of(identity) {
             out.push_header(crate::forwarded_user::HEADER, user);
+        }
+
+        if let Some(cert_id) = crate::forwarded_user::client_cert_id_of(identity) {
+            out.push_header(crate::forwarded_user::CLIENT_CERT_ID_HEADER, cert_id);
         }
     }
 
