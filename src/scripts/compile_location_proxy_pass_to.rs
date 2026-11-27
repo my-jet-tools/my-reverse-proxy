@@ -24,12 +24,28 @@ pub async fn compile_location_proxy_pass_to(
     let proxy_pass_to = match location_type {
         #[cfg(unix)]
         LocationType::UnixSocketHttp => ProxyPassToConfig::UnixHttp1(
-            compile_model(location_settings, settings_model, resolved, "unix+http").await?,
+            compile_model(
+                location_settings,
+                settings_model,
+                resolved,
+                "unix+http",
+                listen_host,
+                &path,
+            )
+            .await?,
         ),
 
         #[cfg(unix)]
         LocationType::UnixSocketHttp2 => ProxyPassToConfig::UnixHttp2(
-            compile_model(location_settings, settings_model, resolved, "unix+http2").await?,
+            compile_model(
+                location_settings,
+                settings_model,
+                resolved,
+                "unix+http2",
+                listen_host,
+                &path,
+            )
+            .await?,
         ),
 
         #[cfg(not(unix))]
@@ -42,7 +58,15 @@ pub async fn compile_location_proxy_pass_to(
         }
 
         LocationType::Http | LocationType::Https1 => ProxyPassToConfig::Http1(
-            compile_model(location_settings, settings_model, resolved, "http").await?,
+            compile_model(
+                location_settings,
+                settings_model,
+                resolved,
+                "http",
+                listen_host,
+                &path,
+            )
+            .await?,
         ),
 
         LocationType::Mcp => ProxyPassToConfig::McpHttp1(
@@ -51,6 +75,8 @@ pub async fn compile_location_proxy_pass_to(
                 settings_model,
                 resolved,
                 crate::consts::location_type::MCP,
+                listen_host,
+                &path,
             )
             .await?,
         ),
@@ -61,12 +87,22 @@ pub async fn compile_location_proxy_pass_to(
                 settings_model,
                 resolved,
                 crate::consts::location_type::MCP_H2,
+                listen_host,
+                &path,
             )
             .await?,
         ),
 
         LocationType::Http2 | LocationType::Https2 => ProxyPassToConfig::Http2(
-            compile_model(location_settings, settings_model, resolved, "http2").await?,
+            compile_model(
+                location_settings,
+                settings_model,
+                resolved,
+                "http2",
+                listen_host,
+                &path,
+            )
+            .await?,
         ),
 
         LocationType::Files => {
@@ -75,6 +111,17 @@ pub async fn compile_location_proxy_pass_to(
             }
 
             let proxy_pass_to = location_settings.proxy_pass_to.clone().unwrap();
+
+            // A location is read as a folder when `proxy_pass_to` is not an url: so is a socket
+            // file without its type. With a path after it, it is plainly not a folder.
+            if let Ok((_, Some(_))) = split_unix_socket_path(proxy_pass_to.as_str()) {
+                return Err(format!(
+                    "Endpoint '{listen_host}', location '{path}': proxy_pass_to '{proxy_pass_to}' \
+                     is a unix socket and the path of its requests, not a folder: give the \
+                     location its type - mcp, mcp-h2, unix+http or unix+http2"
+                ));
+            }
+
             let files_path =
                 MyReverseProxyRemoteEndpoint::try_parse(proxy_pass_to.as_str(), settings_model)
                     .await?;
@@ -171,12 +218,15 @@ fn unix_socket_upstream_is_refused(
 }
 
 /// Parses `proxy_pass_to` into the upstream model shared by every network
-/// location type. `location_type_name` only names the type in the error.
+/// location type. `location_type_name` only names the type in the error, `listen_host` and
+/// `path` the location.
 async fn compile_model(
     location_settings: &LocationSettings,
     settings_model: &SettingsCompiled,
     resolved: &ResolvedTimeouts,
     location_type_name: &str,
+    listen_host: &str,
+    path: &str,
 ) -> Result<ProxyPassToModel, String> {
     let Some(proxy_pass_to) = location_settings.proxy_pass_to.as_ref() else {
         return Err(format!(
@@ -185,17 +235,38 @@ async fn compile_model(
         ));
     };
 
+    let (remote_host, socket_path_and_query) = split_socket_path(proxy_pass_to).map_err(|err| {
+        format!("Endpoint '{listen_host}', location '{path}': proxy_pass_to {err}")
+    })?;
+
     Ok(ProxyPassToModel {
-        remote_host: MyReverseProxyRemoteEndpoint::try_parse(
-            proxy_pass_to.as_str(),
-            settings_model,
-        )
-        .await?,
+        remote_host: MyReverseProxyRemoteEndpoint::try_parse(remote_host, settings_model).await?,
+        socket_path_and_query: socket_path_and_query.map(str::to_string),
         server_name: location_settings.domain_name.clone(),
         request_timeout: resolved.request_timeout,
         connect_timeout: resolved.connect_timeout,
         pool_tuning: PoolTuning::from_resolved(resolved),
     })
+}
+
+/// `proxy_pass_to` without the path written after the socket file of a unix socket of this host,
+/// and that path: see [`split_unix_socket_path`]. A socket behind `ssh:...->` or `gateway:...->`
+/// is not a file of this host, and a path after it is refused rather than taken for a part of the
+/// socket file.
+fn split_socket_path(proxy_pass_to: &str) -> Result<(&str, Option<&str>), String> {
+    // Where `MyReverseProxyRemoteEndpoint::try_parse` splits a source behind ssh or a gateway.
+    if let Some((_, target)) = proxy_pass_to.split_once("->") {
+        if split_unix_socket_path(target)?.1.is_some() {
+            return Err(format!(
+                "'{proxy_pass_to}': a path after the socket file is read for a unix socket of \
+                 this host only - not behind ssh: or gateway:"
+            ));
+        }
+
+        return Ok((proxy_pass_to, None));
+    }
+
+    split_unix_socket_path(proxy_pass_to)
 }
 
 async fn get_static_content_body(body: String) -> Result<Vec<u8>, String> {

@@ -12,8 +12,8 @@ The keyword `mcp` appears in two scopes with completely different semantics:
    then pipes bytes to one configured upstream `host:port`. It does **not**
    parse HTTP at all — so it also cannot route by path: it always uses the
    endpoint's FIRST location. `https://` upstreams are rejected (no TLS-to-TLS
-   bridging), unix sockets are not supported, and `oauth` is refused on it at
-   config time (there is no HTTP layer to hook into).
+   bridging), a unix socket upstream and `oauth` are refused on it at config
+   time (it dials tcp only, and there is no HTTP layer to hook into).
 
 2. **`location.type = mcp` / `location.type = mcp-h2`** — an ordinary HTTP
    proxy-pass with a URI rewrite. This is what the rest of this document is
@@ -78,6 +78,31 @@ Everything else is the ordinary upstream machinery, deliberately: **upstream
 selection and pooling for `mcp` are identical to `http1`, and for `mcp-h2`
 identical to `http2`.** There is no MCP-specific connection holder, no
 dedicated-connection carve-out, no separate GC.
+
+## An MCP server on a unix socket
+
+`proxy_pass_to` of an MCP server on a unix socket of this host is its socket
+file, then after a `:` the path the requests are rewritten onto - the form
+FlUrl (`UrlBuilder` of my-http-utils) and the certificate sources read:
+
+```
+locations:
+  - path: /service-d   type: mcp      proxy_pass_to: /root/unix-sockets/service-d.sock:/mcp
+  - path: /service-e   type: mcp-h2   proxy_pass_to: ~/unix-sockets/service-e.sock:/mcp
+```
+
+`RemoteEndpoint` of rust-extensions has no path for a unix socket (everything
+after the scheme is the socket file), so the split is made when the location
+compiles (`split_unix_socket_path`, `src/configurations/unix_socket_upstream.rs`):
+the socket file ends at the first `:` after its start, `remote_host` is the
+socket alone and the path goes to `ProxyPassToModel::socket_path_and_query`.
+`ProxyPassToModel::get_path_and_query` is what `mcp_path` and the pool key read,
+and `Display` writes `proxy_pass_to` back as it was written.
+
+A bare path (`/...`, `~/...`) is a unix socket for an `mcp` / `mcp-h2` location
+as `unix+http://` is (`upstream_scheme`): `create_data_source` takes the uds
+pools for it, the h1 pipeline dials it as `UpstreamInner::Http1UnixSocket`, and
+the pool GC keeps its pool. `~/` is the home directory on both paths.
 
 ## The pool key: for MCP the path is part of the identity
 

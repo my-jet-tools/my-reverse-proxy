@@ -1282,6 +1282,11 @@ Used for http/1.1 connections through a Unix domain socket.
 Unix socket path must start with `/` or `~`. A leading `~/` is expanded to
 `$HOME/…` at connect time, so configs are portable across users.
 
+A path may follow the socket file after a `:` - `/var/run/myapp.sock:/api`. A
+`unix+http` location sends the client's own path on, as an `http` location does
+with the path of `http://host:8000/api`, so the path matters to an `mcp` /
+`mcp-h2` location only (see [Mcp / Mcp-h2](#mcp--mcp-h2)).
+
 ```yaml
 localhost:8001:
     endpoint:
@@ -1346,6 +1351,33 @@ mcp2.domain.com:443:
       type: mcp-h2
       proxy_pass_to: http://service-c:8000/mcp
 ```
+
+An MCP server on a unix socket of this host is written as its socket file, then
+after a `:` the path the requests go to - the form FlUrl and the certificate
+sources read:
+
+```yaml
+    locations:
+    - path: /service-d
+      type: mcp
+      proxy_pass_to: /root/unix-sockets/service-d.sock:/mcp
+
+    - path: /service-e
+      type: mcp-h2
+      proxy_pass_to: ~/unix-sockets/service-e.sock:/mcp   # ~/ is the home directory
+```
+
+- Everything after the first `:` that follows the socket file is the path, with
+  its query if there is one, and it starts with `/`. Without a path the
+  requests go to `/`, as they do for `http://host:8000`.
+- `http+unix:///var/run/service.sock:/mcp` is read the same way, and so are
+  `unix+http://` and `unix://`.
+- The `type` has to be written: a location without one whose `proxy_pass_to`
+  is a path is a folder of files, and a socket file with a path after it is
+  refused at load time, with a message which says to add the type.
+- The socket is a file of this host: a path after a socket behind `gateway:` or
+  `ssh:` is refused at load time, and so is a unix socket under an endpoint of
+  `type: mcp` (a byte bridge to a tcp `host:port`).
 
 An MCP location differs from a plain `http` / `http2` location in exactly three
 ways:
@@ -3310,7 +3342,8 @@ Unix sockets:
 
 - listening on a unix socket (a `hosts:` key that is a path);
 - `unix+http` and `unix+http2` locations;
-- `unix+http://`, `http+unix://` and `unix://` upstreams;
+- `unix+http://`, `http+unix://` and `unix://` upstreams, and the bare path of a socket file as the upstream of
+  another type (`type: mcp` with `/var/run/app.sock:/mcp`);
 - a gateway target on a unix socket.
 
 Such an endpoint is refused when the settings load, with `unix sockets are not supported on this platform`. It is

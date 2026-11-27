@@ -181,8 +181,10 @@ impl NetworkStream for tokio::net::UnixStream {
         remote_endpoint: &Arc<RemoteEndpointOwned>,
         timeout: Duration,
     ) -> Result<Self, NetworkError> {
-        let host_port = remote_endpoint.get_host_port();
-        let connect = tokio::net::UnixStream::connect(host_port.as_str());
+        // `~/sockets/app.sock` is in the home directory, as `UnixSocketHttpConnector` reads it.
+        let socket_path = crate::settings::expand_home(remote_endpoint.get_host_port().as_str())
+            .map_err(NetworkError::Other)?;
+        let connect = tokio::net::UnixStream::connect(socket_path.as_str());
         let Ok(result) = tokio::time::timeout(timeout, connect).await else {
             return Err(NetworkError::Timeout(timeout));
         };

@@ -160,6 +160,21 @@ pub async fn compile_http_configuration(
             ));
         }
 
+        // A `type: mcp` endpoint relays the bytes of a connection to a tcp `host:port`, and has no
+        // way to a unix socket: every connection would fail. Said at config time.
+        if matches!(http_type, ListenHttpEndpointType::Mcp)
+            && sends_to_a_unix_socket(&proxy_pass_to.proxy_pass_to)
+        {
+            return Err(format!(
+                "Endpoint '{}' is 'type: {}', a byte bridge to a tcp host:port, but its location \
+                 '{}' sends to a unix socket. Move the location to an endpoint of 'type: http' / \
+                 'type: https'",
+                listen_host,
+                http_type.as_str(),
+                proxy_pass_to.path,
+            ));
+        }
+
         // Where the request path is not what goes on, `strip_path` has nothing to cut. Refused
         // rather than ignored: the operator expects the upstream to see another path.
         if proxy_pass_to.strip_path {
@@ -263,6 +278,30 @@ pub async fn compile_http_configuration(
     });
 
     Ok(http_endpoint_info)
+}
+
+/// Whether a location sends to a unix socket of this host: `unix+http` / `unix+http2`, or a socket
+/// upstream of another type - an `mcp` location to `/var/run/app.sock:/mcp`.
+fn sends_to_a_unix_socket(proxy_pass_to: &crate::configurations::ProxyPassToConfig) -> bool {
+    use crate::configurations::{MyReverseProxyRemoteEndpoint, ProxyPassToConfig};
+
+    let model = match proxy_pass_to {
+        #[cfg(unix)]
+        ProxyPassToConfig::UnixHttp1(_) | ProxyPassToConfig::UnixHttp2(_) => return true,
+        ProxyPassToConfig::Http1(model)
+        | ProxyPassToConfig::Http2(model)
+        | ProxyPassToConfig::McpHttp1(model)
+        | ProxyPassToConfig::McpHttp2(model) => model,
+        _ => return false,
+    };
+
+    match &model.remote_host {
+        MyReverseProxyRemoteEndpoint::Direct { remote_host } => matches!(
+            crate::configurations::upstream_scheme(remote_host),
+            Some(rust_extensions::remote_endpoint::Scheme::UnixSocket)
+        ),
+        _ => false,
+    }
 }
 
 /// Why a location with `strip_path` can not have it, if it can not: the request path is not
@@ -444,6 +483,164 @@ mod tests {
             panic!("an mcp-h2 location under a byte bridge is accepted");
         };
         assert!(err.contains("requires an http/2 upstream"), "{err}");
+    }
+
+    /// `<socket file>:<path>` - an MCP server on a unix socket of this host: the location sends
+    /// every request to the path after the socket file, and shows `proxy_pass_to` as written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_mcp_location_takes_the_path_after_its_socket_file() {
+        let upstreams = [
+            ("mcp", "/var/run/a.sock:/mcp", "/mcp"),
+            (
+                "mcp-h2",
+                "~/sockets/b.sock:/api/mcp?tenant=1",
+                "/api/mcp?tenant=1",
+            ),
+            ("mcp", "http+unix:///var/run/c.sock:/mcp", "/mcp"),
+            // No path: the requests go to `/`, as to `http://host:8000`.
+            ("mcp", "/var/run/d.sock", "/"),
+        ];
+
+        let locations: String = upstreams
+            .iter()
+            .enumerate()
+            .map(|(index, (location_type, proxy_pass_to, _))| {
+                format!(
+                    "- path: /service-{index}\n  type: {location_type}\n  proxy_pass_to: '{proxy_pass_to}'\n"
+                )
+            })
+            .collect();
+
+        for endpoint_type in ["http", "http2"] {
+            let endpoint_info = compile_locations(endpoint_type, &locations)
+                .await
+                .unwrap_or_else(|err| panic!("{endpoint_type}: {err}"));
+
+            for (location, (_, proxy_pass_to, path)) in
+                endpoint_info.locations.iter().zip(upstreams)
+            {
+                assert_eq!(
+                    crate::h1_remote_connection::mcp_path(&location.proxy_pass_to),
+                    Some(path)
+                );
+                assert_eq!(location.proxy_pass_to.to_string(), proxy_pass_to);
+                assert!(
+                    sends_to_a_unix_socket(&location.proxy_pass_to),
+                    "{proxy_pass_to}"
+                );
+            }
+        }
+    }
+
+    /// For a location which sends the client's own path on, the path after the socket file is
+    /// what the path of `http://host:8000/path` is to it: not used. The socket is the file alone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_unix_http_location_takes_a_path_after_its_socket_file() {
+        let endpoint_info = compile_locations(
+            "http",
+            "- path: /\n  type: unix+http\n  proxy_pass_to: '/var/run/app.sock:/api'\n",
+        )
+        .await
+        .unwrap();
+
+        let crate::configurations::ProxyPassToConfig::UnixHttp1(model) =
+            &endpoint_info.locations[0].proxy_pass_to
+        else {
+            panic!("not a unix+http location");
+        };
+
+        assert_eq!(model.remote_host.to_string(), "/var/run/app.sock");
+        assert_eq!(model.get_path_and_query(), "/api");
+    }
+
+    #[tokio::test]
+    async fn a_path_after_a_socket_file_which_can_not_be_taken_is_refused() {
+        for (location, expected) in [
+            (
+                "type: mcp\n  proxy_pass_to: '/var/run/app.sock:mcp'",
+                "has to start with '/'",
+            ),
+            (
+                "type: mcp\n  proxy_pass_to: '/var/run/app.sock:/m cp'",
+                "is not a path of a request",
+            ),
+            // A socket file through a gateway is the peer's: there is no MCP that way anyway.
+            (
+                "type: mcp\n  proxy_pass_to: 'gateway:gw->/var/run/app.sock:/mcp'",
+                "a unix socket of this host only",
+            ),
+            (
+                "type: http\n  proxy_pass_to: 'ssh:user@10.0.0.1:22->/var/run/app.sock:/api'",
+                "a unix socket of this host only",
+            ),
+            // Without a type the location would be a folder of files.
+            (
+                "proxy_pass_to: '/var/run/app.sock:/mcp'",
+                "give the location its type",
+            ),
+        ] {
+            let Err(err) =
+                compile_locations("http", &format!("- path: /mcp\n  {location}\n")).await
+            else {
+                panic!("accepted: {location}");
+            };
+
+            assert!(err.contains(expected), "{location}: {err}");
+            assert!(err.contains("location '/mcp'"), "{location}: {err}");
+        }
+    }
+
+    /// A byte bridge connects to a tcp `host:port` only.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_unix_socket_is_refused_under_a_byte_bridge() {
+        for location in [
+            "type: mcp\n  proxy_pass_to: '/var/run/app.sock:/mcp'",
+            "type: http\n  proxy_pass_to: 'unix+http:///var/run/app.sock'",
+            "type: unix+http\n  proxy_pass_to: '/var/run/app.sock'",
+        ] {
+            let Err(err) = compile_locations("mcp", &format!("- path: /\n  {location}\n")).await
+            else {
+                panic!("accepted under a byte bridge: {location}");
+            };
+
+            assert!(err.contains("sends to a unix socket"), "{location}: {err}");
+        }
+
+        compile_locations(
+            "mcp",
+            "- path: /\n  type: mcp\n  proxy_pass_to: 'http://127.0.0.1:8000/mcp'\n",
+        )
+        .await
+        .unwrap();
+    }
+
+    /// There are no unix sockets on Windows: a socket file is refused by the location, with a path
+    /// after it or without one, written as a url or as a bare path.
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn a_socket_file_is_refused_where_there_are_no_unix_sockets() {
+        for proxy_pass_to in [
+            "/var/run/app.sock:/mcp",
+            "/var/run/app.sock",
+            "unix+http:///var/run/app.sock:/mcp",
+        ] {
+            let Err(err) = compile_locations(
+                "http",
+                &format!("- path: /mcp\n  type: mcp\n  proxy_pass_to: '{proxy_pass_to}'\n"),
+            )
+            .await
+            else {
+                panic!("accepted: {proxy_pass_to}");
+            };
+
+            assert!(
+                err.contains(crate::consts::UNIX_SOCKETS_NOT_SUPPORTED),
+                "{proxy_pass_to}: {err}"
+            );
+        }
     }
 
     /// `locations`: the `locations:` list as a settings file writes it.

@@ -273,6 +273,9 @@ Plain HTTP/1 reverse proxy. Sub-cases by `remote_host`:
 - `Direct { remote_host: https://... }` →
   `UpstreamInner::Https1Direct` (TLS-wrapped TCP). Uses
   `domain_name` for SNI if configured, else the URL host.
+- `Direct { remote_host: unix+http://... }`, or the bare path of a socket
+  file (`upstream_scheme`, `src/configurations/unix_socket_upstream.rs`) →
+  `UpstreamInner::Http1UnixSocket`, as for `UnixHttp1`.
 - `OverSsh { ssh_credentials, remote_host }` →
   `UpstreamInner::Http1OverSsh` (HTTP/1 over an SSH tunnel; see
   `docs/gateway-protocol.md` for unrelated gateway concept).
@@ -290,8 +293,8 @@ and streams it to the client-writer task as `ResponseEvent`s.
 
 ### `McpHttp1(ProxyPassToModel)`
 
-Same wire transports as `Http1` (Direct/OverSsh, http or https; MCP
-through a gateway is refused at load time,
+Same wire transports as `Http1` (Direct/OverSsh, http, https or a unix
+socket; MCP through a gateway is refused at load time,
 `src/scripts/compile_http_configuration.rs:122-132`), with three
 differences (`ProxyPassToConfig::is_mcp`):
 
@@ -306,8 +309,12 @@ differences (`ProxyPassToConfig::is_mcp`):
 
 The path-and-query comes from the config, per request:
 `mcp_path(&proxy_pass_to)` (`src/h1_remote_connection/upstream_state.rs:5`)
-is passed to `H1Reader::compile_headers` by the reader. See `docs/mcp.md`
-for the full rationale.
+is passed to `H1Reader::compile_headers` by the reader. It is
+`ProxyPassToModel::get_path_and_query`: the path of the url, or, for a unix
+socket written as `<socket file>:<path>` (`/var/run/app.sock:/mcp`), the
+path after the socket file, which the location keeps apart from
+`remote_host` (`socket_path_and_query`). See `docs/mcp.md` for the full
+rationale.
 
 ### `Http2(ProxyPassToModel)`
 
@@ -328,7 +335,10 @@ load time under an `http`, `https` or `mcp` endpoint
 ### `UnixHttp1(ProxyPassToModel)`
 
 HTTP/1 over a unix domain socket. `Direct { remote_host }` connects to
-the socket (`UpstreamInner::Http1UnixSocket`). `Gateway` is an ordinary
+the socket (`UpstreamInner::Http1UnixSocket`), a leading `~/` in the home
+directory. A path written after the socket file (`/var/run/app.sock:/api`)
+is split off when the location compiles and, as the path of an `http://`
+url for `Http1`, not used. `Gateway` is an ordinary
 gateway upstream (`UpstreamInner::Http1OverGateway`): the peer connects
 to the socket path itself. `OverSsh` is not supported: `connect_owned`
 returns an error for it (`src/h1_remote_connection/upstream.rs:191-193`),
@@ -351,7 +361,8 @@ settings refuses each unix socket with `unix sockets are not supported on
 this platform`: a `hosts:` key which is a socket path
 (`src/scripts/compile_host_configuration.rs`), a location of `type:
 unix+http` / `unix+http2` - written or read from `proxy_pass_to` - and a
-`unix+http://`, `http+unix://` or `unix://` upstream of any other type
+`unix+http://`, `http+unix://` or `unix://` upstream, or the bare path of a
+socket file, of any other type
 (`src/scripts/compile_location_proxy_pass_to.rs`), and a `type: tcp`
 endpoint to one (`src/configurations/tcp_endpoint_host_config.rs`). A
 socket path behind a gateway is refused as well, although it is the peer

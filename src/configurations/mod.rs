@@ -49,6 +49,8 @@ mod my_reverse_proxy_remote_endpoint;
 pub use my_reverse_proxy_remote_endpoint::*;
 mod drive_path_with_backslashes;
 pub use drive_path_with_backslashes::*;
+mod unix_socket_upstream;
+pub use unix_socket_upstream::*;
 mod modify_headers_config;
 pub use modify_headers_config::*;
 mod proxy_pass_to_config;

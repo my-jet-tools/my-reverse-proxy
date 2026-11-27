@@ -59,23 +59,17 @@ impl MyReverseProxyRemoteEndpoint {
         }
     }
     /// Whether the upstream is a unix socket: a `unix+http://`, `http+unix://` or `unix://` URL,
-    /// or - through a gateway, whose far side connects to a socket path it is given - the bare
-    /// path of a socket file.
+    /// or the bare path of a socket file - direct, or through a gateway, whose far side connects
+    /// to a socket path it is given.
     #[cfg(not(unix))]
     pub fn is_unix_socket(&self) -> bool {
-        let is_unix_socket_url = |remote_host: &RemoteEndpointOwned| {
-            matches!(
-                remote_host.get_scheme(),
-                Some(rust_extensions::remote_endpoint::Scheme::UnixSocket)
-            )
-        };
-
         match self {
-            MyReverseProxyRemoteEndpoint::Gateway { remote_host, .. } => {
-                is_unix_socket_url(remote_host) || remote_host.as_str().starts_with('/')
-            }
+            MyReverseProxyRemoteEndpoint::Gateway { remote_host, .. }
+            | MyReverseProxyRemoteEndpoint::Direct { remote_host } => matches!(
+                super::upstream_scheme(remote_host),
+                Some(rust_extensions::remote_endpoint::Scheme::UnixSocket)
+            ),
             MyReverseProxyRemoteEndpoint::OverSsh { .. } => false,
-            MyReverseProxyRemoteEndpoint::Direct { remote_host } => is_unix_socket_url(remote_host),
         }
     }
 

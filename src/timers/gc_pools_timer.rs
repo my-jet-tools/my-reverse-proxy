@@ -107,7 +107,9 @@ fn absorb_location(location: &ProxyPassLocationConfig, out: &mut DesiredKeys) {
         return;
     };
 
-    let Some(scheme) = remote_host.get_scheme() else {
+    // An `mcp` / `http` location may have a unix socket too: `create_data_source` takes a bare
+    // socket path for one, and so must this, or its pool is drained on the next tick.
+    let Some(scheme) = crate::configurations::upstream_scheme(remote_host) else {
         return;
     };
 

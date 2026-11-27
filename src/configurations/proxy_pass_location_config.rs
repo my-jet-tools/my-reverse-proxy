@@ -175,16 +175,15 @@ impl ProxyPassLocationConfig {
                         HttpProxyPassContentSource::Http1OverSsh(model)
                     }
                     MyReverseProxyRemoteEndpoint::Direct { remote_host } => {
-                        let remote_endpoint_scheme = remote_host.get_scheme();
-
-                        if remote_endpoint_scheme.is_none() {
+                        // A bare socket path is a unix socket: see `upstream_scheme`.
+                        let Some(remote_endpoint_scheme) = upstream_scheme(remote_host) else {
                             panic!(
                                 "Scheme is not set for remote resource {}",
                                 remote_host.as_str()
                             );
-                        }
+                        };
 
-                        match remote_endpoint_scheme.as_ref().unwrap() {
+                        match remote_endpoint_scheme {
                             rust_extensions::remote_endpoint::Scheme::Http => {
                                 let (pool_desc, pool_params, factory) = make_tcp_h1_pool_factory(
                                     remote_host,
@@ -317,16 +316,15 @@ impl ProxyPassLocationConfig {
                         return HttpProxyPassContentSource::Http2OverSsh(model);
                     }
                     MyReverseProxyRemoteEndpoint::Direct { remote_host } => {
-                        let remote_endpoint_scheme = remote_host.get_scheme();
-
-                        if remote_endpoint_scheme.is_none() {
+                        // A bare socket path is a unix socket: see `upstream_scheme`.
+                        let Some(remote_endpoint_scheme) = upstream_scheme(remote_host) else {
                             panic!(
                                 "Scheme is not set for remote resource {}",
                                 remote_host.as_str()
                             );
-                        }
+                        };
 
-                        match remote_endpoint_scheme.as_ref().unwrap() {
+                        match remote_endpoint_scheme {
                             rust_extensions::remote_endpoint::Scheme::Http => {
                                 let (pool_desc, pool_params, factory) = make_tcp_h2_pool_factory(
                                     remote_host,

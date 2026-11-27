@@ -735,6 +735,7 @@ async fn read_and_dispatch<ReadPart: NetworkStreamReadPart + Send + Sync + 'stat
                 remote_host: MyReverseProxyRemoteEndpoint::Direct {
                     remote_host: Arc::new(endpoint),
                 },
+                socket_path_and_query: None,
                 server_name: None,
                 request_timeout: config.request_timeout,
                 connect_timeout: config.connect_timeout,

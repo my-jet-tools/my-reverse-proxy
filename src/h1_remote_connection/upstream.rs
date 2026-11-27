@@ -136,6 +136,28 @@ impl Upstream {
                             );
                         }
                     }
+                    // A unix socket upstream of an `mcp` or an `http` location - a
+                    // `unix+http://` url, or the bare path of the socket file.
+                    #[cfg(unix)]
+                    if matches!(
+                        upstream_scheme(remote_host),
+                        Some(rust_extensions::remote_endpoint::Scheme::UnixSocket)
+                    ) {
+                        let (result, read_part, ssh_handler) =
+                            Http1ConnectionInner::connect::<
+                                tokio::io::ReadHalf<tokio::net::UnixStream>,
+                                tokio::net::UnixStream,
+                            >(
+                                None, None, None, remote_host, proxy_pass_to.connect_timeout
+                            )
+                            .await?;
+                        owned!(
+                            UpstreamInner::Http1UnixSocket(result),
+                            result,
+                            read_part,
+                            ssh_handler
+                        );
+                    }
                     let (result, read_part, ssh_handler) =
                         Http1ConnectionInner::connect::<
                             tokio::io::ReadHalf<tokio::net::TcpStream>,

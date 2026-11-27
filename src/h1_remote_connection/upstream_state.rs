@@ -5,7 +5,7 @@ use crate::configurations::{MyReverseProxyRemoteEndpoint, ProxyPassToConfig, Pro
 pub fn mcp_path(proxy_pass_to: &ProxyPassToConfig) -> Option<&str> {
     match proxy_pass_to {
         ProxyPassToConfig::McpHttp1(model) | ProxyPassToConfig::McpHttp2(model) => {
-            Some(model.remote_host.get_path_and_query())
+            Some(model.get_path_and_query())
         }
         _ => None,
     }
@@ -39,7 +39,7 @@ fn mcp_key(protocol: &str, model: &ProxyPassToModel) -> String {
     format!(
         "{}|{}",
         remote_host_key(protocol, model),
-        model.remote_host.get_path_and_query()
+        model.get_path_and_query()
     )
 }
 
@@ -84,6 +84,7 @@ mod tests {
             remote_host: MyReverseProxyRemoteEndpoint::Direct {
                 remote_host: Arc::new(RemoteEndpointOwned::try_parse(url.to_string()).unwrap()),
             },
+            socket_path_and_query: None,
             server_name: None,
             request_timeout: std::time::Duration::from_secs(1),
             connect_timeout: std::time::Duration::from_secs(1),
@@ -105,6 +106,24 @@ mod tests {
         )));
 
         assert_ne!(a, b);
+    }
+
+    /// The same for MCP servers behind one unix socket: `/var/run/app.sock:/mcp-a` and
+    /// `/var/run/app.sock:/mcp-b` - and the path is what the requests go to.
+    #[test]
+    fn mcp_locations_on_one_socket_differing_by_path_are_different_upstreams() {
+        let on_socket = |path: &str| {
+            let mut model = model("/var/run/app.sock");
+            model.socket_path_and_query = Some(path.to_string());
+            ProxyPassToConfig::McpHttp1(model)
+        };
+
+        let (a, b) = (on_socket("/mcp-a"), on_socket("/mcp-b"));
+
+        assert_eq!(mcp_path(&a), Some("/mcp-a"));
+        assert_eq!(mcp_path(&b), Some("/mcp-b"));
+        assert_ne!(connection_key(&a), connection_key(&b));
+        assert_eq!(a.to_string(), "/var/run/app.sock:/mcp-a");
     }
 
     /// `domain_name` of a location is the name the TLS connection is opened for: two

@@ -35,12 +35,40 @@ impl std::fmt::Display for ProxyPassFilesPathModel {
 #[derive(Debug, Clone)]
 pub struct ProxyPassToModel {
     pub remote_host: MyReverseProxyRemoteEndpoint,
+    /// The path a unix socket of this host is written with after its socket file -
+    /// `/var/run/app.sock:/mcp`, see [`super::split_unix_socket_path`]. `remote_host` is the
+    /// socket alone then. Any other upstream has its path in `remote_host`.
+    pub socket_path_and_query: Option<String>,
     /// `domain_name` of the location: the name an https upstream is asked for, when it is
     /// not the host of `proxy_pass_to`.
     pub server_name: Option<String>,
     pub request_timeout: Duration,
     pub connect_timeout: Duration,
     pub pool_tuning: super::PoolTuning,
+}
+
+impl ProxyPassToModel {
+    /// The path and the query of `proxy_pass_to` - `/` when it has none. An MCP location sends
+    /// every request to it.
+    pub fn get_path_and_query(&self) -> &str {
+        match self.socket_path_and_query.as_deref() {
+            Some(path_and_query) => path_and_query,
+            None => self.remote_host.get_path_and_query(),
+        }
+    }
+}
+
+/// `proxy_pass_to` as it was written.
+impl std::fmt::Display for ProxyPassToModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.remote_host)?;
+
+        if let Some(path_and_query) = self.socket_path_and_query.as_deref() {
+            write!(f, ":{path_and_query}")?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,11 +105,11 @@ impl std::fmt::Display for ProxyPassToConfig {
             ProxyPassToConfig::Http1(proxy_pass)
             | ProxyPassToConfig::McpHttp1(proxy_pass)
             | ProxyPassToConfig::McpHttp2(proxy_pass)
-            | ProxyPassToConfig::Http2(proxy_pass) => write!(f, "{}", proxy_pass.remote_host),
+            | ProxyPassToConfig::Http2(proxy_pass) => write!(f, "{proxy_pass}"),
             // An arm of its own: a cfg can not be put on one alternative of a pattern.
             #[cfg(unix)]
             ProxyPassToConfig::UnixHttp1(proxy_pass) | ProxyPassToConfig::UnixHttp2(proxy_pass) => {
-                write!(f, "{}", proxy_pass.remote_host)
+                write!(f, "{proxy_pass}")
             }
 
             ProxyPassToConfig::FilesPath(model) => write!(f, "{}", model),

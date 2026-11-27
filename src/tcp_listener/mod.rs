@@ -56,3 +56,6 @@ mod h1_to_h2_upstream_tests;
 
 #[cfg(test)]
 mod plain_http_tests;
+
+#[cfg(all(test, unix))]
+mod unix_socket_mcp_tests;
